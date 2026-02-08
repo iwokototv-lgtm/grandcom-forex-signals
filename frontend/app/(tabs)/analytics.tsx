@@ -152,7 +152,6 @@ export default function AnalyticsScreen() {
           <View style={styles.indicatorCard}>
             <View style={styles.indicatorHeader}>
               <Ionicons name="speedometer" size={24} color="#2196F3" />
-            </View>
               <Text style={styles.indicatorTitle}>Average Performance</Text>
             </View>
             <View style={styles.indicatorBar}>
