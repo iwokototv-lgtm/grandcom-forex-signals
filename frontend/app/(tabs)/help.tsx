@@ -20,13 +20,13 @@ export default function HelpScreen() {
   };
 
   const handleTelegram = () => {
-    Linking.openURL('https://t.me/agbaakin_bot');
+    Linking.openURL('https://t.me/agbaakinlove');
   };
 
   const handleWhatsApp = () => {
-    Alert.alert('WhatsApp Support', 'Contact us at: +1234567890\n\nOpening WhatsApp...', [
+    Alert.alert('WhatsApp Support', 'Contact us at: +44 7932 543920\n\nOpening WhatsApp...', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Open', onPress: () => Linking.openURL('https://wa.me/1234567890') },
+      { text: 'Open', onPress: () => Linking.openURL('https://wa.me/447932543920') },
     ]);
   };
 
