@@ -288,6 +288,20 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         import json
         ai_data = json.loads(response)
         
+        # Parse risk_reward if it's in ratio format (e.g., "1:2.5" → 2.5)
+        risk_reward = ai_data.get("risk_reward", 2.5)
+        if isinstance(risk_reward, str) and ":" in risk_reward:
+            parts = risk_reward.split(":")
+            if len(parts) == 2:
+                try:
+                    risk_reward = float(parts[1])
+                except:
+                    risk_reward = 2.5
+        elif not isinstance(risk_reward, (int, float)):
+            risk_reward = 2.5
+        
+        ai_data["risk_reward"] = risk_reward
+        
         return ai_data
     except Exception as e:
         logger.error(f"Error generating AI analysis: {e}")
