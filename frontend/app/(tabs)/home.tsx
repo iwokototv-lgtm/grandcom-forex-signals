@@ -314,6 +314,12 @@ const styles = StyleSheet.create({
   confidenceValue: {
     color: '#FFD700',
   },
+  tpValue: {
+    color: '#4CAF50',
+  },
+  slValue: {
+    color: '#F44336',
+  },
   emptyState: {
     alignItems: 'center',
     padding: 48,
