@@ -318,7 +318,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             sl_price=ai_analysis["sl_price"],
             confidence=ai_analysis["confidence"],
             analysis=ai_analysis["analysis"],
-            timeframe="15min",
+            timeframe="1H",
             risk_reward=ai_analysis["risk_reward"],
             is_premium=ai_analysis["confidence"] > 75  # High confidence signals are premium
         )
