@@ -186,9 +186,15 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
                 df["datetime"] = pd.to_datetime(df["datetime"])
                 df = df.sort_values("datetime")
                 
-                # Convert to numeric
-                for col in ["open", "high", "low", "close", "volume"]:
+                # Convert to numeric (volume might not exist for some pairs)
+                for col in ["open", "high", "low", "close"]:
                     df[col] = pd.to_numeric(df[col])
+                
+                # Volume might not be available for all symbols
+                if "volume" in df.columns:
+                    df["volume"] = pd.to_numeric(df["volume"])
+                else:
+                    df["volume"] = 0
                 
                 return df
     except Exception as e:
