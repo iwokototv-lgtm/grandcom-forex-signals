@@ -345,8 +345,6 @@ async def seed_signals():
             "created_at": datetime.utcnow() - timedelta(hours=40 + i)
         })
     
-    ]
-    
     # Clear existing signals
     await db.signals.delete_many({})
     
