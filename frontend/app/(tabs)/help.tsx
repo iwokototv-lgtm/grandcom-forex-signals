@@ -62,8 +62,8 @@ export default function HelpScreen() {
               <Ionicons name="logo-telegram" size={24} color="#0088cc" />
             </View>
             <View style={styles.contactInfo}>
-              <Text style={styles.contactTitle}>Telegram Support</Text>
-              <Text style={styles.contactDetail}>@agbaakin_bot</Text>
+              <Text style={styles.contactTitle}>Telegram Channel</Text>
+              <Text style={styles.contactDetail}>@agbaakinlove</Text>
             </View>
             <Ionicons name="chevron-forward" size={24} color="#8B8FA8" />
           </TouchableOpacity>
