@@ -325,6 +325,18 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         if ai_analysis is None or ai_analysis.get("signal") == "NEUTRAL":
             return None
         
+        # Parse risk_reward if it's in ratio format
+        risk_reward = ai_analysis.get("risk_reward", 2.5)
+        if isinstance(risk_reward, str) and ":" in risk_reward:
+            parts = risk_reward.split(":")
+            if len(parts) == 2:
+                try:
+                    risk_reward = float(parts[1])
+                except:
+                    risk_reward = 2.5
+        elif not isinstance(risk_reward, (int, float)):
+            risk_reward = 2.5
+        
         # Create signal
         signal = Signal(
             pair=pair,
@@ -336,7 +348,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             confidence=ai_analysis["confidence"],
             analysis=ai_analysis["analysis"],
             timeframe="1H",
-            risk_reward=ai_analysis["risk_reward"],
+            risk_reward=risk_reward,
             is_premium=ai_analysis["confidence"] > 75  # High confidence signals are premium
         )
         
