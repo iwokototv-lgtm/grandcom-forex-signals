@@ -298,6 +298,55 @@ async def seed_signals():
         }
     ]
     
+    # Add 39 more winning signals to reach 98% win rate (49 wins out of 50)
+    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
+    signal_types = ["BUY", "SELL"]
+    
+    for i in range(39):
+        pair = pairs[i % len(pairs)]
+        signal_type = signal_types[i % 2]
+        
+        # Generate realistic values
+        if pair == "XAUUSD":
+            entry = 2000.00 + (i * 5)
+            pips = 100 + (i * 10)
+        elif pair == "EURUSD":
+            entry = 1.0750 + (i * 0.001)
+            pips = 50 + (i * 5)
+        elif pair == "GBPUSD":
+            entry = 1.2500 + (i * 0.001)
+            pips = 60 + (i * 5)
+        elif pair == "USDJPY":
+            entry = 145.00 + (i * 0.5)
+            pips = 80 + (i * 8)
+        elif pair == "AUDUSD":
+            entry = 0.6400 + (i * 0.001)
+            pips = 40 + (i * 3)
+        else:  # USDCAD
+            entry = 1.3400 + (i * 0.001)
+            pips = 70 + (i * 5)
+        
+        signals.append({
+            "pair": pair,
+            "type": signal_type,
+            "entry_price": entry,
+            "current_price": None,
+            "tp_levels": [entry + 0.01, entry + 0.02, entry + 0.03] if signal_type == "BUY" else [entry - 0.01, entry - 0.02, entry - 0.03],
+            "sl_price": entry - 0.005 if signal_type == "BUY" else entry + 0.005,
+            "confidence": 90.0 + (i % 8),
+            "analysis": f"Perfect {signal_type} setup with strong technical and fundamental alignment. Multiple confirmations across timeframes.",
+            "timeframe": "4H",
+            "risk_reward": 2.5 + (i % 10) * 0.1,
+            "status": "HIT_TP",
+            "result": "WIN",
+            "pips": pips,
+            "is_premium": True,
+            "closed_at": datetime.utcnow() - timedelta(hours=35 + i),
+            "created_at": datetime.utcnow() - timedelta(hours=40 + i)
+        })
+    
+    ]
+    
     # Clear existing signals
     await db.signals.delete_many({})
     
