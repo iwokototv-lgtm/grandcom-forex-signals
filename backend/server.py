@@ -287,8 +287,8 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
     """Generate a complete trading signal for a pair"""
     try:
-        # Get price data
-        df = await get_price_data(pair, interval="15min", outputsize=100)
+        # Get price data - 1H timeframe
+        df = await get_price_data(pair, interval="1h", outputsize=100)
         if df is None or len(df) < 50:
             return None
         
