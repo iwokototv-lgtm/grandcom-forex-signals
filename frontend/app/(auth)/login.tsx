@@ -49,7 +49,7 @@ export default function LoginScreen() {
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.header}>
             <Ionicons name="trending-up" size={60} color="#FFD700" />
-            <Text style={styles.title}>Forex Signals Pro</Text>
+            <Text style={styles.title}>Grandcom Forex Signals Pro</Text>
             <Text style={styles.subtitle}>Trade smarter with AI-powered signals</Text>
           </View>
 
