@@ -103,10 +103,10 @@ export default function HelpScreen() {
           <View style={styles.faqCard}>
             <Text style={styles.faqQuestion}>How do I connect my Telegram?</Text>
             <Text style={styles.faqAnswer}>
-              1. Open Telegram and search for @agbaakin_bot{"\n"}
-              2. Send /start command{"\n"}
-              3. Bot will send you your Telegram ID{"\n"}
-              4. Enter that ID in Profile → Connect Telegram
+              1. Open Telegram and join our channel: @agbaakinlove{"\n"}
+              2. Get daily signals and updates{"\n"}
+              3. Interact with our trading community{"\n"}
+              4. For support, message us directly on the channel
             </Text>
           </View>
 
