@@ -154,9 +154,21 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def get_price_data(symbol: str, interval: str = "15min", outputsize: int = 100) -> pd.DataFrame:
     """Fetch price data from Twelve Data API"""
     try:
+        # Convert broker symbols to Twelve Data format
+        symbol_map = {
+            "XAUUSD": "XAU/USD",
+            "EURUSD": "EUR/USD",
+            "GBPUSD": "GBP/USD",
+            "USDJPY": "USD/JPY",
+            "AUDUSD": "AUD/USD",
+            "USDCAD": "USD/CAD"
+        }
+        
+        api_symbol = symbol_map.get(symbol, symbol)
+        
         url = f"https://api.twelvedata.com/time_series"
         params = {
-            "symbol": symbol,
+            "symbol": api_symbol,
             "interval": interval,
             "apikey": TWELVE_DATA_API_KEY,
             "outputsize": outputsize
@@ -167,7 +179,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
                 data = await response.json()
                 
                 if "values" not in data:
-                    logger.error(f"Error fetching price data: {data}")
+                    logger.error(f"Error fetching price data for {symbol} ({api_symbol}): {data}")
                     return None
                 
                 df = pd.DataFrame(data["values"])
@@ -180,7 +192,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
                 
                 return df
     except Exception as e:
-        logger.error(f"Error fetching price data: {e}")
+        logger.error(f"Error fetching price data for {symbol}: {e}")
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
