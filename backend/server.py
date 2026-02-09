@@ -268,12 +268,15 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         
         Provide a JSON response with:
         1. signal: "BUY", "SELL", or "NEUTRAL"
-        2. confidence: 0-100
-        3. entry_price: suggested entry price
-        4. tp_levels: array of 3 take profit levels
-        5. sl_price: stop loss price
+        2. confidence: numeric value 0-100 (e.g., 85.5)
+        3. entry_price: numeric suggested entry price
+        4. tp_levels: array of exactly 3 numeric take profit levels
+        5. sl_price: numeric stop loss price
         6. analysis: brief explanation (max 200 words)
-        7. risk_reward: risk to reward ratio
+        7. risk_reward: NUMERIC ONLY (e.g., 2.5, not "1:2.5")
+        
+        CRITICAL: All numeric fields must be numbers, not strings or ratios.
+        Example risk_reward: 2.5 (correct), not "1:2.5" (wrong)
         
         Only respond with valid JSON, no other text.
         """
