@@ -141,23 +141,33 @@ export default function HomeScreen() {
                 <View style={styles.signalDetails}>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>Entry</Text>
-                    <Text style={styles.detailValue}>{signal.entry_price.toFixed(2)}</Text>
+                    <Text style={styles.detailValue}>
+                      {signal.pair === 'XAUUSD' ? signal.entry_price.toFixed(2) : signal.entry_price.toFixed(4)}
+                    </Text>
                   </View>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>TP1</Text>
-                    <Text style={[styles.detailValue, styles.tpValue]}>{signal.tp_levels[0].toFixed(2)}</Text>
+                    <Text style={[styles.detailValue, styles.tpValue]}>
+                      {signal.pair === 'XAUUSD' ? signal.tp_levels[0].toFixed(2) : signal.tp_levels[0].toFixed(4)}
+                    </Text>
                   </View>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>TP2</Text>
-                    <Text style={[styles.detailValue, styles.tpValue]}>{signal.tp_levels[1].toFixed(2)}</Text>
+                    <Text style={[styles.detailValue, styles.tpValue]}>
+                      {signal.pair === 'XAUUSD' ? signal.tp_levels[1].toFixed(2) : signal.tp_levels[1].toFixed(4)}
+                    </Text>
                   </View>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>TP3</Text>
-                    <Text style={[styles.detailValue, styles.tpValue]}>{signal.tp_levels[2].toFixed(2)}</Text>
+                    <Text style={[styles.detailValue, styles.tpValue]}>
+                      {signal.pair === 'XAUUSD' ? signal.tp_levels[2].toFixed(2) : signal.tp_levels[2].toFixed(4)}
+                    </Text>
                   </View>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>SL</Text>
-                    <Text style={[styles.detailValue, styles.slValue]}>{signal.sl_price.toFixed(2)}</Text>
+                    <Text style={[styles.detailValue, styles.slValue]}>
+                      {signal.pair === 'XAUUSD' ? signal.sl_price.toFixed(2) : signal.sl_price.toFixed(4)}
+                    </Text>
                   </View>
                   <View style={styles.detailRow}>
                     <Text style={styles.detailLabel}>Confidence</Text>
