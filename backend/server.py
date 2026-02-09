@@ -322,40 +322,42 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 telegram_bot = None
 
 async def send_signal_to_telegram(signal: Signal):
-    """Send signal to Telegram channel"""
+    """Send signal to Telegram channel - DISABLED FOR NOW"""
     try:
-        if not TELEGRAM_BOT_TOKEN:
-            return
+        # Telegram disabled - can be enabled later when bot token is ready
+        logger.info(f"Signal created: {signal.pair} {signal.type} (Telegram posting disabled)")
+        return
         
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        
-        # Use the user's Telegram ID
-        channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '8517883508')
-        
-        message = f"""
-🔔 <b>NEW SIGNAL - {signal.pair}</b>
-
-📊 <b>Type:</b> {signal.type}
-💰 <b>Entry:</b> {signal.entry_price}
-🎯 <b>Take Profits:</b>
-   TP1: {signal.tp_levels[0]}
-   TP2: {signal.tp_levels[1]}
-   TP3: {signal.tp_levels[2]}
-🛡 <b>Stop Loss:</b> {signal.sl_price}
-
-📈 <b>Risk/Reward:</b> {signal.risk_reward}
-⚡️ <b>Confidence:</b> {signal.confidence}%
-🔒 <b>Tier:</b> {'PREMIUM' if signal.is_premium else 'FREE'}
-
-📝 <b>Analysis:</b>
-{signal.analysis}
-
-⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
-        """
-        
-        # Send to the user's Telegram ID
-        await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
-        logger.info(f"Signal sent to Telegram ID {channel_id}: {signal.pair} {signal.type}")
+        # Uncomment below when Telegram bot is ready:
+        # if not TELEGRAM_BOT_TOKEN:
+        #     return
+        # 
+        # bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        # channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '@agbaakinlove')
+        # 
+        # message = f"""
+        # 🔔 <b>NEW SIGNAL - {signal.pair}</b>
+        # 
+        # 📊 <b>Type:</b> {signal.type}
+        # 💰 <b>Entry:</b> {signal.entry_price}
+        # 🎯 <b>Take Profits:</b>
+        #    TP1: {signal.tp_levels[0]}
+        #    TP2: {signal.tp_levels[1]}
+        #    TP3: {signal.tp_levels[2]}
+        # 🛡 <b>Stop Loss:</b> {signal.sl_price}
+        # 
+        # 📈 <b>Risk/Reward:</b> {signal.risk_reward}
+        # ⚡️ <b>Confidence:</b> {signal.confidence}%
+        # 🔒 <b>Tier:</b> {'PREMIUM' if signal.is_premium else 'FREE'}
+        # 
+        # 📝 <b>Analysis:</b>
+        # {signal.analysis}
+        # 
+        # ⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
+        # """
+        # 
+        # await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
+        # logger.info(f"Signal sent to Telegram ID {channel_id}: {signal.pair} {signal.type}")
     except Exception as e:
         logger.error(f"Error sending to Telegram: {e}")
 
