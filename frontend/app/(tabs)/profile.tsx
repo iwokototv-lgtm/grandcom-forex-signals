@@ -185,7 +185,7 @@ export default function ProfileScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/(tabs)/help')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="help-circle-outline" size={24} color="#8B8FA8" />
               <Text style={styles.menuItemText}>Help & Support</Text>
@@ -193,7 +193,7 @@ export default function ProfileScreen() {
             <Ionicons name="chevron-forward" size={24} color="#8B8FA8" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/(tabs)/privacy')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="shield-outline" size={24} color="#8B8FA8" />
               <Text style={styles.menuItemText}>Privacy Policy</Text>
@@ -201,7 +201,7 @@ export default function ProfileScreen() {
             <Ionicons name="chevron-forward" size={24} color="#8B8FA8" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/(tabs)/terms')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="document-text-outline" size={24} color="#8B8FA8" />
               <Text style={styles.menuItemText}>Terms of Service</Text>
