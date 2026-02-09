@@ -329,6 +329,9 @@ async def send_signal_to_telegram(signal: Signal):
         
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         
+        # Use the user's Telegram ID
+        channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '8517883508')
+        
         message = f"""
 🔔 <b>NEW SIGNAL - {signal.pair}</b>
 
@@ -350,9 +353,9 @@ async def send_signal_to_telegram(signal: Signal):
 ⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
         """
         
-        # Note: Replace with your actual channel ID
-        # await bot.send_message(chat_id="@your_channel", text=message, parse_mode="HTML")
-        logger.info(f"Signal sent to Telegram: {signal.pair} {signal.type}")
+        # Send to the user's Telegram ID
+        await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
+        logger.info(f"Signal sent to Telegram ID {channel_id}: {signal.pair} {signal.type}")
     except Exception as e:
         logger.error(f"Error sending to Telegram: {e}")
 
