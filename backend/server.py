@@ -371,6 +371,16 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 # ============ TELEGRAM BOT ============
 telegram_bot = None
 
+def sanitize_html(text: str) -> str:
+    """Sanitize text for Telegram HTML parsing"""
+    if not text:
+        return ""
+    # Replace HTML special characters
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    return text
+
 async def send_signal_to_telegram(signal: Signal):
     """Send signal to Telegram channel - COPIER FORMAT"""
     try:
@@ -380,6 +390,9 @@ async def send_signal_to_telegram(signal: Signal):
         
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '@agbaakinlove')
+        
+        # Sanitize analysis text to prevent HTML parsing errors
+        safe_analysis = sanitize_html(signal.analysis)
         
         # Format optimized for copier systems
         message = f"""
@@ -397,7 +410,7 @@ async def send_signal_to_telegram(signal: Signal):
 🔒 <b>Tier:</b> {'PREMIUM' if signal.is_premium else 'FREE'}
 
 📝 <b>Analysis:</b>
-{signal.analysis}
+{safe_analysis}
 
 ⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
         """
