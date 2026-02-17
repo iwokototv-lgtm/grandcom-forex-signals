@@ -68,7 +68,7 @@ Recent Signal Card:
 The frontend was updated but may need a hard refresh:
 
 ### Option 1: Hard Refresh Browser
-1. Open: https://trader-signal-hub-1.preview.emergentagent.com
+1. Open: https://grandcom-alerts.preview.emergentagent.com
 2. Press `Ctrl + Shift + R` (Windows) or `Cmd + Shift + R` (Mac)
 3. Clear cache if needed
 
@@ -131,9 +131,9 @@ sudo supervisorctl status
 
 ## 🚀 App URLs:
 
-- **Live Preview:** https://trader-signal-hub-1.preview.emergentagent.com
+- **Live Preview:** https://grandcom-alerts.preview.emergentagent.com
 - **Login:** test@example.com / password123
-- **Backend API:** https://trader-signal-hub-1.preview.emergentagent.com/api/stats
+- **Backend API:** https://grandcom-alerts.preview.emergentagent.com/api/stats
 
 ---
 

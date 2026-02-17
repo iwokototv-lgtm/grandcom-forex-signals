@@ -6,7 +6,7 @@
 
 **Just open this link on your phone:**
 ```
-https://trader-signal-hub-1.preview.emergentagent.com
+https://grandcom-alerts.preview.emergentagent.com
 ```
 
 ✅ Works on ANY smartphone (iPhone/Android)

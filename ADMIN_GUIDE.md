@@ -21,7 +21,7 @@ Role: USER
 ## 🚀 HOW TO LAUNCH YOUR APP
 
 ### Step 1: Register Admin Account
-1. Go to: https://trader-signal-hub-1.preview.emergentagent.com
+1. Go to: https://grandcom-alerts.preview.emergentagent.com
 2. Click "Sign Up"
 3. Register with email: `admin@forexsignals.com`
 4. Password: `Admin@2024!Forex`
@@ -222,7 +222,7 @@ exp://trader-signal-hub-1.preview.emergentagent.com
 ### Method 2: Direct URL (Web on Phone)
 Just open on your mobile browser:
 ```
-https://trader-signal-hub-1.preview.emergentagent.com
+https://grandcom-alerts.preview.emergentagent.com
 ```
 
 ### Method 3: Build Native App (For Production)
