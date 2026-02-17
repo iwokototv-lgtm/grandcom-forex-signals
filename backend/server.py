@@ -157,9 +157,12 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
         # Convert broker symbols to Twelve Data format
         symbol_map = {
             "XAUUSD": "XAU/USD",
+            "XAUEUR": "XAU/EUR",
             "EURUSD": "EUR/USD",
             "GBPUSD": "GBP/USD",
             "USDJPY": "USD/JPY",
+            "EURJPY": "EUR/JPY",
+            "GBPJPY": "GBP/JPY",
             "AUDUSD": "AUD/USD",
             "USDCAD": "USD/CAD"
         }
@@ -517,7 +520,7 @@ async def trigger_signal_generation(
     current_user: dict = Depends(get_current_user)
 ):
     """Manually trigger signal generation (admin only)"""
-    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY"]
+    pairs = ["XAUUSD", "XAUEUR", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     for pair in pairs:
         background_tasks.add_task(generate_signal_for_pair, pair)
@@ -573,7 +576,7 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
-    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD"]
+    pairs = ["XAUUSD", "XAUEUR", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     while True:
         try:
