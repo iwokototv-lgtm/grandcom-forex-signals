@@ -520,7 +520,8 @@ async def trigger_signal_generation(
     current_user: dict = Depends(get_current_user)
 ):
     """Manually trigger signal generation (admin only)"""
-    pairs = ["XAUUSD", "XAUEUR", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    # Note: XAUEUR removed as it requires Twelve Data Grow plan
+    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     for pair in pairs:
         background_tasks.add_task(generate_signal_for_pair, pair)
@@ -576,7 +577,8 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
-    pairs = ["XAUUSD", "XAUEUR", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    # Note: XAUEUR removed as it requires Twelve Data Grow plan
+    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     while True:
         try:
