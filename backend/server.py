@@ -907,6 +907,57 @@ async def get_all_mtf_analysis(current_user: dict = Depends(get_current_user)):
         logger.error(f"Error getting all MTF analysis: {e}")
         return {"success": False, "error": str(e)}
 
+# ============ DATA COLLECTION ENDPOINTS ============
+@api_router.post("/ml/collect-historical")
+async def collect_historical_data(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """Trigger historical data collection for all pairs (admin only)"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    async def run_collection():
+        await historical_collector.setup_indexes()
+        results = await historical_collector.collect_all_pairs()
+        logger.info(f"Historical data collection complete: {results['total_records']} records")
+    
+    background_tasks.add_task(run_collection)
+    
+    return {
+        "success": True,
+        "message": "Historical data collection started in background",
+        "pairs": ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"],
+        "timeframes": ["1h", "4h", "15min"]
+    }
+
+@api_router.get("/ml/data-stats")
+async def get_historical_data_stats(current_user: dict = Depends(get_current_user)):
+    """Get statistics about collected historical data"""
+    try:
+        stats = await historical_collector.get_data_stats()
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error getting data stats: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/ml/signal-performance")
+async def get_signal_performance(current_user: dict = Depends(get_current_user)):
+    """Get signal performance by regime"""
+    try:
+        await signal_tracker.setup_indexes()
+        performance = await signal_tracker.get_performance_by_regime()
+        return {
+            "success": True,
+            "performance": performance
+        }
+    except Exception as e:
+        logger.error(f"Error getting signal performance: {e}")
+        return {"success": False, "error": str(e)}
+
 # ============ SUBSCRIPTION ENDPOINTS ============
 @api_router.put("/subscription", response_model=UserResponse)
 async def update_subscription(
