@@ -1181,9 +1181,12 @@ async def get_full_analysis(symbol: str, current_user: dict = Depends(get_curren
                 "checks_total": quality.get("checks_total", 0)
             }
         
+        # Serialize numpy types for JSON response
+        serialized_results = serialize_numpy(results)
+        
         return {
             "success": True,
-            "analysis": results
+            "analysis": serialized_results
         }
     except HTTPException:
         raise
