@@ -237,6 +237,45 @@ backend:
         agent: "testing"
         comment: "POST /api/signals/generate successfully triggers background signal generation for all currency pairs"
 
+  - task: "Signals History API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: "Initial route conflict issue: '/signals/history' being interpreted as '/signals/{signal_id}' with 'history' as signal_id"
+      - working: true
+        agent: "testing" 
+        comment: "FIXED route ordering issue by moving GET /api/signals/history endpoint above GET /api/signals/{signal_id}. Now correctly returns signals array and stats object with total/wins/losses/win_rate. Testing shows 573 total signals available."
+
+  - task: "Live Prices API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/prices/live successfully retrieves live prices for all 10 trading pairs (XAUUSD, XAUEUR, BTCUSD, EURUSD, GBPUSD, USDJPY, EURJPY, GBPJPY, AUDUSD, USDCAD) with price/high/low/timestamp data"
+
+  - task: "Review Request Endpoints Verification"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "ALL 5 REVIEW REQUEST ENDPOINTS VERIFIED: ✅ POST /api/auth/login (admin auth successful), ✅ GET /api/signals/history?limit=10 (returns signals array & stats), ✅ GET /api/prices/live (all 10 pairs), ✅ GET /api/ml/stats (success: true), ✅ GET /api/signals?limit=10 (signals contain regime field). 15/15 tests passed, 100% success rate."
+
 frontend:
   - task: "Login Flow"
     implemented: true
