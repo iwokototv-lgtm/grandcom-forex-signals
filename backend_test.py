@@ -361,9 +361,20 @@ class ForexSignalsAPITester:
         # Run tests in order
         self.test_health_check_unauthorized()
         self.test_user_login()
+        
+        # Core API tests
         self.test_get_signals()
         self.test_get_stats_authenticated()
         self.test_user_profile()
+        
+        # ML Engine tests (as per review request)
+        self.test_ml_stats_endpoint()
+        self.test_ml_risk_endpoint()
+        self.test_ml_mtf_analysis()
+        self.test_ml_regime_detection()
+        self.test_signals_with_regime()
+        
+        # Additional endpoint tests
         self.test_additional_endpoints()
         
         # Summary
