@@ -755,6 +755,45 @@ async def get_signals(
         for s in signals
     ]
 
+@api_router.get("/signals/history")
+async def get_signals_history(
+    limit: int = 50,
+    pair: Optional[str] = None,
+    result: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get signals history with filters"""
+    try:
+        query = {}
+        if pair:
+            query["pair"] = pair.upper()
+        if result:
+            query["result"] = result.upper()
+        
+        cursor = db.signals.find(query).sort("created_at", -1).limit(limit)
+        signals = await cursor.to_list(length=limit)
+        
+        # Calculate stats
+        total = len(signals)
+        wins = sum(1 for s in signals if s.get('result') == 'WIN')
+        losses = sum(1 for s in signals if s.get('result') == 'LOSS')
+        
+        for signal in signals:
+            signal['id'] = str(signal.pop('_id'))
+        
+        return {
+            "signals": signals,
+            "stats": {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round((wins / total * 100) if total > 0 else 0, 2)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting signals history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.get("/signals/{signal_id}", response_model=Signal)
 async def get_signal(signal_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific signal"""
