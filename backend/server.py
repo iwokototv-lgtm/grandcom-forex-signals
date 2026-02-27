@@ -958,6 +958,116 @@ async def get_signal_performance(current_user: dict = Depends(get_current_user))
         logger.error(f"Error getting signal performance: {e}")
         return {"success": False, "error": str(e)}
 
+class SignalResultUpdate(BaseModel):
+    signal_id: str
+    result: str  # WIN, LOSS, BREAKEVEN
+    exit_price: float
+    tp_hit: Optional[int] = None  # 1, 2, or 3
+
+@api_router.post("/ml/update-result")
+async def update_signal_result(
+    data: SignalResultUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update signal result for ML training"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        success = await signal_tracker.update_signal_result(
+            signal_id=data.signal_id,
+            result=data.result,
+            exit_price=data.exit_price,
+            tp_hit=data.tp_hit
+        )
+        
+        # Also update the signal in the main signals collection
+        if success:
+            await db.signals.update_one(
+                {"_id": ObjectId(data.signal_id)},
+                {"$set": {
+                    "status": "closed",
+                    "result": data.result,
+                    "exit_price": data.exit_price,
+                    "closed_at": datetime.utcnow()
+                }}
+            )
+        
+        return {"success": success}
+    except Exception as e:
+        logger.error(f"Error updating signal result: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/prices/live")
+async def get_live_prices(current_user: dict = Depends(get_current_user)):
+    """Get live prices for all trading pairs"""
+    try:
+        pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        prices = {}
+        
+        for pair in pairs:
+            try:
+                df = await get_price_data(pair, interval="1min", outputsize=1)
+                if df is not None and len(df) > 0:
+                    latest = df.iloc[-1]
+                    prices[pair] = {
+                        "price": float(latest['close']),
+                        "high": float(latest['high']),
+                        "low": float(latest['low']),
+                        "timestamp": latest['datetime'].isoformat() if hasattr(latest['datetime'], 'isoformat') else str(latest['datetime'])
+                    }
+                await asyncio.sleep(0.3)  # Rate limiting
+            except Exception as e:
+                prices[pair] = {"error": str(e)}
+        
+        return {
+            "success": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "prices": prices
+        }
+    except Exception as e:
+        logger.error(f"Error getting live prices: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/signals/history")
+async def get_signals_history(
+    limit: int = 50,
+    pair: Optional[str] = None,
+    result: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get signals history with filters"""
+    try:
+        query = {}
+        if pair:
+            query["pair"] = pair.upper()
+        if result:
+            query["result"] = result.upper()
+        
+        cursor = db.signals.find(query).sort("created_at", -1).limit(limit)
+        signals = await cursor.to_list(length=limit)
+        
+        # Calculate stats
+        total = len(signals)
+        wins = sum(1 for s in signals if s.get('result') == 'WIN')
+        losses = sum(1 for s in signals if s.get('result') == 'LOSS')
+        
+        for signal in signals:
+            signal['id'] = str(signal.pop('_id'))
+        
+        return {
+            "signals": signals,
+            "stats": {
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round((wins / total * 100) if total > 0 else 0, 2)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting signals history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============ SUBSCRIPTION ENDPOINTS ============
 @api_router.put("/subscription", response_model=UserResponse)
 async def update_subscription(
