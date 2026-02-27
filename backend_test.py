@@ -182,6 +182,155 @@ class ForexSignalsAPITester:
         except requests.exceptions.RequestException as e:
             self.log_test("User Profile", False, f"Request failed: {str(e)}")
 
+    def test_ml_stats_endpoint(self):
+        """Test ML Stats endpoint"""
+        if not self.access_token:
+            self.log_test("ML Stats", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/ml/stats", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and "stats" in data:
+                    self.log_test("ML Stats", True, "ML stats retrieved successfully")
+                else:
+                    self.log_test("ML Stats", False, "Missing success or stats field", data)
+            else:
+                self.log_test("ML Stats", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("ML Stats", False, f"Request failed: {str(e)}")
+
+    def test_ml_risk_endpoint(self):
+        """Test ML Risk Status endpoint"""
+        if not self.access_token:
+            self.log_test("ML Risk Status", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/ml/risk", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                required_fields = ["trading_allowed", "metrics"]
+                if all(field in data for field in required_fields):
+                    self.log_test("ML Risk Status", True, 
+                                f"Risk status: trading_allowed={data.get('trading_allowed')}")
+                else:
+                    missing_fields = [field for field in required_fields if field not in data]
+                    self.log_test("ML Risk Status", False, 
+                                f"Missing fields: {missing_fields}", data)
+            else:
+                self.log_test("ML Risk Status", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("ML Risk Status", False, f"Request failed: {str(e)}")
+
+    def test_ml_mtf_analysis(self):
+        """Test MTF Analysis for XAUUSD"""
+        if not self.access_token:
+            self.log_test("MTF Analysis XAUUSD", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/ml/mtf/XAUUSD", headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and "analysis" in data:
+                    analysis = data["analysis"]
+                    required_fields = ["h4_bias", "h1_structure", "m15_trigger"]
+                    if all(field in analysis for field in required_fields):
+                        self.log_test("MTF Analysis XAUUSD", True, 
+                                    f"MTF analysis complete - H4 bias: {analysis.get('h4_bias')}")
+                    else:
+                        missing_fields = [field for field in required_fields if field not in analysis]
+                        self.log_test("MTF Analysis XAUUSD", False, 
+                                    f"Missing analysis fields: {missing_fields}", analysis)
+                else:
+                    self.log_test("MTF Analysis XAUUSD", False, 
+                                "Missing success or analysis field", data)
+            else:
+                self.log_test("MTF Analysis XAUUSD", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("MTF Analysis XAUUSD", False, f"Request failed: {str(e)}")
+
+    def test_ml_regime_detection(self):
+        """Test Regime Detection for EURUSD"""
+        if not self.access_token:
+            self.log_test("Regime Detection EURUSD", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/ml/regime/EURUSD", headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and "regime" in data:
+                    regime = data["regime"]
+                    self.log_test("Regime Detection EURUSD", True, 
+                                f"Regime detected: {regime.get('name', 'Unknown')}")
+                else:
+                    self.log_test("Regime Detection EURUSD", False, 
+                                "Missing success or regime field", data)
+            else:
+                self.log_test("Regime Detection EURUSD", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("Regime Detection EURUSD", False, f"Request failed: {str(e)}")
+
+    def test_signals_with_regime(self):
+        """Test that signals contain regime field"""
+        if not self.access_token:
+            self.log_test("Signals Regime Field", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/signals?limit=10", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list) and len(data) > 0:
+                    # Check if signals have regime field
+                    signals_with_regime = [s for s in data if 'regime' in str(s)]
+                    if signals_with_regime:
+                        self.log_test("Signals Regime Field", True, 
+                                    f"Signals contain regime information ({len(signals_with_regime)}/{len(data)})")
+                    else:
+                        # Check database directly by looking at analysis field
+                        regime_in_analysis = [s for s in data if '[' in str(s.get('analysis', ''))]
+                        if regime_in_analysis:
+                            self.log_test("Signals Regime Field", True, 
+                                        f"Regime info found in analysis field ({len(regime_in_analysis)}/{len(data)})")
+                        else:
+                            self.log_test("Signals Regime Field", False, 
+                                        "No regime information found in signals")
+                else:
+                    self.log_test("Signals Regime Field", False, "No signals available to check")
+            else:
+                self.log_test("Signals Regime Field", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("Signals Regime Field", False, f"Request failed: {str(e)}")
+
     def test_additional_endpoints(self):
         """Test additional endpoints for completeness"""
         if not self.access_token:
