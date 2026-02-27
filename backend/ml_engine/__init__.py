@@ -5,6 +5,8 @@ from .risk_manager import RiskManager
 from .signal_optimizer import SignalOptimizer
 from .multi_timeframe import MultiTimeframeAnalyzer, mtf_analyzer
 from .data_collector import HistoricalDataCollector, SignalResultTracker, historical_collector, signal_tracker
+from .smart_money import SmartMoneyAnalyzer, smc_analyzer
+from .signal_filter import SignalQualityFilter, TrailingStopManager, signal_quality_filter, trailing_stop_manager
 
 __all__ = [
     'FeatureEngineer', 
@@ -16,5 +18,11 @@ __all__ = [
     'HistoricalDataCollector',
     'SignalResultTracker',
     'historical_collector',
-    'signal_tracker'
+    'signal_tracker',
+    'SmartMoneyAnalyzer',
+    'smc_analyzer',
+    'SignalQualityFilter',
+    'TrailingStopManager',
+    'signal_quality_filter',
+    'trailing_stop_manager'
 ]
