@@ -534,8 +534,8 @@ async def trigger_signal_generation(
     current_user: dict = Depends(get_current_user)
 ):
     """Manually trigger signal generation (admin only)"""
-    # Note: XAUEUR removed as it requires Twelve Data Grow plan
-    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    # Full pairs list including XAUEUR and BTCUSD (Grow plan enabled)
+    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     for pair in pairs:
         background_tasks.add_task(generate_signal_for_pair, pair)
