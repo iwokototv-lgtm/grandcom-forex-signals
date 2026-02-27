@@ -164,7 +164,8 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
             "EURJPY": "EUR/JPY",
             "GBPJPY": "GBP/JPY",
             "AUDUSD": "AUD/USD",
-            "USDCAD": "USD/CAD"
+            "USDCAD": "USD/CAD",
+            "BTCUSD": "BTC/USD"
         }
         
         api_symbol = symbol_map.get(symbol, symbol)
@@ -590,8 +591,8 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
-    # Note: XAUEUR removed as it requires Twelve Data Grow plan
-    pairs = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    # Full pairs list including XAUEUR and BTCUSD (Grow plan enabled)
+    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
     
     while True:
         try:
