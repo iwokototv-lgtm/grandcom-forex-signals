@@ -306,7 +306,11 @@ metadata:
 
 test_plan:
   current_focus:
-    - "ML Backend API Testing Complete"
+    - "Login Flow"
+    - "Home Screen - Signals List"
+    - "Analytics Dashboard"
+    - "Multi-Timeframe Analysis Modal"
+    - "Navigation between tabs"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -316,3 +320,5 @@ agent_communication:
     message: "Backend API testing completed successfully. All 6 critical endpoints tested and working: authentication, signals retrieval, statistics, user profile, security, and signal generation. Database has 90 signals, authentication working with admin user, all API responses have proper structure. No major issues found. System ready for deployment."
   - agent: "testing"
     message: "ML Engine Backend Testing COMPLETE: All 6 ML endpoints verified and working perfectly. ✅ POST /api/auth/login (admin auth), ✅ GET /api/ml/stats (ML performance data), ✅ GET /api/ml/risk (risk management status), ✅ GET /api/ml/mtf/XAUUSD (multi-timeframe analysis), ✅ GET /api/ml/regime/EURUSD (regime detection), ✅ GET /api/signals (regime-enhanced signals). ML engine fully operational with RANGE regime detection (0.85 confidence), active strategies [reversal, mean_reversion], and signals containing regime context. 12/12 tests passed, 100% success rate. Ready for production deployment."
+  - agent: "main"
+    message: "Frontend testing requirements updated. Ready to test mobile app UI with focus on ML Analytics features at https://grandcom-alerts.stage-preview.emergentagent.com. Test scenarios include login flow, signals display, analytics dashboard, MTF modal, and navigation. Target mobile dimensions 390x844."
