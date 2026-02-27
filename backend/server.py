@@ -833,6 +833,62 @@ async def get_risk_status(current_user: dict = Depends(get_current_user)):
         logger.error(f"Error getting risk status: {e}")
         return {"success": False, "error": str(e)}
 
+@api_router.get("/ml/mtf/{symbol}")
+async def get_mtf_analysis(symbol: str, current_user: dict = Depends(get_current_user)):
+    """Get multi-timeframe analysis for a symbol"""
+    try:
+        # Validate symbol
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        symbol = symbol.upper()
+        
+        if symbol not in valid_symbols:
+            raise HTTPException(status_code=400, detail=f"Invalid symbol. Valid: {valid_symbols}")
+        
+        # Run MTF analysis
+        analysis = await mtf_analyzer.analyze(symbol)
+        
+        return {
+            "success": True,
+            "analysis": analysis
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"MTF analysis error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/ml/mtf-all")
+async def get_all_mtf_analysis(current_user: dict = Depends(get_current_user)):
+    """Get multi-timeframe analysis for all pairs"""
+    try:
+        all_pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        results = {}
+        
+        for pair in all_pairs:
+            try:
+                analysis = await mtf_analyzer.analyze(pair)
+                results[pair] = analysis
+                await asyncio.sleep(2)  # Rate limiting between pairs
+            except Exception as e:
+                results[pair] = {"error": str(e), "valid_setup": False}
+        
+        # Find best setups
+        best_setups = [
+            {"symbol": k, **v} for k, v in results.items() 
+            if v.get('valid_setup') and v.get('confluence_score', 0) >= 2
+        ]
+        
+        return {
+            "success": True,
+            "timestamp": datetime.utcnow().isoformat(),
+            "all_pairs": results,
+            "best_setups": best_setups,
+            "total_valid_setups": len(best_setups)
+        }
+    except Exception as e:
+        logger.error(f"Error getting all MTF analysis: {e}")
+        return {"success": False, "error": str(e)}
+
 # ============ SUBSCRIPTION ENDPOINTS ============
 @api_router.put("/subscription", response_model=UserResponse)
 async def update_subscription(
