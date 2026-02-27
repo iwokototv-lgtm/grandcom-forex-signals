@@ -1,16 +1,61 @@
 {
-  "name": "desktop",
+  "name": "grandcom-forex-signals",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Grandcom Forex Signals Pro - Professional Trading Signals Desktop App",
+  "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "build": {
+    "appId": "com.grandcom.forexsignals",
+    "productName": "Grandcom Forex Signals Pro",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "styles.css",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    }
+  },
+  "author": "Grandcom Trading",
+  "license": "MIT",
   "devDependencies": {
-    "electron": "^40.6.1",
-    "electron-builder": "^26.8.1"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
   }
 }
