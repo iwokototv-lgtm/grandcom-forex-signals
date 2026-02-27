@@ -607,8 +607,8 @@ def sanitize_html(text: str) -> str:
     text = text.replace(">", "&gt;")
     return text
 
-async def send_signal_to_telegram(signal: Signal):
-    """Send signal to Telegram channel - COPIER FORMAT"""
+async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", risk_mult: float = 1.0):
+    """Send signal to Telegram channel - PROFESSIONAL COPIER FORMAT"""
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
@@ -620,25 +620,43 @@ async def send_signal_to_telegram(signal: Signal):
         # Sanitize analysis text to prevent HTML parsing errors
         safe_analysis = sanitize_html(signal.analysis)
         
-        # Format optimized for copier systems
+        # Determine signal emoji
+        signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
+        regime_emoji = "📊"
+        if regime_name == "TREND_UP":
+            regime_emoji = "📈"
+        elif regime_name == "TREND_DOWN":
+            regime_emoji = "📉"
+        elif regime_name == "RANGE":
+            regime_emoji = "↔️"
+        elif regime_name == "HIGH_VOL":
+            regime_emoji = "⚡"
+        
+        # Professional format optimized for copier systems
         message = f"""
-🔔 <b>NEW SIGNAL - {signal.pair}</b>
+{signal_emoji} <b>SIGNAL: {signal.pair}</b> {signal_emoji}
 
-📊 <b>Type:</b> {signal.type}
-💰 <b>Entry:</b> {signal.entry_price}
-🎯 <b>TP1:</b> {signal.tp_levels[0]}
-🎯 <b>TP2:</b> {signal.tp_levels[1]}
-🎯 <b>TP3:</b> {signal.tp_levels[2]}
-🛡 <b>SL:</b> {signal.sl_price}
+<b>📊 Direction:</b> {signal.type}
+<b>💰 Entry Price:</b> {signal.entry_price}
 
-📈 <b>Risk/Reward:</b> {signal.risk_reward}
-⚡️ <b>Confidence:</b> {signal.confidence}%
-🔒 <b>Tier:</b> {'PREMIUM' if signal.is_premium else 'FREE'}
+<b>🎯 Take Profit Levels:</b>
+   TP1: {signal.tp_levels[0]}
+   TP2: {signal.tp_levels[1]}
+   TP3: {signal.tp_levels[2]}
 
-📝 <b>Analysis:</b>
+<b>🛡 Stop Loss:</b> {signal.sl_price}
+
+<b>📈 Risk/Reward:</b> 1:{signal.risk_reward}
+<b>⚡ Confidence:</b> {signal.confidence}%
+<b>{regime_emoji} Market Regime:</b> {regime_name}
+<b>⚖️ Risk Factor:</b> {risk_mult:.1f}x
+
+<b>📝 Analysis:</b>
 {safe_analysis}
 
-⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
+<b>⏰ Time:</b> {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
+
+<i>🤖 Powered by Grandcom ML Engine</i>
         """
         
         await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
