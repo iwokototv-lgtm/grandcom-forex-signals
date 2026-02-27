@@ -767,6 +767,72 @@ async def trigger_signal_generation(
     
     return {"message": "Signal generation triggered", "pairs": pairs}
 
+# ============ ML ENGINE ENDPOINTS ============
+@api_router.get("/ml/stats")
+async def get_ml_stats(current_user: dict = Depends(get_current_user)):
+    """Get ML engine performance statistics"""
+    try:
+        stats = signal_optimizer.get_performance_stats()
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error getting ML stats: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/ml/regime/{symbol}")
+async def get_current_regime(symbol: str, current_user: dict = Depends(get_current_user)):
+    """Get current market regime for a symbol"""
+    try:
+        # Get price data
+        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        if df is None or len(df) < 50:
+            raise HTTPException(status_code=400, detail="Insufficient data for regime detection")
+        
+        # Extract features
+        features = signal_optimizer.feature_engineer.extract_features(df, symbol)
+        if not features:
+            raise HTTPException(status_code=500, detail="Feature extraction failed")
+        
+        # Detect regime
+        regime = signal_optimizer.regime_detector.detect_regime(features)
+        
+        return {
+            "success": True,
+            "symbol": symbol,
+            "regime": regime,
+            "features_summary": {
+                "adx": features.get('adx'),
+                "rsi": features.get('rsi'),
+                "atr_ratio": features.get('atr_ratio_20'),
+                "volatility": features.get('realized_vol_20'),
+                "trend_bias": features.get('structure_bias')
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error detecting regime for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/ml/risk")
+async def get_risk_status(current_user: dict = Depends(get_current_user)):
+    """Get current risk management status"""
+    try:
+        risk_check = signal_optimizer.risk_manager.check_trading_allowed()
+        risk_metrics = signal_optimizer.risk_manager.get_risk_metrics()
+        
+        return {
+            "success": True,
+            "trading_allowed": risk_check['allowed'],
+            "restrictions": risk_check.get('restrictions', []),
+            "metrics": risk_metrics
+        }
+    except Exception as e:
+        logger.error(f"Error getting risk status: {e}")
+        return {"success": False, "error": str(e)}
+
 # ============ SUBSCRIPTION ENDPOINTS ============
 @api_router.put("/subscription", response_model=UserResponse)
 async def update_subscription(
