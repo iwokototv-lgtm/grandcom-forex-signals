@@ -586,8 +586,8 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
         
-        # Send to Telegram
-        await send_signal_to_telegram(signal)
+        # Send to Telegram with regime info
+        await send_signal_to_telegram(signal, regime_name, risk_multiplier)
         
         return signal
     except Exception as e:
