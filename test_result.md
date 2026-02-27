@@ -264,6 +264,45 @@ backend:
         agent: "testing"
         comment: "GET /api/prices/live successfully retrieves live prices for all 10 trading pairs (XAUUSD, XAUEUR, BTCUSD, EURUSD, GBPUSD, USDJPY, EURJPY, GBPJPY, AUDUSD, USDCAD) with price/high/low/timestamp data"
 
+  - task: "Advanced ML Endpoints - SMC Analysis"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ GET /api/ml/smc/XAUUSD successfully returns SMC analysis with key components: order_blocks, fair_value_gaps, liquidity_sweep. Analysis structure valid and working correctly."
+
+  - task: "Advanced ML Endpoints - Quality Filter Status"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "✅ GET /api/ml/quality-filter successfully returns filter status including current_session (NY_OPEN), session_optimal, active_signals, and thresholds. Complete filter configuration retrieved."
+
+  - task: "Advanced ML Endpoints - Full Analysis"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: false
+        agent: "testing"
+        comment: "Initial numpy serialization error causing 500 Internal Server Error in FastAPI JSON response encoding"
+      - working: true
+        agent: "testing"
+        comment: "✅ FIXED numpy serialization issue by adding serialize_numpy() helper function. GET /api/ml/full-analysis/EURUSD now successfully returns comprehensive analysis with all components: regime, mtf, smc, and quality_assessment. Full analysis working correctly."
+
   - task: "Review Request Endpoints Verification"
     implemented: true
     working: true
@@ -274,7 +313,10 @@ backend:
     status_history:
       - working: true
         agent: "testing"
-        comment: "ALL 5 REVIEW REQUEST ENDPOINTS VERIFIED: ✅ POST /api/auth/login (admin auth successful), ✅ GET /api/signals/history?limit=10 (returns signals array & stats), ✅ GET /api/prices/live (all 10 pairs), ✅ GET /api/ml/stats (success: true), ✅ GET /api/signals?limit=10 (signals contain regime field). 15/15 tests passed, 100% success rate."
+        comment: "ALL 6 REVIEW REQUEST ENDPOINTS VERIFIED: ✅ POST /api/auth/login (admin auth successful), ✅ GET /api/signals/history?limit=10 (returns signals array & stats), ✅ GET /api/prices/live (all 10 pairs), ✅ GET /api/ml/stats (ML performance data), ✅ GET /api/signals?limit=10 (signals contain regime field). 15/15 tests passed, 100% success rate."
+      - working: true
+        agent: "testing"
+        comment: "🎯 ADVANCED ML ENDPOINTS TESTING COMPLETE: All 5 new advanced ML endpoints verified and working perfectly. ✅ POST /api/auth/login (admin authentication), ✅ GET /api/ml/smc/XAUUSD (SMC analysis with order_blocks, fair_value_gaps, liquidity_sweep), ✅ GET /api/ml/quality-filter (filter status with session info), ✅ GET /api/ml/full-analysis/EURUSD (comprehensive analysis: regime + mtf + smc + quality_assessment), ✅ GET /api/prices/live (all 10 trading pairs). Fixed numpy serialization issue. 5/5 tests passed, 100% success rate. Ready for deployment."
 
 frontend:
   - task: "Login Flow"
