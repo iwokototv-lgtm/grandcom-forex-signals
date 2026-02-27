@@ -36,6 +36,7 @@ grpcio==1.76.0
 grpcio-status==1.71.2
 h11==0.16.0
 hf-xet==1.2.0
+hmmlearn==0.3.3
 httpcore==1.0.9
 httplib2==0.31.2
 httpx==0.28.1
@@ -47,6 +48,7 @@ isort==7.0.0
 Jinja2==3.1.6
 jiter==0.13.0
 jmespath==1.1.0
+joblib==1.5.3
 jq==1.11.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
@@ -102,6 +104,8 @@ rsa==4.9.1
 s3transfer==0.16.0
 s5cmd==0.2.0
 schedule==1.2.2
+scikit-learn==1.8.0
+scipy==1.17.1
 shellingham==1.5.4
 six==1.17.0
 sniffio==1.3.1
@@ -109,6 +113,7 @@ starlette==0.37.2
 stripe==14.3.0
 ta==0.11.0
 tenacity==9.1.2
+threadpoolctl==3.6.0
 tiktoken==0.12.0
 tokenizers==0.22.2
 tqdm==4.67.3
