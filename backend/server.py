@@ -21,6 +21,23 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+def serialize_numpy(obj):
+    """Convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: serialize_numpy(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_numpy(item) for item in obj]
+    else:
+        return obj
+
 # Import ML Engine
 from ml_engine import (
     FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, 
