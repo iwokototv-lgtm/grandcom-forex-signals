@@ -22,7 +22,11 @@ import numpy as np
 from pathlib import Path
 
 # Import ML Engine
-from ml_engine import FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, mtf_analyzer, historical_collector, signal_tracker
+from ml_engine import (
+    FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, 
+    mtf_analyzer, historical_collector, signal_tracker,
+    smc_analyzer, signal_quality_filter, trailing_stop_manager
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
