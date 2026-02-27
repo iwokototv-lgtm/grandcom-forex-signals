@@ -331,6 +331,103 @@ class ForexSignalsAPITester:
         except requests.exceptions.RequestException as e:
             self.log_test("Signals Regime Field", False, f"Request failed: {str(e)}")
 
+    def test_signals_history_endpoint(self):
+        """Test Signals History endpoint"""
+        if not self.access_token:
+            self.log_test("Signals History", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/signals/history?limit=10", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                required_fields = ["signals", "stats"]
+                if all(field in data for field in required_fields):
+                    signals = data.get("signals", [])
+                    stats = data.get("stats", {})
+                    self.log_test("Signals History", True, 
+                                f"Retrieved {len(signals)} historical signals with stats: {stats}")
+                else:
+                    missing_fields = [field for field in required_fields if field not in data]
+                    self.log_test("Signals History", False, 
+                                f"Missing fields: {missing_fields}", data)
+            else:
+                self.log_test("Signals History", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("Signals History", False, f"Request failed: {str(e)}")
+
+    def test_live_prices_endpoint(self):
+        """Test Live Prices endpoint"""
+        if not self.access_token:
+            self.log_test("Live Prices", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/prices/live", headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and "prices" in data:
+                    prices = data["prices"]
+                    expected_pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+                    available_pairs = list(prices.keys())
+                    self.log_test("Live Prices", True, 
+                                f"Retrieved prices for {len(available_pairs)}/10 pairs: {available_pairs}")
+                else:
+                    self.log_test("Live Prices", False, "Missing success or prices field", data)
+            else:
+                self.log_test("Live Prices", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("Live Prices", False, f"Request failed: {str(e)}")
+
+    def test_recent_signals_with_regime(self):
+        """Test Recent Signals with Regime field"""
+        if not self.access_token:
+            self.log_test("Recent Signals with Regime", False, "No access token available - login failed")
+            return
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(f"{self.base_url}/signals?limit=10", headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list):
+                    regime_signals = []
+                    for signal in data:
+                        # Check if signal has regime info in analysis or as separate field
+                        has_regime = ('regime' in signal or 
+                                    '[' in str(signal.get('analysis', '')) or 
+                                    'RANGE' in str(signal.get('analysis', '')) or
+                                    'TREND' in str(signal.get('analysis', '')))
+                        if has_regime:
+                            regime_signals.append(signal)
+                    
+                    if len(regime_signals) > 0:
+                        self.log_test("Recent Signals with Regime", True, 
+                                    f"{len(regime_signals)}/{len(data)} signals contain regime information")
+                    else:
+                        self.log_test("Recent Signals with Regime", False, 
+                                    "No regime information found in recent signals")
+                else:
+                    self.log_test("Recent Signals with Regime", False, "Invalid response format", str(data)[:200])
+            else:
+                self.log_test("Recent Signals with Regime", False, 
+                            f"Request failed with status {response.status_code}", 
+                            response.text[:300])
+                            
+        except requests.exceptions.RequestException as e:
+            self.log_test("Recent Signals with Regime", False, f"Request failed: {str(e)}")
+
     def test_additional_endpoints(self):
         """Test additional endpoints for completeness"""
         if not self.access_token:
