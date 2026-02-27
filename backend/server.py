@@ -249,40 +249,178 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         logger.error(f"Error calculating indicators: {e}")
         return None
 
+# ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
+# Each pair has unique characteristics requiring different optimization
+PAIR_PARAMETERS = {
+    "XAUUSD": {
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 1.0,
+        "atr_multiplier_tp2": 2.0,
+        "atr_multiplier_tp3": 3.0,
+        "min_rr": 2.0,
+        "pip_value": 0.1,
+        "decimal_places": 2,
+        "typical_spread": 0.30
+    },
+    "XAUEUR": {
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 1.0,
+        "atr_multiplier_tp2": 2.0,
+        "atr_multiplier_tp3": 3.0,
+        "min_rr": 2.0,
+        "pip_value": 0.1,
+        "decimal_places": 2,
+        "typical_spread": 0.40
+    },
+    "BTCUSD": {
+        "atr_multiplier_sl": 2.0,
+        "atr_multiplier_tp1": 1.5,
+        "atr_multiplier_tp2": 3.0,
+        "atr_multiplier_tp3": 4.5,
+        "min_rr": 2.0,
+        "pip_value": 1.0,
+        "decimal_places": 2,
+        "typical_spread": 10.0
+    },
+    "EURUSD": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.8,
+        "atr_multiplier_tp2": 1.6,
+        "atr_multiplier_tp3": 2.4,
+        "min_rr": 2.0,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00010
+    },
+    "GBPUSD": {
+        "atr_multiplier_sl": 1.3,
+        "atr_multiplier_tp1": 0.9,
+        "atr_multiplier_tp2": 1.8,
+        "atr_multiplier_tp3": 2.7,
+        "min_rr": 2.0,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00012
+    },
+    "USDJPY": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.8,
+        "atr_multiplier_tp2": 1.6,
+        "atr_multiplier_tp3": 2.4,
+        "min_rr": 2.0,
+        "pip_value": 0.01,
+        "decimal_places": 3,
+        "typical_spread": 0.010
+    },
+    "EURJPY": {
+        "atr_multiplier_sl": 1.4,
+        "atr_multiplier_tp1": 1.0,
+        "atr_multiplier_tp2": 2.0,
+        "atr_multiplier_tp3": 3.0,
+        "min_rr": 2.0,
+        "pip_value": 0.01,
+        "decimal_places": 3,
+        "typical_spread": 0.015
+    },
+    "GBPJPY": {
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 1.1,
+        "atr_multiplier_tp2": 2.2,
+        "atr_multiplier_tp3": 3.3,
+        "min_rr": 2.0,
+        "pip_value": 0.01,
+        "decimal_places": 3,
+        "typical_spread": 0.020
+    },
+    "AUDUSD": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.8,
+        "atr_multiplier_tp2": 1.6,
+        "atr_multiplier_tp3": 2.4,
+        "min_rr": 2.0,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00012
+    },
+    "USDCAD": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.8,
+        "atr_multiplier_tp2": 1.6,
+        "atr_multiplier_tp3": 2.4,
+        "min_rr": 2.0,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00015
+    }
+}
+
+# Default parameters for any unlisted pair
+DEFAULT_PAIR_PARAMS = {
+    "atr_multiplier_sl": 1.5,
+    "atr_multiplier_tp1": 1.0,
+    "atr_multiplier_tp2": 2.0,
+    "atr_multiplier_tp3": 3.0,
+    "min_rr": 2.0,
+    "pip_value": 0.0001,
+    "decimal_places": 5,
+    "typical_spread": 0.00015
+}
+
 async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate AI-powered trading signal"""
+    """Generate AI-powered trading signal with pair-specific optimization"""
     try:
+        # Get pair-specific parameters
+        params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
+        
         chat = LlmChat(
             api_key=EMERGENT_LLM_KEY,
             session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
-            system_message="You are an expert forex and gold trader with 20 years of experience. Analyze market data and provide precise trading signals."
+            system_message="You are an elite institutional forex and commodities trader. Provide precise, actionable trading signals with strict risk management."
         ).with_model("openai", "gpt-5.2")
         
         prompt = f"""
-        Analyze the following market data for {symbol} and provide a trading signal:
+        Analyze {symbol} market data and provide a professional trading signal:
         
+        === MARKET DATA ===
         Current Price: {indicators['current_price']}
-        RSI: {indicators['rsi']}
-        MACD: {indicators['macd']} (Signal: {indicators['macd_signal']})
-        MA 20: {indicators['ma_20']}
-        MA 50: {indicators['ma_50']}
-        Bollinger Bands: Upper {indicators['bb_upper']}, Lower {indicators['bb_lower']}
-        ATR: {indicators['atr']}
-        Trend: {indicators['trend']}
+        RSI (14): {indicators['rsi']:.2f}
+        MACD: {indicators['macd']:.6f} (Signal: {indicators['macd_signal']:.6f})
+        MA 20: {indicators['ma_20']:.{params['decimal_places']}f}
+        MA 50: {indicators['ma_50']:.{params['decimal_places']}f}
+        Bollinger Upper: {indicators['bb_upper']:.{params['decimal_places']}f}
+        Bollinger Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
+        ATR (14): {indicators['atr']:.{params['decimal_places']}f}
+        Trend Bias: {indicators['trend']}
         
-        Provide a JSON response with:
-        1. signal: "BUY", "SELL", or "NEUTRAL"
-        2. confidence: numeric value 0-100 (e.g., 85.5)
-        3. entry_price: numeric suggested entry price
-        4. tp_levels: array of exactly 3 numeric take profit levels
-        5. sl_price: numeric stop loss price
-        6. analysis: brief explanation (max 200 words)
-        7. risk_reward: NUMERIC ONLY (e.g., 2.5, not "1:2.5")
+        === PAIR-SPECIFIC PARAMETERS ===
+        ATR Multiplier for SL: {params['atr_multiplier_sl']}
+        ATR Multiplier for TP1: {params['atr_multiplier_tp1']}
+        ATR Multiplier for TP2: {params['atr_multiplier_tp2']}
+        ATR Multiplier for TP3: {params['atr_multiplier_tp3']}
+        Minimum Risk/Reward: {params['min_rr']}
+        Decimal Places: {params['decimal_places']}
         
-        CRITICAL: All numeric fields must be numbers, not strings or ratios.
-        Example risk_reward: 2.5 (correct), not "1:2.5" (wrong)
+        === REQUIREMENTS ===
+        1. Calculate SL using ATR × {params['atr_multiplier_sl']}
+        2. Calculate TP1 using ATR × {params['atr_multiplier_tp1']}
+        3. Calculate TP2 using ATR × {params['atr_multiplier_tp2']}
+        4. Calculate TP3 using ATR × {params['atr_multiplier_tp3']}
+        5. CRITICAL: All three TP levels MUST be DIFFERENT values
+        6. CRITICAL: Minimum Risk/Reward ratio must be {params['min_rr']}:1
+        7. Round all prices to {params['decimal_places']} decimal places
         
-        Only respond with valid JSON, no other text.
+        === OUTPUT FORMAT (JSON ONLY) ===
+        {{
+            "signal": "BUY" or "SELL" or "NEUTRAL",
+            "confidence": numeric 0-100,
+            "entry_price": numeric (current price),
+            "tp_levels": [tp1, tp2, tp3] (3 DIFFERENT ascending/descending values),
+            "sl_price": numeric,
+            "analysis": "Brief explanation under 150 words",
+            "risk_reward": numeric (e.g., 2.5)
+        }}
+        
+        RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
         """
         
         user_message = UserMessage(text=prompt)
@@ -292,23 +430,47 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         import json
         ai_data = json.loads(response)
         
-        # Parse risk_reward if it's in ratio format (e.g., "1:2.5" → 2.5)
-        risk_reward = ai_data.get("risk_reward", 2.5)
+        # Validate and fix TP levels if needed
+        tp_levels = ai_data.get("tp_levels", [])
+        if len(tp_levels) == 3:
+            # Ensure all TP levels are different
+            if len(set(tp_levels)) != 3:
+                # Recalculate using ATR-based approach
+                atr = indicators['atr']
+                entry = ai_data.get("entry_price", indicators['current_price'])
+                signal_type = ai_data.get("signal", "BUY")
+                
+                if signal_type == "BUY":
+                    tp_levels = [
+                        round(entry + (atr * params['atr_multiplier_tp1']), params['decimal_places']),
+                        round(entry + (atr * params['atr_multiplier_tp2']), params['decimal_places']),
+                        round(entry + (atr * params['atr_multiplier_tp3']), params['decimal_places'])
+                    ]
+                else:
+                    tp_levels = [
+                        round(entry - (atr * params['atr_multiplier_tp1']), params['decimal_places']),
+                        round(entry - (atr * params['atr_multiplier_tp2']), params['decimal_places']),
+                        round(entry - (atr * params['atr_multiplier_tp3']), params['decimal_places'])
+                    ]
+                ai_data["tp_levels"] = tp_levels
+        
+        # Parse risk_reward if it's in ratio format
+        risk_reward = ai_data.get("risk_reward", params['min_rr'])
         if isinstance(risk_reward, str) and ":" in risk_reward:
             parts = risk_reward.split(":")
             if len(parts) == 2:
                 try:
                     risk_reward = float(parts[1])
                 except:
-                    risk_reward = 2.5
+                    risk_reward = params['min_rr']
         elif not isinstance(risk_reward, (int, float)):
-            risk_reward = 2.5
+            risk_reward = params['min_rr']
         
         ai_data["risk_reward"] = risk_reward
         
         return ai_data
     except Exception as e:
-        logger.error(f"Error generating AI analysis: {e}")
+        logger.error(f"Error generating AI analysis for {symbol}: {e}")
         return None
 
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
