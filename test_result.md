@@ -238,17 +238,65 @@ backend:
         comment: "POST /api/signals/generate successfully triggers background signal generation for all currency pairs"
 
 frontend:
-  - task: "Not tested per system limitations"
+  - task: "Login Flow"
     implemented: true
     working: "NA"
-    file: "N/A"
+    file: "app/(auth)/login.tsx"
     stuck_count: 0
-    priority: "low"
-    needs_retesting: false
+    priority: "high"
+    needs_retesting: true
     status_history:
       - working: "NA"
-        agent: "testing"
-        comment: "Frontend testing not performed as per testing agent system limitations - only backend testing conducted"
+        agent: "main"
+        comment: "Ready for testing - login with admin@forexsignals.com / Admin@2024!Forex"
+
+  - task: "Home Screen - Signals List"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/home.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Ready for testing - verify signals display with regime information, confidence, TP/SL levels, pull-to-refresh"
+
+  - task: "Analytics Dashboard"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/analytics.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Ready for testing - verify win rate, stats grid, Risk Management, Regime Distribution sections"
+
+  - task: "Multi-Timeframe Analysis Modal"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/analytics.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Ready for testing - tap on pairs (e.g. XAUUSD) to verify H4/H1/M15 analysis modal with confluence score"
+
+  - task: "Navigation between tabs"
+    implemented: true
+    working: "NA"
+    file: "app/(tabs)/_layout.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Ready for testing - verify smooth tab navigation between Home, Analytics, Profile"
 
 metadata:
   created_by: "testing_agent"
