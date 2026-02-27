@@ -29,6 +29,22 @@ SYMBOL_MAP = {
     "USDCAD": "USD/CAD"
 }
 
+def serialize_value(val):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(val, (np.integer, np.int64, np.int32)):
+        return int(val)
+    elif isinstance(val, (np.floating, np.float64, np.float32)):
+        return float(val)
+    elif isinstance(val, np.bool_):
+        return bool(val)
+    elif isinstance(val, np.ndarray):
+        return val.tolist()
+    elif isinstance(val, dict):
+        return {k: serialize_value(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [serialize_value(v) for v in val]
+    return val
+
 
 class MultiTimeframeAnalyzer:
     """
