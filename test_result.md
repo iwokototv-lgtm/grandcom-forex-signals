@@ -165,6 +165,66 @@ backend:
         agent: "testing"
         comment: "GET /api/auth/me returns user profile with id, email, and subscription_tier (ADMIN)"
 
+  - task: "ML Engine Statistics API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/ml/stats successfully returns ML performance stats including strategy breakdown (breakout, pullback, reversal, mean_reversion), risk metrics, and regime distribution. Response format correct with success=true."
+
+  - task: "ML Risk Management API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/ml/risk returns trading_allowed=true, empty restrictions array, and comprehensive risk metrics (equity, drawdown, PnL tracking, consecutive losses). All fields present and correct."
+
+  - task: "Multi-Timeframe Analysis API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/ml/mtf/XAUUSD returns complete MTF analysis structure with h4_bias, h1_structure, m15_trigger fields, confluence_score, and trade_direction. Currently showing NEUTRAL market state which is valid."
+
+  - task: "Regime Detection API"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/ml/regime/EURUSD successfully detects RANGE regime with 0.85 confidence, returns active strategies [reversal, mean_reversion], risk_multiplier=0.8, and detailed feature summary (ADX, RSI, ATR ratio, volatility, trend bias)."
+
+  - task: "Signals with Regime Integration"
+    implemented: true
+    working: true
+    file: "server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "testing"
+        comment: "GET /api/signals?limit=10 confirms signals contain regime information embedded in analysis field (e.g., '[RANGE]' prefix), showing ML engine is successfully integrating regime detection into signal generation process."
+
   - task: "Signal Generation Trigger"
     implemented: true
     working: true
