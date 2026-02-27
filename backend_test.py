@@ -456,23 +456,36 @@ class ForexSignalsAPITester:
         print("=" * 80)
         print()
         
-        # Run tests in order
+        # Run tests in order focusing on review request endpoints
         self.test_health_check_unauthorized()
         self.test_user_login()
         
-        # Core API tests
-        self.test_get_signals()
+        # PRIORITY 1: Review Request Endpoints
+        print("🎯 REVIEW REQUEST ENDPOINTS (TOP PRIORITY)")
+        print("-" * 50)
+        self.test_get_signals()  # This tests Recent Signals API
+        self.test_signals_history_endpoint()  # New endpoint for history
+        self.test_live_prices_endpoint()  # New endpoint for live prices
+        self.test_ml_stats_endpoint()  # ML Stats as requested
+        self.test_recent_signals_with_regime()  # Regime integration check
+        
+        # PRIORITY 2: Core System Tests
+        print("\n📊 CORE SYSTEM VERIFICATION")
+        print("-" * 50)
         self.test_get_stats_authenticated()
         self.test_user_profile()
         
-        # ML Engine tests (as per review request)
-        self.test_ml_stats_endpoint()
+        # PRIORITY 3: ML Engine Extended Tests
+        print("\n🤖 ML ENGINE EXTENDED TESTS")
+        print("-" * 50)
         self.test_ml_risk_endpoint()
         self.test_ml_mtf_analysis()
         self.test_ml_regime_detection()
         self.test_signals_with_regime()
         
-        # Additional endpoint tests
+        # PRIORITY 4: Additional endpoint tests
+        print("\n⚙️ ADDITIONAL ENDPOINTS")
+        print("-" * 50)
         self.test_additional_endpoints()
         
         # Summary
