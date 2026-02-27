@@ -481,11 +481,15 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         return None
 
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
-    """Generate a complete trading signal for a pair"""
+    """Generate a complete trading signal for a pair with ML optimization"""
     try:
+        # Get pair-specific parameters
+        params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+        
         # Get price data - 1H timeframe
         df = await get_price_data(pair, interval="1h", outputsize=100)
         if df is None or len(df) < 50:
+            logger.warning(f"Insufficient data for {pair}")
             return None
         
         # Calculate indicators
@@ -496,37 +500,89 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         # Generate AI analysis
         ai_analysis = await generate_ai_analysis(pair, indicators)
         if ai_analysis is None or ai_analysis.get("signal") == "NEUTRAL":
+            logger.info(f"No trade signal for {pair} (NEUTRAL or None)")
             return None
         
+        # ============ ML OPTIMIZATION ============
+        try:
+            # Optimize signal using ML engine
+            optimized = signal_optimizer.optimize_signal(
+                df=df,
+                symbol=pair,
+                ai_signal=ai_analysis,
+                pair_params=params
+            )
+            
+            # Check if signal was blocked or filtered
+            if optimized.get('blocked'):
+                logger.warning(f"Signal blocked for {pair}: {optimized.get('block_reason')}")
+                return None
+            
+            if optimized.get('filtered'):
+                logger.info(f"Signal filtered for {pair}: {optimized.get('filter_reason')}")
+                return None
+            
+            # Extract optimized values
+            regime_info = optimized.get('regime', {})
+            regime_name = regime_info.get('name', 'UNKNOWN')
+            regime_confidence = regime_info.get('confidence', 0.5)
+            risk_multiplier = regime_info.get('risk_multiplier', 1.0)
+            
+            # Use optimized levels if available
+            if optimized.get('optimized'):
+                entry_price = optimized.get('entry_price', ai_analysis['entry_price'])
+                tp_levels = optimized.get('tp_levels', ai_analysis['tp_levels'])
+                sl_price = optimized.get('sl_price', ai_analysis['sl_price'])
+            else:
+                entry_price = ai_analysis['entry_price']
+                tp_levels = ai_analysis['tp_levels']
+                sl_price = ai_analysis['sl_price']
+            
+            logger.info(f"ML Optimization for {pair}: Regime={regime_name}, RiskMult={risk_multiplier:.2f}")
+            
+        except Exception as ml_error:
+            logger.warning(f"ML optimization failed for {pair}: {ml_error}. Using raw AI signal.")
+            entry_price = ai_analysis['entry_price']
+            tp_levels = ai_analysis['tp_levels']
+            sl_price = ai_analysis['sl_price']
+            regime_name = 'UNKNOWN'
+            regime_confidence = 0.5
+            risk_multiplier = 1.0
+        
         # Parse risk_reward if it's in ratio format
-        risk_reward = ai_analysis.get("risk_reward", 2.5)
+        risk_reward = ai_analysis.get("risk_reward", params['min_rr'])
         if isinstance(risk_reward, str) and ":" in risk_reward:
             parts = risk_reward.split(":")
             if len(parts) == 2:
                 try:
                     risk_reward = float(parts[1])
                 except:
-                    risk_reward = 2.5
+                    risk_reward = params['min_rr']
         elif not isinstance(risk_reward, (int, float)):
-            risk_reward = 2.5
+            risk_reward = params['min_rr']
         
-        # Create signal
+        # Adjust confidence based on regime
+        adjusted_confidence = ai_analysis["confidence"] * regime_confidence
+        
+        # Create signal with ML enhancements
         signal = Signal(
             pair=pair,
             type=ai_analysis["signal"],
-            entry_price=ai_analysis["entry_price"],
+            entry_price=entry_price,
             current_price=indicators["current_price"],
-            tp_levels=ai_analysis["tp_levels"],
-            sl_price=ai_analysis["sl_price"],
-            confidence=ai_analysis["confidence"],
-            analysis=ai_analysis["analysis"],
+            tp_levels=tp_levels,
+            sl_price=sl_price,
+            confidence=round(adjusted_confidence, 1),
+            analysis=f"[{regime_name}] {ai_analysis['analysis']}",
             timeframe="1H",
             risk_reward=risk_reward,
-            is_premium=ai_analysis["confidence"] > 75  # High confidence signals are premium
+            is_premium=adjusted_confidence > 60  # ML-adjusted threshold
         )
         
         # Save to database
         signal_dict = signal.dict(exclude={"id"})
+        signal_dict['regime'] = regime_name
+        signal_dict['risk_multiplier'] = risk_multiplier
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
         
