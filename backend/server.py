@@ -51,6 +51,10 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize ML Engine Components
+signal_optimizer = SignalOptimizer()
+logger.info("ML Engine initialized: SignalOptimizer ready")
+
 # ============ MODELS ============
 class PyObjectId(ObjectId):
     @classmethod
