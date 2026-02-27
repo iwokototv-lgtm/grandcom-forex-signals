@@ -352,9 +352,10 @@ class ForexSignalsAPITester:
 
     def run_all_tests(self):
         """Run all tests in sequence"""
-        print(f"🚀 Starting Grandcom Forex Signals Pro Backend API Tests")
+        print(f"🚀 Starting Grandcom Forex Signals Pro ML Backend API Tests")
         print(f"📍 Base URL: {self.base_url}")
         print(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("🤖 Focus: Testing ML Engine endpoints as per review request")
         print("=" * 80)
         print()
         
