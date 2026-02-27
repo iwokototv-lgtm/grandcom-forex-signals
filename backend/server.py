@@ -1072,6 +1072,108 @@ async def get_live_prices(current_user: dict = Depends(get_current_user)):
         logger.error(f"Error getting live prices: {e}")
         return {"success": False, "error": str(e)}
 
+@api_router.get("/ml/smc/{symbol}")
+async def get_smc_analysis(symbol: str, current_user: dict = Depends(get_current_user)):
+    """Get Smart Money Concepts analysis for a symbol"""
+    try:
+        # Validate symbol
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        symbol = symbol.upper()
+        
+        if symbol not in valid_symbols:
+            raise HTTPException(status_code=400, detail=f"Invalid symbol. Valid: {valid_symbols}")
+        
+        # Get price data
+        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        if df is None or len(df) < 50:
+            raise HTTPException(status_code=400, detail="Insufficient data for SMC analysis")
+        
+        # Run SMC analysis
+        analysis = smc_analyzer.analyze(df, symbol)
+        
+        return {
+            "success": True,
+            "analysis": analysis
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"SMC analysis error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/ml/quality-filter")
+async def get_quality_filter_status(current_user: dict = Depends(get_current_user)):
+    """Get signal quality filter status"""
+    try:
+        summary = signal_quality_filter.get_quality_summary()
+        return {
+            "success": True,
+            "filter_status": summary
+        }
+    except Exception as e:
+        logger.error(f"Error getting quality filter status: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/ml/full-analysis/{symbol}")
+async def get_full_analysis(symbol: str, current_user: dict = Depends(get_current_user)):
+    """Get comprehensive analysis for a symbol (Regime + MTF + SMC)"""
+    try:
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        symbol = symbol.upper()
+        
+        if symbol not in valid_symbols:
+            raise HTTPException(status_code=400, detail=f"Invalid symbol")
+        
+        # Get price data
+        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        if df is None or len(df) < 50:
+            raise HTTPException(status_code=400, detail="Insufficient data")
+        
+        # Run all analyses
+        results = {
+            "symbol": symbol,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # 1. Regime Analysis
+        features = signal_optimizer.feature_engineer.extract_features(df, symbol)
+        if features:
+            results["regime"] = signal_optimizer.regime_detector.detect_regime(features)
+        
+        # 2. MTF Analysis
+        results["mtf"] = await mtf_analyzer.analyze(symbol)
+        
+        # 3. SMC Analysis
+        results["smc"] = smc_analyzer.analyze(df, symbol)
+        
+        # 4. Quality Assessment
+        if results.get("regime") and results.get("mtf") and results.get("smc"):
+            should_trade, reason, quality = signal_quality_filter.should_take_signal(
+                symbol=symbol,
+                signal_type=results["mtf"].get("trade_direction", "NEUTRAL"),
+                confidence=70,  # Placeholder
+                regime_result=results["regime"],
+                mtf_result=results["mtf"],
+                smc_result=results["smc"]
+            )
+            results["quality_assessment"] = {
+                "should_trade": should_trade,
+                "reason": reason,
+                "quality_score": quality.get("quality_score", 0),
+                "checks_passed": quality.get("checks_passed", 0),
+                "checks_total": quality.get("checks_total", 0)
+            }
+        
+        return {
+            "success": True,
+            "analysis": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Full analysis error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============ SUBSCRIPTION ENDPOINTS ============
 @api_router.put("/subscription", response_model=UserResponse)
 async def update_subscription(
