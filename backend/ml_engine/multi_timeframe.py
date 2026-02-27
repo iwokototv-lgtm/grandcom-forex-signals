@@ -149,7 +149,8 @@ class MultiTimeframeAnalyzer:
                        f"H1={result['h1_structure'].get('bias') if result['h1_structure'] else 'N/A'}, "
                        f"Confluence={result['confluence_score']}/3")
             
-            return result
+            # Serialize all numpy types before returning
+            return serialize_value(result)
             
         except Exception as e:
             logger.error(f"MTF analysis error for {symbol}: {e}")
