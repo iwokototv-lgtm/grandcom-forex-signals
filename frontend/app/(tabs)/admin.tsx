@@ -36,6 +36,7 @@ interface User {
   role: string;
   created_at: string;
   subscription_status?: string;
+  subscription_tier?: string;
 }
 
 interface SystemStats {
@@ -44,6 +45,14 @@ interface SystemStats {
   total_users: number;
   signals_today: number;
   win_rate: number;
+}
+
+interface PairConfig {
+  use_fixed_pips: boolean;
+  fixed_tp1_pips: number;
+  fixed_tp2_pips: number;
+  fixed_tp3_pips: number;
+  fixed_sl_pips?: number;
 }
 
 export default function AdminScreen() {
@@ -56,6 +65,24 @@ export default function AdminScreen() {
   const [users, setUsers] = useState<User[]>([]);
   const [showSignalModal, setShowSignalModal] = useState(false);
   const [selectedSignal, setSelectedSignal] = useState<Signal | null>(null);
+  const [showCreateSignalModal, setShowCreateSignalModal] = useState(false);
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [validPairs, setValidPairs] = useState<string[]>([]);
+  const [pairConfigs, setPairConfigs] = useState<Record<string, PairConfig>>({});
+  
+  // New signal form state
+  const [newSignal, setNewSignal] = useState({
+    pair: 'EURUSD',
+    type: 'BUY',
+    entry_price: '',
+    tp1: '',
+    tp2: '',
+    tp3: '',
+    sl: '',
+    send_telegram: true,
+  });
+  const [creatingSignal, setCreatingSignal] = useState(false);
 
   useEffect(() => {
     loadAdminData();
@@ -63,12 +90,24 @@ export default function AdminScreen() {
 
   const loadAdminData = async () => {
     try {
-      await Promise.all([loadStats(), loadSignals(), loadUsers()]);
+      await Promise.all([loadStats(), loadSignals(), loadUsers(), loadPairConfig()]);
     } catch (error) {
       console.error('Error loading admin data:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const loadPairConfig = async () => {
+    try {
+      const response = await api.get('/admin/pair-config');
+      if (response.data.success) {
+        setValidPairs(response.data.valid_pairs);
+        setPairConfigs(response.data.pairs);
+      }
+    } catch (error) {
+      console.error('Error loading pair config:', error);
     }
   };
 
@@ -153,6 +192,95 @@ export default function AdminScreen() {
     );
   };
 
+  const handleCreateSignal = async () => {
+    if (!newSignal.entry_price || !newSignal.tp1 || !newSignal.tp2 || !newSignal.tp3 || !newSignal.sl) {
+      Alert.alert('Error', 'Please fill all fields');
+      return;
+    }
+
+    setCreatingSignal(true);
+    try {
+      const response = await api.post('/admin/signals/create', {
+        pair: newSignal.pair,
+        type: newSignal.type,
+        entry_price: parseFloat(newSignal.entry_price),
+        tp1: parseFloat(newSignal.tp1),
+        tp2: parseFloat(newSignal.tp2),
+        tp3: parseFloat(newSignal.tp3),
+        sl: parseFloat(newSignal.sl),
+        send_telegram: newSignal.send_telegram,
+      });
+
+      if (response.data.success) {
+        Alert.alert('Success', response.data.message);
+        setShowCreateSignalModal(false);
+        setNewSignal({
+          pair: 'EURUSD',
+          type: 'BUY',
+          entry_price: '',
+          tp1: '',
+          tp2: '',
+          tp3: '',
+          sl: '',
+          send_telegram: true,
+        });
+        loadSignals();
+      } else {
+        Alert.alert('Error', response.data.error || 'Failed to create signal');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.response?.data?.error || 'Failed to create signal');
+    } finally {
+      setCreatingSignal(false);
+    }
+  };
+
+  const handleUpdateUser = async (userId: string, field: string, value: string) => {
+    try {
+      const updateData: any = {};
+      updateData[field] = value;
+      
+      const response = await api.put(`/admin/users/${userId}`, updateData);
+      if (response.data.success) {
+        Alert.alert('Success', 'User updated');
+        loadUsers();
+        setShowUserModal(false);
+      } else {
+        Alert.alert('Error', response.data.error || 'Failed to update user');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.response?.data?.error || 'Failed to update user');
+    }
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    Alert.alert(
+      'Confirm Delete',
+      'Are you sure you want to delete this user? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const response = await api.delete(`/admin/users/${userId}`);
+              if (response.data.success) {
+                Alert.alert('Success', 'User deleted');
+                loadUsers();
+                setShowUserModal(false);
+              } else {
+                Alert.alert('Error', response.data.error || 'Failed to delete user');
+              }
+            } catch (error: any) {
+              Alert.alert('Error', error.response?.data?.error || 'Failed to delete user');
+            }
+          }
+        }
+      ]
+    );
+  };
+
   const renderOverview = () => (
     <View>
       {/* Stats Cards */}
@@ -183,18 +311,35 @@ export default function AdminScreen() {
       <Text style={styles.sectionTitle}>Quick Actions</Text>
       <View style={styles.actionsContainer}>
         <TouchableOpacity 
+          style={[styles.actionButton, { backgroundColor: '#4CAF50', borderColor: '#4CAF50' }]}
+          onPress={() => setShowCreateSignalModal(true)}
+          data-testid="create-signal-btn"
+        >
+          <Ionicons name="add-circle" size={24} color="#FFFFFF" />
+          <Text style={[styles.actionText, { color: '#FFFFFF' }]}>Create Signal</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
           style={styles.actionButton}
           onPress={() => api.post('/signals/check-outcomes').then(() => Alert.alert('Done', 'Outcome check triggered'))}
         >
           <Ionicons name="refresh" size={24} color="#FFD700" />
           <Text style={styles.actionText}>Check Outcomes</Text>
         </TouchableOpacity>
+      </View>
+      <View style={styles.actionsContainer}>
         <TouchableOpacity 
           style={styles.actionButton}
           onPress={() => router.push('/(tabs)/backtest')}
         >
           <Ionicons name="analytics" size={24} color="#FFD700" />
           <Text style={styles.actionText}>Run Backtest</Text>
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={styles.actionButton}
+          onPress={() => setActiveTab('users')}
+        >
+          <Ionicons name="people" size={24} color="#FFD700" />
+          <Text style={styles.actionText}>Manage Users</Text>
         </TouchableOpacity>
       </View>
 
@@ -309,23 +454,37 @@ export default function AdminScreen() {
     <View>
       <Text style={styles.sectionTitle}>Users ({users.length})</Text>
       {users.map((user) => (
-        <View key={user.id} style={styles.userCard}>
+        <TouchableOpacity 
+          key={user.id} 
+          style={styles.userCard}
+          onPress={() => {
+            setSelectedUser(user);
+            setShowUserModal(true);
+          }}
+        >
           <View style={styles.userInfo}>
-            <Ionicons name="person-circle" size={40} color="#FFD700" />
+            <Ionicons name="person-circle" size={40} color={user.role === 'admin' ? '#FFD700' : '#8B8FA8'} />
             <View style={styles.userDetails}>
               <Text style={styles.userEmail}>{user.email}</Text>
-              <Text style={styles.userRole}>{user.role}</Text>
+              <View style={styles.userBadges}>
+                <View style={[styles.roleBadge, { backgroundColor: user.role === 'admin' ? '#FFD700' : '#2A2F4A' }]}>
+                  <Text style={[styles.roleBadgeText, { color: user.role === 'admin' ? '#0A0E27' : '#8B8FA8' }]}>
+                    {user.role?.toUpperCase()}
+                  </Text>
+                </View>
+                <View style={[styles.tierBadge, { 
+                  backgroundColor: user.subscription_tier === 'PREMIUM' ? '#9C27B0' : 
+                                   user.subscription_tier === 'PRO' ? '#4CAF50' : '#2A2F4A' 
+                }]}>
+                  <Text style={styles.tierBadgeText}>
+                    {user.subscription_tier || 'FREE'}
+                  </Text>
+                </View>
+              </View>
             </View>
           </View>
-          <View style={[
-            styles.subscriptionBadge,
-            { backgroundColor: user.subscription_status === 'active' ? '#4CAF50' : '#2A2F4A' }
-          ]}>
-            <Text style={styles.subscriptionText}>
-              {user.subscription_status || 'Free'}
-            </Text>
-          </View>
-        </View>
+          <Ionicons name="chevron-forward" size={20} color="#8B8FA8" />
+        </TouchableOpacity>
       ))}
     </View>
   );
@@ -507,6 +666,224 @@ export default function AdminScreen() {
                 >
                   <Text style={styles.modalButtonText}>Delete Signal</Text>
                 </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Create Signal Modal */}
+      <Modal visible={showCreateSignalModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Create Manual Signal</Text>
+              <TouchableOpacity onPress={() => setShowCreateSignalModal(false)}>
+                <Ionicons name="close" size={24} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ maxHeight: 400 }}>
+              {/* Pair Selection */}
+              <Text style={styles.inputLabel}>Trading Pair</Text>
+              <View style={styles.pairSelector}>
+                {validPairs.slice(0, 6).map((pair) => (
+                  <TouchableOpacity
+                    key={pair}
+                    style={[styles.pairOption, newSignal.pair === pair && styles.pairOptionSelected]}
+                    onPress={() => setNewSignal({ ...newSignal, pair })}
+                  >
+                    <Text style={[styles.pairOptionText, newSignal.pair === pair && styles.pairOptionTextSelected]}>
+                      {pair}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <View style={styles.pairSelector}>
+                {validPairs.slice(6).map((pair) => (
+                  <TouchableOpacity
+                    key={pair}
+                    style={[styles.pairOption, newSignal.pair === pair && styles.pairOptionSelected]}
+                    onPress={() => setNewSignal({ ...newSignal, pair })}
+                  >
+                    <Text style={[styles.pairOptionText, newSignal.pair === pair && styles.pairOptionTextSelected]}>
+                      {pair}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Type Selection */}
+              <Text style={styles.inputLabel}>Signal Type</Text>
+              <View style={styles.typeSelector}>
+                <TouchableOpacity
+                  style={[styles.typeOption, newSignal.type === 'BUY' && { backgroundColor: '#4CAF50' }]}
+                  onPress={() => setNewSignal({ ...newSignal, type: 'BUY' })}
+                >
+                  <Ionicons name="trending-up" size={20} color={newSignal.type === 'BUY' ? '#FFFFFF' : '#4CAF50'} />
+                  <Text style={[styles.typeOptionText, newSignal.type === 'BUY' && { color: '#FFFFFF' }]}>BUY</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.typeOption, newSignal.type === 'SELL' && { backgroundColor: '#F44336' }]}
+                  onPress={() => setNewSignal({ ...newSignal, type: 'SELL' })}
+                >
+                  <Ionicons name="trending-down" size={20} color={newSignal.type === 'SELL' ? '#FFFFFF' : '#F44336'} />
+                  <Text style={[styles.typeOptionText, newSignal.type === 'SELL' && { color: '#FFFFFF' }]}>SELL</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Price Inputs */}
+              <Text style={styles.inputLabel}>Entry Price</Text>
+              <TextInput
+                style={styles.input}
+                value={newSignal.entry_price}
+                onChangeText={(text) => setNewSignal({ ...newSignal, entry_price: text })}
+                placeholder="e.g., 1.0850"
+                placeholderTextColor="#8B8FA8"
+                keyboardType="decimal-pad"
+              />
+
+              <View style={styles.inputRow}>
+                <View style={styles.inputHalf}>
+                  <Text style={styles.inputLabel}>TP1</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newSignal.tp1}
+                    onChangeText={(text) => setNewSignal({ ...newSignal, tp1: text })}
+                    placeholder="TP1"
+                    placeholderTextColor="#8B8FA8"
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+                <View style={styles.inputHalf}>
+                  <Text style={styles.inputLabel}>TP2</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newSignal.tp2}
+                    onChangeText={(text) => setNewSignal({ ...newSignal, tp2: text })}
+                    placeholder="TP2"
+                    placeholderTextColor="#8B8FA8"
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+              </View>
+
+              <View style={styles.inputRow}>
+                <View style={styles.inputHalf}>
+                  <Text style={styles.inputLabel}>TP3</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newSignal.tp3}
+                    onChangeText={(text) => setNewSignal({ ...newSignal, tp3: text })}
+                    placeholder="TP3"
+                    placeholderTextColor="#8B8FA8"
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+                <View style={styles.inputHalf}>
+                  <Text style={styles.inputLabel}>Stop Loss</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newSignal.sl}
+                    onChangeText={(text) => setNewSignal({ ...newSignal, sl: text })}
+                    placeholder="SL"
+                    placeholderTextColor="#8B8FA8"
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+              </View>
+
+              {/* Telegram Option */}
+              <TouchableOpacity
+                style={styles.checkboxRow}
+                onPress={() => setNewSignal({ ...newSignal, send_telegram: !newSignal.send_telegram })}
+              >
+                <Ionicons
+                  name={newSignal.send_telegram ? 'checkbox' : 'square-outline'}
+                  size={24}
+                  color="#FFD700"
+                />
+                <Text style={styles.checkboxLabel}>Send to Telegram Channel</Text>
+              </TouchableOpacity>
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.createButton, creatingSignal && styles.createButtonDisabled]}
+              onPress={handleCreateSignal}
+              disabled={creatingSignal}
+            >
+              {creatingSignal ? (
+                <ActivityIndicator color="#0A0E27" />
+              ) : (
+                <Text style={styles.createButtonText}>Create Signal</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* User Management Modal */}
+      <Modal visible={showUserModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Manage User</Text>
+              <TouchableOpacity onPress={() => setShowUserModal(false)}>
+                <Ionicons name="close" size={24} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+
+            {selectedUser && (
+              <>
+                <View style={styles.userModalInfo}>
+                  <Ionicons name="person-circle" size={60} color="#FFD700" />
+                  <Text style={styles.userModalEmail}>{selectedUser.email}</Text>
+                </View>
+
+                <Text style={styles.inputLabel}>Change Role</Text>
+                <View style={styles.roleSelector}>
+                  {['user', 'premium', 'admin'].map((role) => (
+                    <TouchableOpacity
+                      key={role}
+                      style={[styles.roleOption, selectedUser.role === role && styles.roleOptionSelected]}
+                      onPress={() => handleUpdateUser(selectedUser.id, 'role', role)}
+                    >
+                      <Text style={[styles.roleOptionText, selectedUser.role === role && styles.roleOptionTextSelected]}>
+                        {role.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={styles.inputLabel}>Change Subscription Tier</Text>
+                <View style={styles.roleSelector}>
+                  {['free', 'pro', 'premium'].map((tier) => (
+                    <TouchableOpacity
+                      key={tier}
+                      style={[
+                        styles.tierOption,
+                        selectedUser.subscription_tier?.toLowerCase() === tier && styles.tierOptionSelected
+                      ]}
+                      onPress={() => handleUpdateUser(selectedUser.id, 'subscription_tier', tier)}
+                    >
+                      <Text style={[
+                        styles.tierOptionText,
+                        selectedUser.subscription_tier?.toLowerCase() === tier && styles.tierOptionTextSelected
+                      ]}>
+                        {tier.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {selectedUser.role !== 'admin' && (
+                  <TouchableOpacity
+                    style={[styles.modalButton, { backgroundColor: '#F44336', marginTop: 20 }]}
+                    onPress={() => handleDeleteUser(selectedUser.id)}
+                  >
+                    <Text style={styles.modalButtonText}>Delete User</Text>
+                  </TouchableOpacity>
+                )}
               </>
             )}
           </View>
@@ -855,5 +1232,181 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  // New styles for Create Signal Modal
+  inputLabel: {
+    fontSize: 14,
+    color: '#8B8FA8',
+    marginBottom: 8,
+    marginTop: 12,
+  },
+  input: {
+    backgroundColor: '#2A2F4A',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#FFFFFF',
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: '#3A3F5A',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  inputHalf: {
+    flex: 1,
+  },
+  pairSelector: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  pairOption: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#2A2F4A',
+    borderWidth: 1,
+    borderColor: '#3A3F5A',
+  },
+  pairOptionSelected: {
+    backgroundColor: '#FFD700',
+    borderColor: '#FFD700',
+  },
+  pairOptionText: {
+    fontSize: 12,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  pairOptionTextSelected: {
+    color: '#0A0E27',
+  },
+  typeSelector: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  typeOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#2A2F4A',
+    borderWidth: 1,
+    borderColor: '#3A3F5A',
+  },
+  typeOptionText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 16,
+  },
+  checkboxLabel: {
+    color: '#FFFFFF',
+    fontSize: 14,
+  },
+  createButton: {
+    backgroundColor: '#4CAF50',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  createButtonDisabled: {
+    opacity: 0.6,
+  },
+  createButtonText: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  // New styles for User Management
+  userBadges: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  roleBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  roleBadgeText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  tierBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  tierBadgeText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  userModalInfo: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  userModalEmail: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontWeight: '600',
+    marginTop: 8,
+  },
+  roleSelector: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  roleOption: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#2A2F4A',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3A3F5A',
+  },
+  roleOptionSelected: {
+    backgroundColor: '#FFD700',
+    borderColor: '#FFD700',
+  },
+  roleOptionText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  roleOptionTextSelected: {
+    color: '#0A0E27',
+  },
+  tierOption: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#2A2F4A',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3A3F5A',
+  },
+  tierOptionSelected: {
+    backgroundColor: '#4CAF50',
+    borderColor: '#4CAF50',
+  },
+  tierOptionText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  tierOptionTextSelected: {
+    color: '#FFFFFF',
   },
 });

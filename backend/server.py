@@ -1899,6 +1899,232 @@ async def admin_delete_signal(
         logger.error(f"Error deleting signal: {e}")
         return {"success": False, "error": str(e)}
 
+# ============ MANUAL SIGNAL CREATION ============
+class ManualSignalRequest(BaseModel):
+    pair: str
+    type: str  # BUY or SELL
+    entry_price: float
+    tp1: float
+    tp2: float
+    tp3: float
+    sl: float
+    send_telegram: bool = True
+
+@api_router.post("/admin/signals/create")
+async def admin_create_signal(
+    signal: ManualSignalRequest,
+    admin_user: dict = Depends(require_admin)
+):
+    """Create a manual trading signal (admin only)"""
+    try:
+        # Validate pair
+        valid_pairs = list(PAIR_PARAMETERS.keys())
+        if signal.pair not in valid_pairs:
+            return {"success": False, "error": f"Invalid pair. Valid pairs: {valid_pairs}"}
+        
+        # Validate type
+        if signal.type not in ["BUY", "SELL"]:
+            return {"success": False, "error": "Type must be BUY or SELL"}
+        
+        # Create signal document
+        signal_doc = {
+            "pair": signal.pair,
+            "type": signal.type,
+            "entry_price": signal.entry_price,
+            "tp_levels": [signal.tp1, signal.tp2, signal.tp3],
+            "sl_price": signal.sl,
+            "status": "ACTIVE",
+            "created_at": datetime.utcnow(),
+            "created_by": "admin_manual",
+            "regime": "MANUAL",
+            "confidence": 100.0,
+            "ml_optimized": False
+        }
+        
+        # Insert into database
+        result = await db.signals.insert_one(signal_doc)
+        signal_id = str(result.inserted_id)
+        
+        # Send to Telegram if requested
+        if signal.send_telegram:
+            try:
+                message = f"""
+🎯 *MANUAL SIGNAL* 🎯
+
+📊 *{signal.pair}* - *{signal.type}*
+💰 Entry: {signal.entry_price}
+
+🎯 Take Profits:
+   TP1: {signal.tp1}
+   TP2: {signal.tp2}
+   TP3: {signal.tp3}
+
+🛡️ Stop Loss: {signal.sl}
+
+📌 *Created by Admin*
+⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+"""
+                telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+                telegram_channel = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+                
+                if telegram_token:
+                    async with httpx.AsyncClient() as client:
+                        await client.post(
+                            f"https://api.telegram.org/bot{telegram_token}/sendMessage",
+                            json={
+                                "chat_id": telegram_channel,
+                                "text": message,
+                                "parse_mode": "Markdown"
+                            }
+                        )
+                    logger.info(f"Manual signal sent to Telegram: {signal.pair} {signal.type}")
+            except Exception as tg_error:
+                logger.error(f"Failed to send to Telegram: {tg_error}")
+        
+        return {
+            "success": True,
+            "signal_id": signal_id,
+            "message": f"Signal created for {signal.pair} {signal.type}"
+        }
+    except Exception as e:
+        logger.error(f"Error creating manual signal: {e}")
+        return {"success": False, "error": str(e)}
+
+# ============ USER MANAGEMENT ============
+class UserUpdateRequest(BaseModel):
+    role: Optional[str] = None
+    subscription_tier: Optional[str] = None
+
+@api_router.put("/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: str,
+    update: UserUpdateRequest,
+    admin_user: dict = Depends(require_admin)
+):
+    """Update user details (admin only)"""
+    try:
+        update_data = {}
+        
+        if update.role:
+            if update.role not in ["user", "admin", "premium"]:
+                return {"success": False, "error": "Invalid role. Must be: user, admin, or premium"}
+            update_data["role"] = update.role
+        
+        if update.subscription_tier:
+            if update.subscription_tier not in ["free", "pro", "premium"]:
+                return {"success": False, "error": "Invalid tier. Must be: free, pro, or premium"}
+            update_data["subscription_tier"] = update.subscription_tier.upper()
+            update_data["subscription_status"] = "active" if update.subscription_tier != "free" else "free"
+        
+        if not update_data:
+            return {"success": False, "error": "No update fields provided"}
+        
+        result = await db.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": update_data}
+        )
+        
+        if result.modified_count > 0:
+            return {"success": True, "message": "User updated"}
+        return {"success": False, "error": "User not found or no changes made"}
+    except Exception as e:
+        logger.error(f"Error updating user: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    admin_user: dict = Depends(require_admin)
+):
+    """Delete a user (admin only)"""
+    try:
+        # Prevent deleting admin user
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        if user and user.get("role") == "admin":
+            return {"success": False, "error": "Cannot delete admin user"}
+        
+        result = await db.users.delete_one({"_id": ObjectId(user_id)})
+        if result.deleted_count > 0:
+            return {"success": True, "message": "User deleted"}
+        return {"success": False, "error": "User not found"}
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/admin/pair-config")
+async def get_pair_config(admin_user: dict = Depends(require_admin)):
+    """Get current pair configuration (admin only)"""
+    return {
+        "success": True,
+        "pairs": PAIR_PARAMETERS,
+        "valid_pairs": list(PAIR_PARAMETERS.keys())
+    }
+
+@api_router.post("/admin/ml/optimize")
+async def run_ml_optimization(admin_user: dict = Depends(require_admin)):
+    """Run ML model optimization based on historical signals (admin only)"""
+    try:
+        from ml_engine.model_trainer import run_model_optimization
+        results = await run_model_optimization(db)
+        return results
+    except Exception as e:
+        logger.error(f"ML optimization error: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/admin/ml/performance")
+async def get_ml_performance_analysis(admin_user: dict = Depends(require_admin)):
+    """Get detailed ML performance analysis (admin only)"""
+    try:
+        from ml_engine.model_trainer import SignalOptimizationEngine
+        
+        # Fetch signals with results
+        signals = []
+        async for signal in db.signals.find({'result': {'$in': ['WIN', 'LOSS']}}).sort('created_at', -1).limit(500):
+            signal['id'] = str(signal.pop('_id'))
+            signals.append(signal)
+        
+        if len(signals) < 10:
+            return {"success": True, "message": "Not enough data yet", "signals_analyzed": len(signals)}
+        
+        optimizer = SignalOptimizationEngine()
+        
+        pair_analysis = optimizer.analyze_performance_by_pair(signals)
+        regime_analysis = optimizer.analyze_performance_by_regime(signals)
+        recommendations = optimizer.recommend_pair_settings(pair_analysis)
+        
+        # Sort by win rate
+        sorted_pairs = sorted(
+            [(pair, stats) for pair, stats in pair_analysis.items()],
+            key=lambda x: x[1].get('win_rate', 0),
+            reverse=True
+        )
+        
+        return {
+            "success": True,
+            "signals_analyzed": len(signals),
+            "pair_rankings": [
+                {
+                    "pair": pair,
+                    "win_rate": round(stats.get('win_rate', 0), 2),
+                    "profit_factor": round(stats.get('profit_factor', 0), 2),
+                    "total_trades": stats.get('total', 0),
+                    "total_pips": round(stats.get('total_pips', 0), 1)
+                }
+                for pair, stats in sorted_pairs
+            ],
+            "regime_performance": {
+                regime: {
+                    "win_rate": round(stats.get('win_rate', 0), 2),
+                    "total_trades": stats.get('total', 0)
+                }
+                for regime, stats in regime_analysis.items()
+            },
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"Performance analysis error: {e}")
+        return {"success": False, "error": str(e)}
+
 @api_router.get("/admin/system-config")
 async def get_system_config(admin_user: dict = Depends(require_admin)):
     """Get current system configuration (admin only)"""

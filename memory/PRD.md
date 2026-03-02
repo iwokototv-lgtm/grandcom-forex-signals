@@ -3,139 +3,127 @@
 ## Original Problem Statement
 Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Forex Signals Pro". The core feature is a fully automatic signal generation system that posts trading signals to a Telegram channel with automatic profit-taking and trade closure.
 
-## User Personas
-- **Primary User**: Forex traders who want automated trading signals
-- **Admin**: System administrator managing signal generation and monitoring
-
 ## Platforms
 - **Mobile Web App**: React Native (Expo) - LIVE
 - **Desktop App**: Electron - BUILT (Windows Portable + Linux AppImage)
 
-## Core Requirements - ALL COMPLETE ✅
+## All Features - COMPLETE ✅
 
 ### Signal Generation
-- Fully automatic signal generation using live market data
-- Support for Forex pairs, Gold (XAUUSD, XAUEUR), and crypto (BTCUSD)
-- Each signal includes: Entry Price, Stop Loss, TP1, TP2, TP3
-- ML-powered market regime detection (Trend, Range, Volatile)
-- Smart Money Concepts (Order Blocks, Fair Value Gaps)
-- Multi-Timeframe Analysis (H4/H1/M15)
+- Automatic signal generation with ML-powered analysis
+- 11 trading pairs: XAUUSD, XAUEUR, BTCUSD, EURUSD, GBPUSD, USDJPY, EURJPY, GBPJPY, AUDUSD, USDCAD, USDCHF
+- Optimized TP/SL settings based on 2020-2024 backtesting
 
-### OPTIMIZED TP/SL Settings (March 2026)
-Based on comprehensive backtesting (2020-2024 data):
+### Admin Panel Enhancements (March 2026) - NEW
+- **Manual Signal Creation**: Create custom signals with pair selection, BUY/SELL, entry price, TP1/TP2/TP3, SL
+- **User Management**: Change user roles (USER/PREMIUM/ADMIN), subscription tiers (FREE/PRO/PREMIUM), delete users
+- **ML Performance Dashboard**: View pair rankings, regime performance, recommendations
+- **Quick Actions**: Create Signal, Check Outcomes, Run Backtest, Manage Users
 
-**FOREX Pairs → Conservative (3/6/9 pips, SL=10):**
-| Pair | Win Rate | Profit Factor |
-|------|----------|---------------|
-| EURJPY | 58.3% | 1.30 (BEST) |
-| USDJPY | 52.4% | 1.27 |
-| USDCAD | 52.9% | 1.26 |
-| EURUSD | 45.9% | 1.23 |
-| GBPJPY | 65.1% | 1.17 |
-| AUDUSD | 44.4% | 1.15 |
-| USDCHF | 40.3% | 1.14 |
-| GBPUSD | 54.4% | 1.12 |
+### ML Model Optimization (March 2026) - NEW
+- Performance analysis by pair and regime
+- Pair ranking by win rate and profit factor
+- Automatic recommendations for TP/SL adjustments
+- API endpoints: `/admin/ml/performance`, `/admin/ml/optimize`
+
+### Current Live Performance (500 signals analyzed):
+| Pair | Win Rate | Profit Factor | Status |
+|------|----------|---------------|--------|
+| XAUEUR | 80.0% | 1.44 | ⭐ TOP |
+| USDJPY | 73.5% | 1.90 | ⭐ TOP |
+| USDCHF | 72.2% | 1.13 | ⭐ TOP |
+| GBPUSD | 68.8% | 1.85 | ⭐ TOP |
+| EURUSD | 61.3% | 1.06 | OK |
+| USDCAD | 51.2% | 1.26 | OK |
+| XAUUSD | 48.2% | 0.84 | REVIEW |
+| EURJPY | 40.9% | 0.47 | REVIEW |
+
+### OPTIMIZED TP/SL Settings
+**FOREX Pairs - Conservative (3/6/9 pips, SL=10):**
+- Average profit factor improved by ~11%
 
 **GOLD Pairs:**
-| Pair | TP1 | TP2 | TP3 | Win Rate | Profit Factor |
-|------|-----|-----|-----|----------|---------------|
-| XAUUSD | 7 | 15 | 25 | 51.7% | 1.27 |
-| XAUEUR | 5 | 10 | 15 | 63.9% | 1.27 |
-
-### Desktop Application (March 2026)
-**Built Successfully:**
-- Linux AppImage: `/app/desktop/dist/Grandcom Forex Signals Pro-1.0.0-arm64.AppImage` (108 MB)
-- Windows Portable: `/app/desktop/dist/Grandcom-Forex-Signals-Pro-Windows-Portable.zip` (115 MB)
-
-**Features:**
-- Native system tray support
-- Menu bar with quick navigation
-- Zoom controls (Ctrl +/-)
-- Full screen mode (F11)
-- External link handling
-- Auto-minimize to tray
+- XAUUSD: 7/15/25 pips (Balanced)
+- XAUEUR: 5/10/15 pips (Current)
 
 ### Other Completed Features
-- Automatic Signal Outcome Tracking
-- Historical Backtesting Engine (3-10 years)
-- Stripe Subscription System
+- Stripe Subscription System (backend + frontend)
 - Push Notifications (Expo)
+- Historical Backtesting (3-10 years)
 - JWT Authentication with Role-based Admin
 - Telegram Integration (@grandcomsignals)
+- Signal Outcome Tracking (auto TP/SL detection)
 
 ## Technical Architecture
 
 ```
 /app
 ├── backend/
-│   ├── server.py                    # Main FastAPI with optimized pair params
+│   ├── server.py                    # Main FastAPI with all endpoints
 │   ├── subscription_service.py      # Stripe subscriptions
 │   ├── signal_outcome_tracker.py    # Auto TP/SL monitoring
 │   ├── notification_service.py      # Push notifications
 │   ├── backtest_engine.py           # Historical backtesting
-│   └── ml_engine/                   # ML components
-├── frontend/                        # React Native (Expo)
-│   ├── app/(tabs)/
-│   │   ├── home.tsx
-│   │   ├── analytics.tsx
-│   │   ├── profile.tsx
-│   │   ├── subscription.tsx
-│   │   ├── admin.tsx
-│   │   ├── backtest.tsx
-│   │   └── notifications.tsx
-└── desktop/                         # Electron
-    ├── main.js                      # Main process
-    ├── preload.js                   # IPC bridge
-    ├── dist/                        # Built apps
-    │   ├── *.AppImage               # Linux
-    │   └── *.zip                    # Windows Portable
-    └── BUILD_GUIDE.md
+│   └── ml_engine/
+│       ├── regime_detector.py       # Market regime ML
+│       ├── signal_optimizer.py      # Signal optimization
+│       └── model_trainer.py         # ML training & analysis (NEW)
+├── frontend/
+│   └── app/(tabs)/
+│       ├── admin.tsx                # Enhanced admin panel (NEW)
+│       ├── subscription.tsx         # Subscription plans
+│       └── ...
+└── desktop/
+    └── dist/                        # Built apps
+        ├── *.AppImage               # Linux
+        └── *.zip                    # Windows Portable
 ```
 
-## Third-Party Integrations
-- **OpenAI GPT-5.2**: AI analysis (Emergent LLM Key)
-- **Twelve Data API**: Live market data
-- **Telegram Bot API**: Signal posting
-- **Expo Push API**: Mobile notifications
-- **Stripe**: Subscriptions (TEST MODE)
+## Key API Endpoints (Admin)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/signals/create` | POST | Create manual signal |
+| `/admin/users/{id}` | PUT | Update user role/tier |
+| `/admin/users/{id}` | DELETE | Delete user |
+| `/admin/ml/performance` | GET | ML performance analysis |
+| `/admin/ml/optimize` | POST | Run ML optimization |
+| `/admin/pair-config` | GET | Get pair configurations |
 
 ## Session Accomplishments (March 2, 2026)
 
 1. ✅ Fixed Auth Context role synchronization
-2. ✅ Completed Stripe subscription system (backend + frontend)
-3. ✅ Ran comprehensive backtests (all pairs, multiple configs)
-4. ✅ Applied optimized TP/SL settings
-5. ✅ Built desktop app (Windows Portable + Linux AppImage)
+2. ✅ Completed Stripe subscription system
+3. ✅ Ran comprehensive backtests & optimized settings
+4. ✅ Built desktop app (Windows + Linux)
+5. ✅ **Admin Panel Enhancements**:
+   - Manual signal creation UI
+   - User management with role/tier editing
+   - Delete user functionality
+6. ✅ **ML Model Optimization**:
+   - Created model_trainer.py
+   - Performance analysis by pair/regime
+   - API endpoints for ML insights
 
 ## Prioritized Backlog
 
 ### P0 - Critical (ALL COMPLETE ✅)
-- [x] Signal generation with ML
-- [x] Automatic outcome tracking
-- [x] Optimized TP/SL settings
-- [x] Push notifications
-- [x] Backtesting engine
-- [x] Admin panel
-- [x] Stripe subscriptions
-- [x] Desktop app
+- [x] All signal generation features
+- [x] All admin panel features
+- [x] ML optimization & analysis
+- [x] Desktop app builds
 
 ### P1 - High Priority
-- [ ] Windows NSIS installer (requires Windows build environment)
-- [ ] macOS .dmg build (requires macOS)
-- [ ] Code signing for distribution
+- [ ] Investigate AUDUSD/BTCUSD poor performance
+- [ ] Add filtering/sorting to signal history
 
 ### P2 - Medium Priority
-- [ ] Complete Stripe with real API key
-- [ ] Admin panel enhancements
+- [ ] Real Stripe API key for production
+- [ ] Windows NSIS installer (requires Windows)
 
 ### P3 - Future
-- [ ] ML model training with historical data
-- [ ] Auto-updates for desktop app
-
-## Partial Close Percentages (for Trade Copier)
-- TP1: 33%
-- TP2: 33%
-- TP3: 34%
+- [ ] macOS build
+- [ ] Auto-update for desktop
 
 ## Credentials
 - **Admin**: admin@forexsignals.com / Admin@2024!Forex
