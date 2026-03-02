@@ -33,7 +33,25 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - Sends "Trade Closed" notifications to Telegram
 - Rate limiting to avoid Telegram flood control
 
-### Push Notifications (COMPLETED - December 2025)
+### Historical Backtesting Engine (COMPLETED - December 2025)
+- Backend engine supports 3-10 years of historical data analysis
+- Tests different TP/SL configurations on historical price data
+- Calculates detailed metrics:
+  - Win rate, total pips, profit factor
+  - Max drawdown, Sharpe ratio
+  - Yearly and monthly performance breakdown
+  - Consecutive wins/losses tracking
+- **Frontend UI** - Full backtest configuration screen at `/backtest`
+  - Pair selection (all 11 trading pairs)
+  - Date range selection (2015-2025)
+  - Timeframe selection (1h, 4h, daily)
+  - TP1/TP2/TP3 and SL pip configuration
+  - Detailed results display with yearly breakdown
+- API endpoints:
+  - POST `/api/backtest/run` - Run backtest
+  - GET `/api/backtest/history` - Get user's backtest history
+  - GET `/api/backtest/result/{id}` - Get specific result
+  - GET `/api/backtest/pairs` - Get available pairs/config
 - Expo Push Notification service integrated
 - Users can register their device token
 - Notifications sent when new signals are generated

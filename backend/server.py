@@ -27,6 +27,9 @@ from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, g
 # Import Push Notification Service
 from notification_service import PushNotificationService, init_push_service, get_push_service
 
+# Import Backtest Engine
+from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine
+
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
     if isinstance(obj, np.integer):
@@ -1523,6 +1526,179 @@ async def test_push_notification(current_user: dict = Depends(get_current_user))
         logger.error(f"Error sending test notification: {e}")
         return {"success": False, "error": str(e)}
 
+# ============ BACKTEST ENGINE ENDPOINTS ============
+class BacktestRequest(BaseModel):
+    pair: str
+    start_year: int = 2020
+    end_year: int = 2025
+    timeframe: str = "1h"
+    tp1_pips: float = 5.0
+    tp2_pips: float = 10.0
+    tp3_pips: float = 15.0
+    sl_pips: float = 15.0
+    use_atr_for_sl: bool = True
+    atr_sl_multiplier: float = 1.5
+    initial_balance: float = 10000.0
+    risk_per_trade: float = 0.02
+
+@api_router.post("/backtest/run")
+async def run_backtest(
+    request: BacktestRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Run a historical backtest for a trading pair.
+    Supports 3-10 years of historical data analysis.
+    """
+    try:
+        engine = get_backtest_engine()
+        if not engine:
+            raise HTTPException(status_code=500, detail="Backtest engine not initialized")
+        
+        # Validate date range
+        years = request.end_year - request.start_year
+        if years < 1 or years > 10:
+            raise HTTPException(status_code=400, detail="Date range must be 1-10 years")
+        
+        # Create backtest config
+        config = BacktestConfig(
+            pair=request.pair,
+            start_date=datetime(request.start_year, 1, 1),
+            end_date=datetime(request.end_year, 12, 31),
+            timeframe=request.timeframe,
+            initial_balance=request.initial_balance,
+            risk_per_trade=request.risk_per_trade,
+            tp1_pips=request.tp1_pips,
+            tp2_pips=request.tp2_pips,
+            tp3_pips=request.tp3_pips,
+            sl_pips=request.sl_pips,
+            use_atr_for_sl=request.use_atr_for_sl,
+            atr_sl_multiplier=request.atr_sl_multiplier
+        )
+        
+        # Run backtest
+        logger.info(f"Starting backtest for {request.pair} ({request.start_year}-{request.end_year})")
+        results = await engine.run_backtest(config)
+        
+        # Save results to database
+        result_doc = {
+            "user_id": str(current_user["_id"]),
+            "pair": request.pair,
+            "config": {
+                "start_year": request.start_year,
+                "end_year": request.end_year,
+                "timeframe": request.timeframe,
+                "tp1_pips": request.tp1_pips,
+                "tp2_pips": request.tp2_pips,
+                "tp3_pips": request.tp3_pips,
+                "sl_pips": request.sl_pips,
+            },
+            "results": results.to_dict(),
+            "created_at": datetime.utcnow()
+        }
+        await db.backtest_results.insert_one(result_doc)
+        
+        return {
+            "success": True,
+            "message": f"Backtest completed for {request.pair}",
+            "results": results.to_dict()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/backtest/history")
+async def get_backtest_history(
+    limit: int = 10,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get user's backtest history"""
+    try:
+        history = await db.backtest_results.find(
+            {"user_id": str(current_user["_id"])}
+        ).sort("created_at", -1).limit(limit).to_list(limit)
+        
+        # Format for response
+        formatted = []
+        for item in history:
+            formatted.append({
+                "id": str(item["_id"]),
+                "pair": item.get("pair"),
+                "config": item.get("config"),
+                "summary": item.get("results", {}).get("summary", {}),
+                "created_at": item.get("created_at").isoformat() if item.get("created_at") else None
+            })
+        
+        return {
+            "success": True,
+            "count": len(formatted),
+            "history": formatted
+        }
+    except Exception as e:
+        logger.error(f"Error getting backtest history: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/backtest/result/{result_id}")
+async def get_backtest_result(
+    result_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get detailed backtest result by ID"""
+    try:
+        result = await db.backtest_results.find_one({
+            "_id": ObjectId(result_id),
+            "user_id": str(current_user["_id"])
+        })
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Backtest result not found")
+        
+        return {
+            "success": True,
+            "result": {
+                "id": str(result["_id"]),
+                "pair": result.get("pair"),
+                "config": result.get("config"),
+                "results": result.get("results"),
+                "created_at": result.get("created_at").isoformat() if result.get("created_at") else None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting backtest result: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/backtest/pairs")
+async def get_available_pairs(current_user: dict = Depends(get_current_user)):
+    """Get list of pairs available for backtesting"""
+    return {
+        "success": True,
+        "pairs": [
+            {"symbol": "XAUUSD", "name": "Gold / US Dollar", "type": "commodity"},
+            {"symbol": "XAUEUR", "name": "Gold / Euro", "type": "commodity"},
+            {"symbol": "BTCUSD", "name": "Bitcoin / US Dollar", "type": "crypto"},
+            {"symbol": "EURUSD", "name": "Euro / US Dollar", "type": "forex"},
+            {"symbol": "GBPUSD", "name": "British Pound / US Dollar", "type": "forex"},
+            {"symbol": "USDJPY", "name": "US Dollar / Japanese Yen", "type": "forex"},
+            {"symbol": "EURJPY", "name": "Euro / Japanese Yen", "type": "forex"},
+            {"symbol": "GBPJPY", "name": "British Pound / Japanese Yen", "type": "forex"},
+            {"symbol": "AUDUSD", "name": "Australian Dollar / US Dollar", "type": "forex"},
+            {"symbol": "USDCAD", "name": "US Dollar / Canadian Dollar", "type": "forex"},
+            {"symbol": "USDCHF", "name": "US Dollar / Swiss Franc", "type": "forex"},
+        ],
+        "timeframes": [
+            {"value": "1h", "label": "1 Hour"},
+            {"value": "4h", "label": "4 Hours"},
+            {"value": "1day", "label": "Daily"},
+        ],
+        "year_range": {"min": 2015, "max": 2025}
+    }
+
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
@@ -1571,6 +1747,10 @@ async def startup_event():
     # Initialize Push Notification Service
     init_push_service(db)
     logger.info("Push Notification Service initialized")
+    
+    # Initialize Backtest Engine
+    init_backtest_engine(TWELVE_DATA_API_KEY, db)
+    logger.info("Backtest Engine initialized - ready for historical analysis")
     
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())

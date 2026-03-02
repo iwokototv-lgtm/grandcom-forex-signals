@@ -55,6 +55,13 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="backtest"
+        options={{
+          href: null, // Hide from tab bar
+          title: 'Backtest',
+        }}
+      />
+      <Tabs.Screen
         name="help"
         options={{
           href: null,

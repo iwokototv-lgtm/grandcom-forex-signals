@@ -11,6 +11,7 @@ import {
   Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../../utils/api';
 
@@ -55,6 +56,7 @@ const { width } = Dimensions.get('window');
 const ALL_PAIRS = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"];
 
 export default function AnalyticsScreen() {
+  const router = useRouter();
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -176,6 +178,19 @@ export default function AnalyticsScreen() {
           <Text style={styles.title}>ML Analytics Dashboard</Text>
           <Text style={styles.subtitle}>AI-Powered Market Intelligence</Text>
         </View>
+
+        {/* Backtest Button */}
+        <TouchableOpacity
+          style={styles.backtestButton}
+          onPress={() => router.push('/(tabs)/backtest')}
+        >
+          <Ionicons name="analytics" size={24} color="#0A0E27" />
+          <View style={styles.backtestButtonText}>
+            <Text style={styles.backtestButtonTitle}>Historical Backtest</Text>
+            <Text style={styles.backtestButtonSubtitle}>Test TP/SL on 3-10 years of data</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={24} color="#0A0E27" />
+        </TouchableOpacity>
 
         {/* Main Win Rate Card */}
         <View style={styles.mainCard}>
@@ -837,5 +852,27 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
     padding: 20,
+  },
+  backtestButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFD700',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    gap: 12,
+  },
+  backtestButtonText: {
+    flex: 1,
+  },
+  backtestButtonTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#0A0E27',
+  },
+  backtestButtonSubtitle: {
+    fontSize: 12,
+    color: '#0A0E27',
+    opacity: 0.7,
   },
 });
