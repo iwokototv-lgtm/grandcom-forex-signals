@@ -26,7 +26,8 @@ SYMBOL_MAP = {
     "EURJPY": "EUR/JPY",
     "GBPJPY": "GBP/JPY",
     "AUDUSD": "AUD/USD",
-    "USDCAD": "USD/CAD"
+    "USDCAD": "USD/CAD",
+    "USDCHF": "USD/CHF"
 }
 
 def serialize_value(val):
