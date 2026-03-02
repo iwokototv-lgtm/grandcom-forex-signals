@@ -37,6 +37,10 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - Expo Push Notification service integrated
 - Users can register their device token
 - Notifications sent when new signals are generated
+- **Frontend UI** - Full notifications settings screen at `/notifications`
+  - Toggle to enable/disable push notifications
+  - Lists notification types (New Signals, Trade Closed, Market Alerts)
+  - Test notification button
 - API endpoints:
   - POST `/api/notifications/register` - Register push token
   - DELETE `/api/notifications/unregister` - Unregister

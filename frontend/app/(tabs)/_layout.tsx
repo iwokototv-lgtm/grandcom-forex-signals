@@ -46,6 +46,35 @@ export default function TabsLayout() {
           tabBarIcon: ({ color, size }) => <Ionicons name="person" size={size} color={color} />,
         }}
       />
+      {/* Hidden screens - accessible via navigation but not in tab bar */}
+      <Tabs.Screen
+        name="notifications"
+        options={{
+          href: null, // Hide from tab bar
+          title: 'Notifications',
+        }}
+      />
+      <Tabs.Screen
+        name="help"
+        options={{
+          href: null,
+          title: 'Help',
+        }}
+      />
+      <Tabs.Screen
+        name="privacy"
+        options={{
+          href: null,
+          title: 'Privacy',
+        }}
+      />
+      <Tabs.Screen
+        name="terms"
+        options={{
+          href: null,
+          title: 'Terms',
+        }}
+      />
     </Tabs>
   );
 }
