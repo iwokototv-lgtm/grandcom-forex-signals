@@ -16,7 +16,7 @@ trader-signal-hub-1.preview.emergentagent.com
 ### Method 2: Send Link to Yourself
 
 **From Computer:**
-1. Copy this: https://auto-signals-engine.preview.emergentagent.com
+1. Copy this: https://grandcom-pro-signals.preview.emergentagent.com
 2. Send to yourself via:
    - WhatsApp (send to yourself)
    - Telegram (send to "Saved Messages")

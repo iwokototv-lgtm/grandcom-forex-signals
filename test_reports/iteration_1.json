@@ -1,0 +1,79 @@
+{
+  "summary": "First test run for Grandcom Forex Signals Pro app. All tested features are working correctly: Auth with role sync (admin sees Admin Panel button), Stripe subscription endpoints, subscription UI, login flow, and signal display.",
+  "mode": "generate",
+  "baseline_commit": "c3c5406d4ffa09bd46442eb5cce8a7a23c57a0c9",
+  "head_commit": "c3c5406d4ffa09bd46442eb5cce8a7a23c57a0c9",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Profile",
+        "issues": ["Telegram icon shows warning: 'logo-telegram' is not a valid icon name for family 'ionicons'"]
+      }
+    ]
+  },
+  "regression_results": {
+    "total_specs": 3,
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0,
+    "total_tests": 22
+  },
+  "backend_test_results": {
+    "total": 18,
+    "passed": 18,
+    "failed": 0
+  },
+  "specs_created": [
+    "/app/tests/e2e/auth-flows.spec.ts",
+    "/app/tests/e2e/subscription.spec.ts",
+    "/app/tests/e2e/signals-display.spec.ts"
+  ],
+  "specs_updated": [],
+  "quarantined_tests": [],
+  "test_report_links": [
+    "/app/backend/tests/test_auth.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/backend/tests/test_signals.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Fix Ionicons warning: Replace 'logo-telegram' with a valid icon name in profile.tsx (consider using 'logo-twitter' or similar, or use a custom icon)"
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "100%"
+  },
+  "features_tested": {
+    "auth_context_role_sync": {
+      "status": "PASS",
+      "details": "Admin Panel button appears immediately after admin login on profile page"
+    },
+    "stripe_subscription_endpoints": {
+      "status": "PASS",
+      "details": "All endpoints working: /api/subscriptions/packages (no auth), /api/subscriptions/current (auth), /api/subscriptions/create-checkout-session (auth) returns valid Stripe checkout URL"
+    },
+    "subscription_ui": {
+      "status": "PASS",
+      "details": "Subscription page displays all plans (Pro Monthly $29.99, Pro Yearly $299.99, Premium Monthly $79.99, Premium Yearly $799.99) with MOST POPULAR badge, benefit features, and Subscribe Now buttons"
+    },
+    "login_flow": {
+      "status": "PASS",
+      "details": "Login form visible, successful login navigates to home with 'Welcome back' message and user name displayed"
+    },
+    "signal_display": {
+      "status": "PASS",
+      "details": "Signals display with trading pairs (XAUUSD, EURUSD, etc.), BUY/SELL types, TP1/TP2/TP3 levels, SL price, confidence percentage"
+    }
+  },
+  "seed_data_creation": "No seed data created - used existing admin user and signal data",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All primary features are working. Test specs created for auth flows, subscription page, and signal display. Stripe integration uses test key so actual payments won't process but checkout session creation works correctly."
+}

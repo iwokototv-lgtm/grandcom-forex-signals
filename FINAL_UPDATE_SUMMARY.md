@@ -68,7 +68,7 @@ Recent Signal Card:
 The frontend was updated but may need a hard refresh:
 
 ### Option 1: Hard Refresh Browser
-1. Open: https://auto-signals-engine.preview.emergentagent.com
+1. Open: https://grandcom-pro-signals.preview.emergentagent.com
 2. Press `Ctrl + Shift + R` (Windows) or `Cmd + Shift + R` (Mac)
 3. Clear cache if needed
 
@@ -131,9 +131,9 @@ sudo supervisorctl status
 
 ## 🚀 App URLs:
 
-- **Live Preview:** https://auto-signals-engine.preview.emergentagent.com
+- **Live Preview:** https://grandcom-pro-signals.preview.emergentagent.com
 - **Login:** test@example.com / password123
-- **Backend API:** https://auto-signals-engine.preview.emergentagent.com/api/stats
+- **Backend API:** https://grandcom-pro-signals.preview.emergentagent.com/api/stats
 
 ---
 

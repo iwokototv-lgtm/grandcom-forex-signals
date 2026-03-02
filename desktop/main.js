@@ -13,9 +13,9 @@ const APP_CONFIG = {
   minWidth: 400,
   minHeight: 600,
   // Backend API URL - Update this when deployed
-  apiUrl: process.env.API_URL || 'https://auto-signals-engine.preview.emergentagent.com',
+  apiUrl: process.env.API_URL || 'https://grandcom-pro-signals.preview.emergentagent.com',
   // Web app URL
-  webUrl: process.env.WEB_URL || 'https://auto-signals-engine.preview.emergentagent.com'
+  webUrl: process.env.WEB_URL || 'https://grandcom-pro-signals.preview.emergentagent.com'
 };
 
 function createWindow() {

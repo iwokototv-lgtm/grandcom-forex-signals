@@ -30,6 +30,12 @@ from notification_service import PushNotificationService, init_push_service, get
 # Import Backtest Engine
 from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine
 
+# Import Subscription Service
+from subscription_service import (
+    SubscriptionService, init_subscription_service, get_subscription_service,
+    SUBSCRIPTION_PACKAGES, TIER_FEATURES
+)
+
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
     if isinstance(obj, np.integer):
@@ -68,6 +74,7 @@ JWT_EXPIRATION_HOURS = int(os.environ.get('JWT_EXPIRATION_HOURS', 24))
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TWELVE_DATA_API_KEY = os.environ.get('TWELVE_DATA_API_KEY', 'demo')
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -1910,6 +1917,132 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
         }
     }
 
+# ============ STRIPE SUBSCRIPTION ENDPOINTS ============
+class CreateCheckoutRequest(BaseModel):
+    package_id: str
+
+@api_router.post("/subscriptions/create-checkout-session")
+async def create_checkout_session(
+    request: CreateCheckoutRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a Stripe checkout session for subscription"""
+    try:
+        sub_service = get_subscription_service()
+        if not sub_service:
+            raise HTTPException(status_code=500, detail="Subscription service not available")
+        
+        # Get the origin URL from environment or use default
+        origin_url = os.environ.get('FRONTEND_URL', 'https://grandcom-pro-signals.preview.emergentagent.com')
+        
+        result = await sub_service.create_checkout_session(
+            user_id=str(current_user["_id"]),
+            package_id=request.package_id,
+            origin_url=origin_url
+        )
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/subscriptions/packages")
+async def get_subscription_packages():
+    """Get available subscription packages"""
+    return {
+        "success": True,
+        "packages": SUBSCRIPTION_PACKAGES,
+        "tier_features": TIER_FEATURES
+    }
+
+@api_router.get("/subscriptions/current")
+async def get_current_subscription(current_user: dict = Depends(get_current_user)):
+    """Get current user's subscription status"""
+    try:
+        sub_service = get_subscription_service()
+        if not sub_service:
+            return {
+                "success": True,
+                "tier": current_user.get("subscription_tier", "FREE"),
+                "features": TIER_FEATURES.get(current_user.get("subscription_tier", "FREE").lower(), TIER_FEATURES["free"])
+            }
+        
+        subscription = await sub_service.get_user_subscription(str(current_user["_id"]))
+        return {"success": True, **subscription}
+    except Exception as e:
+        logger.error(f"Error getting subscription: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/subscriptions/verify/{session_id}")
+async def verify_subscription_payment(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Verify payment status after checkout"""
+    try:
+        sub_service = get_subscription_service()
+        if not sub_service:
+            raise HTTPException(status_code=500, detail="Subscription service not available")
+        
+        result = await sub_service.verify_payment(session_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying payment: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.post("/subscriptions/cancel")
+async def cancel_subscription(current_user: dict = Depends(get_current_user)):
+    """Cancel current subscription"""
+    try:
+        sub_service = get_subscription_service()
+        if not sub_service:
+            raise HTTPException(status_code=500, detail="Subscription service not available")
+        
+        result = await sub_service.cancel_subscription(str(current_user["_id"]))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling subscription: {e}")
+        return {"success": False, "error": str(e)}
+
+# Stripe webhook endpoint (no auth - called by Stripe)
+from fastapi import Request
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events"""
+    try:
+        payload = await request.body()
+        sig_header = request.headers.get('stripe-signature')
+        
+        # For now, just log the webhook - full implementation would verify signature
+        logger.info(f"Received Stripe webhook")
+        
+        # Parse the event
+        import json
+        event = json.loads(payload)
+        event_type = event.get('type', '')
+        
+        if event_type == 'checkout.session.completed':
+            session = event.get('data', {}).get('object', {})
+            session_id = session.get('id')
+            
+            if session_id:
+                sub_service = get_subscription_service()
+                if sub_service:
+                    await sub_service.verify_payment(session_id)
+                    logger.info(f"Processed checkout completion for session: {session_id}")
+        
+        return {"received": True}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"received": True, "error": str(e)}
+
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
@@ -1962,6 +2095,11 @@ async def startup_event():
     # Initialize Backtest Engine
     init_backtest_engine(TWELVE_DATA_API_KEY, db)
     logger.info("Backtest Engine initialized - ready for historical analysis")
+    
+    # Initialize Subscription Service
+    if STRIPE_API_KEY:
+        init_subscription_service(db, STRIPE_API_KEY)
+        logger.info("Subscription Service initialized")
     
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())

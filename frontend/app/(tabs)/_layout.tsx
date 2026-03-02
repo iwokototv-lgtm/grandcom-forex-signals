@@ -89,6 +89,13 @@ export default function TabsLayout() {
           title: 'Terms',
         }}
       />
+      <Tabs.Screen
+        name="subscription"
+        options={{
+          href: null, // Hide from tab bar
+          title: 'Subscription',
+        }}
+      />
     </Tabs>
   );
 }

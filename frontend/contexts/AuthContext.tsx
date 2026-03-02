@@ -42,7 +42,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       if (storedToken && storedUser) {
         setToken(storedToken);
-        setUser(JSON.parse(storedUser));
+        const parsedUser = JSON.parse(storedUser);
+        
+        // Refresh user data from server to ensure role and other fields are up-to-date
+        try {
+          const response = await axios.get(`${EXPO_PUBLIC_BACKEND_URL}/api/auth/me`, {
+            headers: { Authorization: `Bearer ${storedToken}` }
+          });
+          const freshUserData = response.data;
+          setUser(freshUserData);
+          await AsyncStorage.setItem('user', JSON.stringify(freshUserData));
+        } catch (refreshError) {
+          // If refresh fails (e.g., token expired), use stored data
+          console.log('Using stored user data:', refreshError);
+          setUser(parsedUser);
+        }
       }
     } catch (error) {
       console.error('Error loading auth:', error);
