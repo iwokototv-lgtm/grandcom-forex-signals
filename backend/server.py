@@ -317,14 +317,16 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         return None
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
-# ALL pairs now use FIXED pip values - TP1=5 pips, TP2=10 pips, TP3=15 pips
+# OPTIMIZED based on 2020-2024 backtest analysis
+# FOREX: Conservative (3/6/9) - Higher win rate, better profit factor
+# GOLD: XAUUSD uses Balanced (7/15/25), XAUEUR keeps (5/10/15)
 PAIR_PARAMETERS = {
     "XAUUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
-        "atr_multiplier_sl": 1.5,  # SL still ATR-based
+        "fixed_tp1_pips": 7,   # OPTIMIZED: Balanced settings
+        "fixed_tp2_pips": 15,  # Backtest: PF 1.27, Return 1114%
+        "fixed_tp3_pips": 25,
+        "atr_multiplier_sl": 1.5,
         "min_rr": 1.5,
         "pip_value": 0.1,  # Gold pip = $0.10
         "decimal_places": 2,
@@ -332,7 +334,7 @@ PAIR_PARAMETERS = {
     },
     "XAUEUR": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
+        "fixed_tp1_pips": 5,   # Keep current - PF 1.27, WR 63.9%
         "fixed_tp2_pips": 10,
         "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.5,
@@ -352,13 +354,15 @@ PAIR_PARAMETERS = {
         "decimal_places": 2,
         "typical_spread": 10.0
     },
-    # ===== FOREX PAIRS - FIXED PIP VALUES =====
+    # ===== FOREX PAIRS - OPTIMIZED CONSERVATIVE (3/6/9) =====
+    # Backtest showed ~11% higher profit factor with conservative settings
     "EURUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
-        "atr_multiplier_sl": 1.2,  # SL still ATR-based
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.23, WR 45.9%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.2,
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
@@ -366,9 +370,10 @@ PAIR_PARAMETERS = {
     },
     "GBPUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.12, WR 54.4%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.3,
         "min_rr": 1.5,
         "pip_value": 0.0001,
@@ -377,9 +382,10 @@ PAIR_PARAMETERS = {
     },
     "USDJPY": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.27, WR 52.4%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.2,
         "min_rr": 1.5,
         "pip_value": 0.01,
@@ -388,9 +394,10 @@ PAIR_PARAMETERS = {
     },
     "EURJPY": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.30, WR 58.3% (BEST)
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.4,
         "min_rr": 1.5,
         "pip_value": 0.01,
@@ -399,9 +406,10 @@ PAIR_PARAMETERS = {
     },
     "GBPJPY": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.17, WR 65.1%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.5,
         "min_rr": 1.5,
         "pip_value": 0.01,
@@ -410,9 +418,10 @@ PAIR_PARAMETERS = {
     },
     "AUDUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.15, WR 44.4%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.2,
         "min_rr": 1.5,
         "pip_value": 0.0001,
@@ -421,9 +430,10 @@ PAIR_PARAMETERS = {
     },
     "USDCAD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.26, WR 52.9%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.2,
         "min_rr": 1.5,
         "pip_value": 0.0001,
@@ -432,9 +442,10 @@ PAIR_PARAMETERS = {
     },
     "USDCHF": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,
-        "fixed_tp2_pips": 10,
-        "fixed_tp3_pips": 15,
+        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.14, WR 40.3%
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
         "atr_multiplier_sl": 1.2,
         "min_rr": 1.5,
         "pip_value": 0.0001,
@@ -1901,8 +1912,9 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
                 "pairs": list(PAIR_PARAMETERS.keys())
             },
             "tp_sl": {
-                "forex": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
-                "gold": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
+                "forex": {"tp1": 3, "tp2": 6, "tp3": 9, "sl": 10, "note": "OPTIMIZED - Conservative"},
+                "xauusd": {"tp1": 7, "tp2": 15, "tp3": 25, "sl": "ATR-based", "note": "OPTIMIZED - Balanced"},
+                "xaueur": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
                 "btc": {"tp": "ATR-based", "sl": "ATR-based"}
             },
             "partial_close": {
@@ -1913,6 +1925,11 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
             "outcome_tracker": {
                 "status": "running" if tracker and tracker.is_running else "stopped",
                 "check_interval_seconds": 60
+            },
+            "optimization_notes": {
+                "forex": "Conservative (3/6/9) - PF +11% avg, WR +15-20%",
+                "xauusd": "Balanced (7/15/25) - PF 1.27, Return 1114%",
+                "xaueur": "Current (5/10/15) - PF 1.27, WR 63.9%"
             }
         }
     }
