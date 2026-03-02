@@ -52,7 +52,7 @@ interface MTFAnalysis {
 
 const { width } = Dimensions.get('window');
 
-const ALL_PAIRS = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"];
+const ALL_PAIRS = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"];
 
 export default function AnalyticsScreen() {
   const [stats, setStats] = useState<Stats | null>(null);
