@@ -193,6 +193,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
             "GBPJPY": "GBP/JPY",
             "AUDUSD": "AUD/USD",
             "USDCAD": "USD/CAD",
+            "USDCHF": "USD/CHF",
             "BTCUSD": "BTC/USD"
         }
         
