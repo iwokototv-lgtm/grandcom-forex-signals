@@ -42,7 +42,7 @@ def serialize_numpy(obj):
 from ml_engine import (
     FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, 
     mtf_analyzer, historical_collector, signal_tracker,
-    smc_analyzer, signal_quality_filter, trailing_stop_manager
+    smc_analyzer, signal_quality_filter, regime_enforced_tpsl
 )
 
 ROOT_DIR = Path(__file__).parent
