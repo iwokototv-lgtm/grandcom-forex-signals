@@ -288,33 +288,32 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         return None
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
-# XAUUSD/XAUEUR/BTCUSD: ATR-based (OLD settings)
-# FOREX: FIXED pip values - TP1=5 pips, TP2=10 pips, TP3=15 pips
+# ALL pairs now use FIXED pip values - TP1=5 pips, TP2=10 pips, TP3=15 pips
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "use_fixed_pips": False,  # Use ATR-based
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 1.0,
-        "atr_multiplier_tp2": 2.0,
-        "atr_multiplier_tp3": 3.0,
-        "min_rr": 2.0,
-        "pip_value": 0.1,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
+        "atr_multiplier_sl": 1.5,  # SL still ATR-based
+        "min_rr": 1.5,
+        "pip_value": 0.1,  # Gold pip = $0.10
         "decimal_places": 2,
         "typical_spread": 0.30
     },
     "XAUEUR": {
-        "use_fixed_pips": False,  # Use ATR-based
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 1.0,
-        "atr_multiplier_tp2": 2.0,
-        "atr_multiplier_tp3": 3.0,
-        "min_rr": 2.0,
-        "pip_value": 0.1,
+        "min_rr": 1.5,
+        "pip_value": 0.1,  # Gold pip = €0.10
         "decimal_places": 2,
         "typical_spread": 0.40
     },
     "BTCUSD": {
-        "use_fixed_pips": False,  # Use ATR-based
+        "use_fixed_pips": False,  # Keep ATR-based for BTC due to high volatility
         "atr_multiplier_sl": 2.0,
         "atr_multiplier_tp1": 1.5,
         "atr_multiplier_tp2": 3.0,
