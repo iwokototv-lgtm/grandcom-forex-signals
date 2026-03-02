@@ -322,7 +322,7 @@ export default function HomeScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Active Trading Pairs</Text>
           <View style={styles.pairsContainer}>
-            {['XAUUSD', 'XAUEUR', 'BTCUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'AUDUSD', 'USDCAD'].map((pair) => (
+            {['XAUUSD', 'XAUEUR', 'BTCUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'EURJPY', 'GBPJPY', 'AUDUSD', 'USDCAD', 'USDCHF'].map((pair) => (
               <View key={pair} style={[
                 styles.pairChip,
                 pair.includes('XAU') && styles.pairChipGold,
