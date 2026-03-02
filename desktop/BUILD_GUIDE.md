@@ -3,6 +3,24 @@
 ## Overview
 This Electron app wraps the Grandcom Forex Signals web application into a native desktop experience for Windows, macOS, and Linux.
 
+## Build Status (March 2026)
+- **Linux AppImage**: ✅ Built (`dist/Grandcom Forex Signals Pro-1.0.0-arm64.AppImage`)
+- **Windows Portable**: ✅ Built (`dist/Grandcom-Forex-Signals-Pro-Windows-Portable.zip`)
+- **Windows Installer**: ⚠️ Requires Windows build environment
+- **macOS**: Requires macOS for building
+
+## Quick Distribution
+
+### Windows Users
+1. Download `Grandcom-Forex-Signals-Pro-Windows-Portable.zip`
+2. Extract to any folder
+3. Run `Grandcom Forex Signals Pro.exe`
+
+### Linux Users
+1. Download `Grandcom Forex Signals Pro-1.0.0-arm64.AppImage`
+2. Make executable: `chmod +x *.AppImage`
+3. Run the AppImage
+
 ## Prerequisites
 
 1. **Node.js** (v18 or higher)
