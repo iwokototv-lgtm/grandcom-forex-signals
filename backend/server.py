@@ -380,6 +380,16 @@ PAIR_PARAMETERS = {
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00015
+    },
+    "USDCHF": {
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.8,
+        "atr_multiplier_tp2": 1.6,
+        "atr_multiplier_tp3": 2.4,
+        "min_rr": 2.0,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00012
     }
 }
 
