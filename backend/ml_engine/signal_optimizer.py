@@ -207,6 +207,7 @@ class SignalOptimizer:
     ) -> Dict[str, Any]:
         """
         Optimize entry, SL, and TP levels based on regime and volatility.
+        For fixed pip pairs, only optimize SL (TPs are fixed).
         """
         entry_price = signal['entry_price']
         signal_type = signal['signal']
@@ -214,22 +215,55 @@ class SignalOptimizer:
         regime = regime_result['regime']
         decimal_places = pair_params.get('decimal_places', 5)
         
+        # Check if this is a fixed pip pair
+        use_fixed_pips = pair_params.get('use_fixed_pips', False)
+        
+        if use_fixed_pips:
+            # For fixed pip pairs, only optimize SL, keep TPs fixed
+            pip_value = pair_params.get('pip_value', 0.0001)
+            tp1_pips = pair_params.get('fixed_tp1_pips', 5)
+            tp2_pips = pair_params.get('fixed_tp2_pips', 10)
+            tp3_pips = pair_params.get('fixed_tp3_pips', 15)
+            
+            # Calculate fixed TPs
+            if signal_type == 'BUY':
+                tp1 = round(entry_price + (tp1_pips * pip_value), decimal_places)
+                tp2 = round(entry_price + (tp2_pips * pip_value), decimal_places)
+                tp3 = round(entry_price + (tp3_pips * pip_value), decimal_places)
+                # SL from ATR
+                sl_mult = pair_params.get('atr_multiplier_sl', 1.2)
+                sl_price = round(entry_price - (atr * sl_mult), decimal_places)
+            else:  # SELL
+                tp1 = round(entry_price - (tp1_pips * pip_value), decimal_places)
+                tp2 = round(entry_price - (tp2_pips * pip_value), decimal_places)
+                tp3 = round(entry_price - (tp3_pips * pip_value), decimal_places)
+                # SL from ATR
+                sl_mult = pair_params.get('atr_multiplier_sl', 1.2)
+                sl_price = round(entry_price + (atr * sl_mult), decimal_places)
+            
+            return {
+                'entry_price': entry_price,
+                'sl_price': sl_price,
+                'tp_levels': [tp1, tp2, tp3]
+            }
+        
+        # ATR-based optimization for non-fixed-pip pairs
         # Adjust ATR multipliers based on regime
         if regime == MarketRegime.HIGH_VOLATILITY:
-            sl_mult = pair_params['atr_multiplier_sl'] * 1.3  # Wider SL in high vol
-            tp_mult_1 = pair_params['atr_multiplier_tp1'] * 0.8  # Tighter TP1
-            tp_mult_2 = pair_params['atr_multiplier_tp2'] * 0.9
-            tp_mult_3 = pair_params['atr_multiplier_tp3'] * 0.9
+            sl_mult = pair_params.get('atr_multiplier_sl', 1.5) * 1.3  # Wider SL in high vol
+            tp_mult_1 = pair_params.get('atr_multiplier_tp1', 1.0) * 0.8  # Tighter TP1
+            tp_mult_2 = pair_params.get('atr_multiplier_tp2', 2.0) * 0.9
+            tp_mult_3 = pair_params.get('atr_multiplier_tp3', 3.0) * 0.9
         elif regime == MarketRegime.LOW_VOLATILITY:
-            sl_mult = pair_params['atr_multiplier_sl'] * 0.8  # Tighter SL
-            tp_mult_1 = pair_params['atr_multiplier_tp1'] * 1.2  # Extended TP
-            tp_mult_2 = pair_params['atr_multiplier_tp2'] * 1.2
-            tp_mult_3 = pair_params['atr_multiplier_tp3'] * 1.2
+            sl_mult = pair_params.get('atr_multiplier_sl', 1.5) * 0.8  # Tighter SL
+            tp_mult_1 = pair_params.get('atr_multiplier_tp1', 1.0) * 1.2  # Extended TP
+            tp_mult_2 = pair_params.get('atr_multiplier_tp2', 2.0) * 1.2
+            tp_mult_3 = pair_params.get('atr_multiplier_tp3', 3.0) * 1.2
         else:
-            sl_mult = pair_params['atr_multiplier_sl']
-            tp_mult_1 = pair_params['atr_multiplier_tp1']
-            tp_mult_2 = pair_params['atr_multiplier_tp2']
-            tp_mult_3 = pair_params['atr_multiplier_tp3']
+            sl_mult = pair_params.get('atr_multiplier_sl', 1.5)
+            tp_mult_1 = pair_params.get('atr_multiplier_tp1', 1.0)
+            tp_mult_2 = pair_params.get('atr_multiplier_tp2', 2.0)
+            tp_mult_3 = pair_params.get('atr_multiplier_tp3', 3.0)
         
         # Calculate optimized levels
         if signal_type == 'BUY':

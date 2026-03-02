@@ -18,6 +18,13 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - Multi-Timeframe Analysis (H4/H1/M15)
 - Advanced filters (News, Session, Correlation)
 
+### Fixed Pip TP Levels for Forex (COMPLETED - December 2025)
+- Forex pairs now use FIXED pip targets:
+  - TP1 = 5 pips
+  - TP2 = 10 pips
+  - TP3 = 15 pips
+- XAUUSD, XAUEUR, BTCUSD continue using ATR-based dynamic TPs
+
 ### Automatic Signal Outcome Tracking (COMPLETED - December 2025)
 - Background job monitors active signals every 60 seconds
 - Automatically detects when TP/SL levels are hit
@@ -25,6 +32,15 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - Records pips gained/lost
 - Sends "Trade Closed" notifications to Telegram
 - Rate limiting to avoid Telegram flood control
+
+### Push Notifications (COMPLETED - December 2025)
+- Expo Push Notification service integrated
+- Users can register their device token
+- Notifications sent when new signals are generated
+- API endpoints:
+  - POST `/api/notifications/register` - Register push token
+  - DELETE `/api/notifications/unregister` - Unregister
+  - POST `/api/notifications/test` - Test notification
 
 ### Telegram Integration (COMPLETED)
 - Automatically posts signals to @grandcomsignals channel
@@ -41,7 +57,8 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 /app
 ├── backend/
 │   ├── server.py                    # Main FastAPI app, scheduler, APIs
-│   ├── signal_outcome_tracker.py    # Auto TP/SL monitoring (NEW)
+│   ├── signal_outcome_tracker.py    # Auto TP/SL monitoring
+│   ├── notification_service.py      # Push notifications via Expo
 │   ├── ml_engine/
 │   │   ├── regime_detector.py       # ML market regime classification
 │   │   ├── signal_filter.py         # Quality filtering & TP/SL calc
@@ -72,6 +89,11 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - `POST /api/signals/check-outcomes` - Manual trigger outcome check
 - `GET /api/signals/history` - Signal history with win/loss stats
 
+### Push Notifications
+- `POST /api/notifications/register` - Register Expo push token
+- `DELETE /api/notifications/unregister` - Unregister token
+- `POST /api/notifications/test` - Send test notification
+
 ### ML Analytics
 - `GET /api/ml/regime/{symbol}` - Market regime for symbol
 - `GET /api/ml/mtf/{symbol}` - Multi-timeframe analysis
@@ -100,44 +122,47 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 }
 ```
 
+### push_tokens collection
+```javascript
+{
+  _id: ObjectId,
+  user_id: String,
+  push_token: String,     // ExponentPushToken[...]
+  device_type: String,    // ios, android
+  is_active: Boolean,
+  created_at: Date,
+  updated_at: Date
+}
+```
+
 ## Third-Party Integrations
 - **OpenAI GPT-5.2**: AI analysis (via Emergent LLM Key)
 - **Twelve Data API**: Live market data (Grow plan)
 - **Telegram Bot API**: Signal posting to channel
+- **Expo Push API**: Mobile push notifications
 
 ## What's Implemented (December 2025)
 
 ### Session Accomplishments
-1. **Signal Outcome Tracker** - NEW CRITICAL FEATURE
-   - Created `/app/backend/signal_outcome_tracker.py`
-   - Background task checks active signals every 60 seconds
-   - Automatically closes signals when TP/SL hit
-   - Sends Telegram notifications with rate limiting
-   - Integrated into server.py startup
-
-2. **API Endpoints for Tracking**
-   - `GET /api/signals/tracker-status` - Monitor tracker status
-   - `GET /api/signals/active` - View active signals
-   - `POST /api/signals/check-outcomes` - Manual trigger
-
-3. **Statistics Update**
-   - Updated `/api/stats` to count new CLOSED_TP1/2/3 statuses
-   - Now shows accurate win rate, pips, wins/losses
+1. **Fixed Pip TP Levels** - Forex pairs now use exact 5/10/15 pip targets
+2. **Signal Outcome Tracker** - Automatic trade closing when TP/SL hit
+3. **Push Notifications** - Full Expo push notification integration
+4. **Statistics Update** - Accurate win rate and pips tracking
 
 ### Current Performance
-- Win Rate: ~52%
-- Average Pips: ~139
-- Tracker running 24/7 checking signals every minute
+- Win Rate: ~52%+
+- Active monitoring: 600+ signals
+- Tracker running 24/7 checking every minute
 
 ## Prioritized Backlog
 
 ### P0 - Critical (Done)
 - [x] Automatic signal outcome tracking
-- [x] TP/SL monitoring every 60 seconds
-- [x] Trade closed Telegram notifications
+- [x] Fixed pip TP levels for Forex (5/10/15 pips)
+- [x] Push notification infrastructure
 
 ### P1 - High Priority
-- [ ] Push Notifications via Expo
+- [ ] Frontend push notification registration UI
 - [ ] Historical backtesting engine
 
 ### P2 - Medium Priority

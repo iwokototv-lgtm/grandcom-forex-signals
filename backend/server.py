@@ -24,6 +24,9 @@ from pathlib import Path
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
 
+# Import Push Notification Service
+from notification_service import PushNotificationService, init_push_service, get_push_service
+
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
     if isinstance(obj, np.integer):
@@ -282,10 +285,11 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         return None
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
-# XAUUSD/XAUEUR/BTCUSD: OLD settings
-# FOREX: TP1=5 pips, TP2=10 pips, TP3=15 pips (SL unchanged)
+# XAUUSD/XAUEUR/BTCUSD: ATR-based (OLD settings)
+# FOREX: FIXED pip values - TP1=5 pips, TP2=10 pips, TP3=15 pips
 PAIR_PARAMETERS = {
     "XAUUSD": {
+        "use_fixed_pips": False,  # Use ATR-based
         "atr_multiplier_sl": 1.5,
         "atr_multiplier_tp1": 1.0,
         "atr_multiplier_tp2": 2.0,
@@ -296,6 +300,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.30
     },
     "XAUEUR": {
+        "use_fixed_pips": False,  # Use ATR-based
         "atr_multiplier_sl": 1.5,
         "atr_multiplier_tp1": 1.0,
         "atr_multiplier_tp2": 2.0,
@@ -306,6 +311,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.40
     },
     "BTCUSD": {
+        "use_fixed_pips": False,  # Use ATR-based
         "atr_multiplier_sl": 2.0,
         "atr_multiplier_tp1": 1.5,
         "atr_multiplier_tp2": 3.0,
@@ -315,81 +321,90 @@ PAIR_PARAMETERS = {
         "decimal_places": 2,
         "typical_spread": 10.0
     },
+    # ===== FOREX PAIRS - FIXED PIP VALUES =====
     "EURUSD": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
+        "atr_multiplier_sl": 1.2,  # SL still ATR-based
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00010
     },
     "GBPUSD": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.3,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDJPY": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.010
     },
     "EURJPY": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.4,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.015
     },
     "GBPJPY": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.020
     },
     "AUDUSD": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDCAD": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00015
     },
     "USDCHF": {
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 5,
+        "fixed_tp2_pips": 10,
+        "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
-        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
-        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
@@ -414,6 +429,7 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
     try:
         # Get pair-specific parameters
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
+        use_fixed_pips = params.get('use_fixed_pips', False)
         
         chat = LlmChat(
             api_key=EMERGENT_LLM_KEY,
@@ -421,50 +437,102 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             system_message="You are an elite institutional forex and commodities trader. Provide precise, actionable trading signals with strict risk management."
         ).with_model("openai", "gpt-5.2")
         
-        prompt = f"""
-        Analyze {symbol} market data and provide a professional trading signal:
-        
-        === MARKET DATA ===
-        Current Price: {indicators['current_price']}
-        RSI (14): {indicators['rsi']:.2f}
-        MACD: {indicators['macd']:.6f} (Signal: {indicators['macd_signal']:.6f})
-        MA 20: {indicators['ma_20']:.{params['decimal_places']}f}
-        MA 50: {indicators['ma_50']:.{params['decimal_places']}f}
-        Bollinger Upper: {indicators['bb_upper']:.{params['decimal_places']}f}
-        Bollinger Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
-        ATR (14): {indicators['atr']:.{params['decimal_places']}f}
-        Trend Bias: {indicators['trend']}
-        
-        === PAIR-SPECIFIC PARAMETERS ===
-        ATR Multiplier for SL: {params['atr_multiplier_sl']}
-        ATR Multiplier for TP1: {params['atr_multiplier_tp1']}
-        ATR Multiplier for TP2: {params['atr_multiplier_tp2']}
-        ATR Multiplier for TP3: {params['atr_multiplier_tp3']}
-        Minimum Risk/Reward: {params['min_rr']}
-        Decimal Places: {params['decimal_places']}
-        
-        === REQUIREMENTS ===
-        1. Calculate SL using ATR × {params['atr_multiplier_sl']}
-        2. Calculate TP1 using ATR × {params['atr_multiplier_tp1']}
-        3. Calculate TP2 using ATR × {params['atr_multiplier_tp2']}
-        4. Calculate TP3 using ATR × {params['atr_multiplier_tp3']}
-        5. CRITICAL: All three TP levels MUST be DIFFERENT values
-        6. CRITICAL: Minimum Risk/Reward ratio must be {params['min_rr']}:1
-        7. Round all prices to {params['decimal_places']} decimal places
-        
-        === OUTPUT FORMAT (JSON ONLY) ===
-        {{
-            "signal": "BUY" or "SELL" or "NEUTRAL",
-            "confidence": numeric 0-100,
-            "entry_price": numeric (current price),
-            "tp_levels": [tp1, tp2, tp3] (3 DIFFERENT ascending/descending values),
-            "sl_price": numeric,
-            "analysis": "Brief explanation under 150 words",
-            "risk_reward": numeric (e.g., 2.5)
-        }}
-        
-        RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
-        """
+        # Build prompt based on whether using fixed pips or ATR-based
+        if use_fixed_pips:
+            # Fixed pip values for Forex pairs
+            tp1_pips = params.get('fixed_tp1_pips', 5)
+            tp2_pips = params.get('fixed_tp2_pips', 10)
+            tp3_pips = params.get('fixed_tp3_pips', 15)
+            pip_value = params['pip_value']
+            
+            prompt = f"""
+            Analyze {symbol} market data and provide a professional trading signal:
+            
+            === MARKET DATA ===
+            Current Price: {indicators['current_price']}
+            RSI (14): {indicators['rsi']:.2f}
+            MACD: {indicators['macd']:.6f} (Signal: {indicators['macd_signal']:.6f})
+            MA 20: {indicators['ma_20']:.{params['decimal_places']}f}
+            MA 50: {indicators['ma_50']:.{params['decimal_places']}f}
+            Bollinger Upper: {indicators['bb_upper']:.{params['decimal_places']}f}
+            Bollinger Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
+            ATR (14): {indicators['atr']:.{params['decimal_places']}f}
+            Trend Bias: {indicators['trend']}
+            
+            === FIXED PIP TARGETS ===
+            TP1: {tp1_pips} pips from entry
+            TP2: {tp2_pips} pips from entry
+            TP3: {tp3_pips} pips from entry
+            SL: ATR × {params['atr_multiplier_sl']}
+            Pip Value: {pip_value}
+            
+            === REQUIREMENTS ===
+            1. Determine BUY or SELL based on technical analysis
+            2. Entry price = Current price
+            3. For BUY: TP1 = entry + ({tp1_pips} × {pip_value}), TP2 = entry + ({tp2_pips} × {pip_value}), TP3 = entry + ({tp3_pips} × {pip_value})
+            4. For SELL: TP1 = entry - ({tp1_pips} × {pip_value}), TP2 = entry - ({tp2_pips} × {pip_value}), TP3 = entry - ({tp3_pips} × {pip_value})
+            5. SL calculated from ATR × {params['atr_multiplier_sl']}
+            6. Round all prices to {params['decimal_places']} decimal places
+            
+            === OUTPUT FORMAT (JSON ONLY) ===
+            {{
+                "signal": "BUY" or "SELL" or "NEUTRAL",
+                "confidence": numeric 0-100,
+                "entry_price": numeric (current price),
+                "tp_levels": [tp1, tp2, tp3],
+                "sl_price": numeric,
+                "analysis": "Brief explanation under 150 words",
+                "risk_reward": numeric
+            }}
+            
+            RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+            """
+        else:
+            # ATR-based approach for XAUUSD, XAUEUR, BTCUSD
+            prompt = f"""
+            Analyze {symbol} market data and provide a professional trading signal:
+            
+            === MARKET DATA ===
+            Current Price: {indicators['current_price']}
+            RSI (14): {indicators['rsi']:.2f}
+            MACD: {indicators['macd']:.6f} (Signal: {indicators['macd_signal']:.6f})
+            MA 20: {indicators['ma_20']:.{params['decimal_places']}f}
+            MA 50: {indicators['ma_50']:.{params['decimal_places']}f}
+            Bollinger Upper: {indicators['bb_upper']:.{params['decimal_places']}f}
+            Bollinger Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
+            ATR (14): {indicators['atr']:.{params['decimal_places']}f}
+            Trend Bias: {indicators['trend']}
+            
+            === PAIR-SPECIFIC PARAMETERS ===
+            ATR Multiplier for SL: {params['atr_multiplier_sl']}
+            ATR Multiplier for TP1: {params.get('atr_multiplier_tp1', 1.0)}
+            ATR Multiplier for TP2: {params.get('atr_multiplier_tp2', 2.0)}
+            ATR Multiplier for TP3: {params.get('atr_multiplier_tp3', 3.0)}
+            Minimum Risk/Reward: {params['min_rr']}
+            Decimal Places: {params['decimal_places']}
+            
+            === REQUIREMENTS ===
+            1. Calculate SL using ATR × {params['atr_multiplier_sl']}
+            2. Calculate TP1 using ATR × {params.get('atr_multiplier_tp1', 1.0)}
+            3. Calculate TP2 using ATR × {params.get('atr_multiplier_tp2', 2.0)}
+            4. Calculate TP3 using ATR × {params.get('atr_multiplier_tp3', 3.0)}
+            5. CRITICAL: All three TP levels MUST be DIFFERENT values
+            6. CRITICAL: Minimum Risk/Reward ratio must be {params['min_rr']}:1
+            7. Round all prices to {params['decimal_places']} decimal places
+            
+            === OUTPUT FORMAT (JSON ONLY) ===
+            {{
+                "signal": "BUY" or "SELL" or "NEUTRAL",
+                "confidence": numeric 0-100,
+                "entry_price": numeric (current price),
+                "tp_levels": [tp1, tp2, tp3] (3 DIFFERENT ascending/descending values),
+                "sl_price": numeric,
+                "analysis": "Brief explanation under 150 words",
+                "risk_reward": numeric (e.g., 2.5)
+            }}
+            
+            RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+            """
         
         user_message = UserMessage(text=prompt)
         response = await chat.send_message(user_message)
@@ -474,28 +542,48 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         ai_data = json.loads(response)
         
         # Validate and fix TP levels if needed
+        entry = ai_data.get("entry_price", indicators['current_price'])
+        signal_type = ai_data.get("signal", "BUY")
         tp_levels = ai_data.get("tp_levels", [])
-        if len(tp_levels) == 3:
-            # Ensure all TP levels are different
-            if len(set(tp_levels)) != 3:
-                # Recalculate using ATR-based approach
-                atr = indicators['atr']
-                entry = ai_data.get("entry_price", indicators['current_price'])
-                signal_type = ai_data.get("signal", "BUY")
-                
-                if signal_type == "BUY":
-                    tp_levels = [
-                        round(entry + (atr * params['atr_multiplier_tp1']), params['decimal_places']),
-                        round(entry + (atr * params['atr_multiplier_tp2']), params['decimal_places']),
-                        round(entry + (atr * params['atr_multiplier_tp3']), params['decimal_places'])
-                    ]
-                else:
-                    tp_levels = [
-                        round(entry - (atr * params['atr_multiplier_tp1']), params['decimal_places']),
-                        round(entry - (atr * params['atr_multiplier_tp2']), params['decimal_places']),
-                        round(entry - (atr * params['atr_multiplier_tp3']), params['decimal_places'])
-                    ]
-                ai_data["tp_levels"] = tp_levels
+        
+        # Always recalculate TP levels for fixed pip pairs to ensure exactness
+        if use_fixed_pips and signal_type != "NEUTRAL":
+            tp1_pips = params.get('fixed_tp1_pips', 5)
+            tp2_pips = params.get('fixed_tp2_pips', 10)
+            tp3_pips = params.get('fixed_tp3_pips', 15)
+            pip_value = params['pip_value']
+            
+            if signal_type == "BUY":
+                tp_levels = [
+                    round(entry + (tp1_pips * pip_value), params['decimal_places']),
+                    round(entry + (tp2_pips * pip_value), params['decimal_places']),
+                    round(entry + (tp3_pips * pip_value), params['decimal_places'])
+                ]
+            else:  # SELL
+                tp_levels = [
+                    round(entry - (tp1_pips * pip_value), params['decimal_places']),
+                    round(entry - (tp2_pips * pip_value), params['decimal_places']),
+                    round(entry - (tp3_pips * pip_value), params['decimal_places'])
+                ]
+            ai_data["tp_levels"] = tp_levels
+            logger.info(f"Fixed pip TP for {symbol} {signal_type}: Entry={entry}, TP1={tp_levels[0]} (+{tp1_pips}pips), TP2={tp_levels[1]} (+{tp2_pips}pips), TP3={tp_levels[2]} (+{tp3_pips}pips)")
+        
+        # For ATR-based pairs, ensure all TP levels are different
+        elif len(tp_levels) == 3 and len(set(tp_levels)) != 3:
+            atr = indicators['atr']
+            if signal_type == "BUY":
+                tp_levels = [
+                    round(entry + (atr * params.get('atr_multiplier_tp1', 1.0)), params['decimal_places']),
+                    round(entry + (atr * params.get('atr_multiplier_tp2', 2.0)), params['decimal_places']),
+                    round(entry + (atr * params.get('atr_multiplier_tp3', 3.0)), params['decimal_places'])
+                ]
+            else:
+                tp_levels = [
+                    round(entry - (atr * params.get('atr_multiplier_tp1', 1.0)), params['decimal_places']),
+                    round(entry - (atr * params.get('atr_multiplier_tp2', 2.0)), params['decimal_places']),
+                    round(entry - (atr * params.get('atr_multiplier_tp3', 3.0)), params['decimal_places'])
+                ]
+            ai_data["tp_levels"] = tp_levels
         
         # Parse risk_reward if it's in ratio format
         risk_reward = ai_data.get("risk_reward", params['min_rr'])
@@ -624,6 +712,21 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         
         # Send to Telegram with regime info
         await send_signal_to_telegram(signal, regime_name, risk_multiplier)
+        
+        # Send push notification to app users
+        try:
+            push_svc = get_push_service()
+            if push_svc:
+                await push_svc.send_new_signal_notification({
+                    "id": signal.id,
+                    "pair": signal.pair,
+                    "type": signal.type,
+                    "entry_price": signal.entry_price,
+                    "confidence": signal.confidence,
+                    "regime": regime_name
+                })
+        except Exception as push_err:
+            logger.warning(f"Push notification failed for {pair}: {push_err}")
         
         return signal
     except Exception as e:
@@ -1348,6 +1451,78 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
         "losses": losses
     }
 
+# ============ PUSH NOTIFICATION ENDPOINTS ============
+class PushTokenRegister(BaseModel):
+    push_token: str
+    device_type: Optional[str] = "unknown"
+
+@api_router.post("/notifications/register")
+async def register_push_token(
+    data: PushTokenRegister,
+    current_user: dict = Depends(get_current_user)
+):
+    """Register a user's push notification token"""
+    try:
+        push_svc = get_push_service()
+        if not push_svc:
+            raise HTTPException(status_code=500, detail="Push service not initialized")
+        
+        success = await push_svc.register_push_token(
+            user_id=str(current_user["_id"]),
+            push_token=data.push_token,
+            device_type=data.device_type
+        )
+        
+        return {"success": success}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error registering push token: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.delete("/notifications/unregister")
+async def unregister_push_token(current_user: dict = Depends(get_current_user)):
+    """Unregister a user's push notification token"""
+    try:
+        push_svc = get_push_service()
+        if not push_svc:
+            raise HTTPException(status_code=500, detail="Push service not initialized")
+        
+        success = await push_svc.unregister_push_token(str(current_user["_id"]))
+        return {"success": success}
+    except Exception as e:
+        logger.error(f"Error unregistering push token: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.post("/notifications/test")
+async def test_push_notification(current_user: dict = Depends(get_current_user)):
+    """Send a test push notification to the current user"""
+    try:
+        push_svc = get_push_service()
+        if not push_svc:
+            raise HTTPException(status_code=500, detail="Push service not initialized")
+        
+        # Get user's token
+        token_doc = await db.push_tokens.find_one({
+            "user_id": str(current_user["_id"]),
+            "is_active": True
+        })
+        
+        if not token_doc:
+            return {"success": False, "error": "No push token registered"}
+        
+        result = await push_svc.send_notification(
+            push_tokens=[token_doc["push_token"]],
+            title="Test Notification",
+            body="Push notifications are working!",
+            data={"type": "test"}
+        )
+        
+        return {"success": result["success"] > 0, "result": result}
+    except Exception as e:
+        logger.error(f"Error sending test notification: {e}")
+        return {"success": False, "error": str(e)}
+
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
@@ -1392,6 +1567,10 @@ async def startup_event():
     )
     tracker.start(interval_seconds=60)  # Check every minute
     logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
+    
+    # Initialize Push Notification Service
+    init_push_service(db)
+    logger.info("Push Notification Service initialized")
     
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())
