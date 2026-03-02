@@ -6,7 +6,7 @@ from .signal_optimizer import SignalOptimizer
 from .multi_timeframe import MultiTimeframeAnalyzer, mtf_analyzer
 from .data_collector import HistoricalDataCollector, SignalResultTracker, historical_collector, signal_tracker
 from .smart_money import SmartMoneyAnalyzer, smc_analyzer
-from .signal_filter import SignalQualityFilter, TrailingStopManager, signal_quality_filter, trailing_stop_manager
+from .signal_filter import SignalQualityFilter, RegimeEnforcedTPSL, signal_quality_filter, regime_enforced_tpsl
 
 __all__ = [
     'FeatureEngineer', 
@@ -22,7 +22,7 @@ __all__ = [
     'SmartMoneyAnalyzer',
     'smc_analyzer',
     'SignalQualityFilter',
-    'TrailingStopManager',
+    'RegimeEnforcedTPSL',
     'signal_quality_filter',
-    'trailing_stop_manager'
+    'regime_enforced_tpsl'
 ]
