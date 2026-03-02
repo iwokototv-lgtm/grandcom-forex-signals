@@ -279,114 +279,115 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         return None
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
-# Each pair has unique characteristics requiring different optimization
+# CORRECTED: Reduced TP levels for realistic profit taking
+# TP1 should be achievable within 1-4 hours in normal conditions
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 1.0,
-        "atr_multiplier_tp2": 2.0,
-        "atr_multiplier_tp3": 3.0,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 1.0,
+        "atr_multiplier_tp1": 0.5,  # REDUCED from 1.0
+        "atr_multiplier_tp2": 0.8,  # REDUCED from 2.0
+        "atr_multiplier_tp3": 1.2,  # REDUCED from 3.0
+        "min_rr": 1.5,
         "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.30
     },
     "XAUEUR": {
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 1.0,
-        "atr_multiplier_tp2": 2.0,
-        "atr_multiplier_tp3": 3.0,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 1.0,
+        "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 0.8,
+        "atr_multiplier_tp3": 1.2,
+        "min_rr": 1.5,
         "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.40
     },
     "BTCUSD": {
-        "atr_multiplier_sl": 2.0,
-        "atr_multiplier_tp1": 1.5,
-        "atr_multiplier_tp2": 3.0,
-        "atr_multiplier_tp3": 4.5,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.6,  # REDUCED from 1.5
+        "atr_multiplier_tp2": 1.0,  # REDUCED from 3.0
+        "atr_multiplier_tp3": 1.5,  # REDUCED from 4.5
+        "min_rr": 1.5,
         "pip_value": 1.0,
         "decimal_places": 2,
         "typical_spread": 10.0
     },
     "EURUSD": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.8,
-        "atr_multiplier_tp2": 1.6,
-        "atr_multiplier_tp3": 2.4,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,  # REDUCED from 0.8
+        "atr_multiplier_tp2": 0.7,  # REDUCED from 1.6
+        "atr_multiplier_tp3": 1.0,  # REDUCED from 2.4
+        "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00010
     },
     "GBPUSD": {
-        "atr_multiplier_sl": 1.3,
-        "atr_multiplier_tp1": 0.9,
-        "atr_multiplier_tp2": 1.8,
-        "atr_multiplier_tp3": 2.7,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,
+        "atr_multiplier_tp2": 0.7,
+        "atr_multiplier_tp3": 1.0,
+        "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDJPY": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.8,
-        "atr_multiplier_tp2": 1.6,
-        "atr_multiplier_tp3": 2.4,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,
+        "atr_multiplier_tp2": 0.7,
+        "atr_multiplier_tp3": 1.0,
+        "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.010
     },
     "EURJPY": {
-        "atr_multiplier_sl": 1.4,
-        "atr_multiplier_tp1": 1.0,
-        "atr_multiplier_tp2": 2.0,
-        "atr_multiplier_tp3": 3.0,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.9,
+        "atr_multiplier_tp1": 0.45,
+        "atr_multiplier_tp2": 0.75,
+        "atr_multiplier_tp3": 1.1,
+        "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.015
     },
     "GBPJPY": {
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 1.1,
-        "atr_multiplier_tp2": 2.2,
-        "atr_multiplier_tp3": 3.3,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 1.0,
+        "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 0.8,
+        "atr_multiplier_tp3": 1.2,
+        "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.020
     },
     "AUDUSD": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.8,
-        "atr_multiplier_tp2": 1.6,
-        "atr_multiplier_tp3": 2.4,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,
+        "atr_multiplier_tp2": 0.7,
+        "atr_multiplier_tp3": 1.0,
+        "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDCAD": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.8,
-        "atr_multiplier_tp2": 1.6,
-        "atr_multiplier_tp3": 2.4,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,
+        "atr_multiplier_tp2": 0.7,
+        "atr_multiplier_tp3": 1.0,
+        "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00015
     },
     "USDCHF": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.8,
-        "atr_multiplier_tp2": 1.6,
-        "atr_multiplier_tp3": 2.4,
-        "min_rr": 2.0,
+        "atr_multiplier_sl": 0.8,
+        "atr_multiplier_tp1": 0.4,
+        "atr_multiplier_tp2": 0.7,
+        "atr_multiplier_tp3": 1.0,
+        "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
