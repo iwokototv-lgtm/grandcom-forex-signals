@@ -6,7 +6,7 @@
 
 **Just open this link on your phone:**
 ```
-https://grandcom-alerts.preview.emergentagent.com
+https://auto-signals-engine.preview.emergentagent.com
 ```
 
 ✅ Works on ANY smartphone (iPhone/Android)

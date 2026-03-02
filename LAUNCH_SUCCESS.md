@@ -9,7 +9,7 @@
 ## 🚀 YOUR COMPLETE LIVE SYSTEM:
 
 ### 📱 Mobile App (LIVE):
-**URL:** https://grandcom-alerts.preview.emergentagent.com
+**URL:** https://auto-signals-engine.preview.emergentagent.com
 
 **Admin Login:**
 ```

@@ -2,7 +2,7 @@
 
 ## 🎯 Quick Start Guide
 
-Your app is running at: **https://grandcom-alerts.preview.emergentagent.com**
+Your app is running at: **https://auto-signals-engine.preview.emergentagent.com**
 
 ---
 
@@ -293,7 +293,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8001/api/signals?limit=5
 ```
 
 ### Test Frontend:
-Open in browser: https://grandcom-alerts.preview.emergentagent.com
+Open in browser: https://auto-signals-engine.preview.emergentagent.com
 
 ---
 

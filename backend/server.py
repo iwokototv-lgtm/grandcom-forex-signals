@@ -21,6 +21,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+# Import Signal Outcome Tracker
+from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
+
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
     if isinstance(obj, np.integer):
@@ -279,114 +282,114 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         return None
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
-# CORRECTED: Reduced TP levels for realistic profit taking
-# TP1 should be achievable within 1-4 hours in normal conditions
+# XAUUSD/XAUEUR/BTCUSD: OLD settings
+# FOREX: TP1=5 pips, TP2=10 pips, TP3=15 pips (SL unchanged)
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "atr_multiplier_sl": 1.0,
-        "atr_multiplier_tp1": 0.5,  # REDUCED from 1.0
-        "atr_multiplier_tp2": 0.8,  # REDUCED from 2.0
-        "atr_multiplier_tp3": 1.2,  # REDUCED from 3.0
-        "min_rr": 1.5,
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 1.0,
+        "atr_multiplier_tp2": 2.0,
+        "atr_multiplier_tp3": 3.0,
+        "min_rr": 2.0,
         "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.30
     },
     "XAUEUR": {
-        "atr_multiplier_sl": 1.0,
-        "atr_multiplier_tp1": 0.5,
-        "atr_multiplier_tp2": 0.8,
-        "atr_multiplier_tp3": 1.2,
-        "min_rr": 1.5,
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 1.0,
+        "atr_multiplier_tp2": 2.0,
+        "atr_multiplier_tp3": 3.0,
+        "min_rr": 2.0,
         "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.40
     },
     "BTCUSD": {
-        "atr_multiplier_sl": 1.2,
-        "atr_multiplier_tp1": 0.6,  # REDUCED from 1.5
-        "atr_multiplier_tp2": 1.0,  # REDUCED from 3.0
-        "atr_multiplier_tp3": 1.5,  # REDUCED from 4.5
-        "min_rr": 1.5,
+        "atr_multiplier_sl": 2.0,
+        "atr_multiplier_tp1": 1.5,
+        "atr_multiplier_tp2": 3.0,
+        "atr_multiplier_tp3": 4.5,
+        "min_rr": 2.0,
         "pip_value": 1.0,
         "decimal_places": 2,
         "typical_spread": 10.0
     },
     "EURUSD": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,  # REDUCED from 0.8
-        "atr_multiplier_tp2": 0.7,  # REDUCED from 1.6
-        "atr_multiplier_tp3": 1.0,  # REDUCED from 2.4
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00010
     },
     "GBPUSD": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,
-        "atr_multiplier_tp2": 0.7,
-        "atr_multiplier_tp3": 1.0,
+        "atr_multiplier_sl": 1.3,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDJPY": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,
-        "atr_multiplier_tp2": 0.7,
-        "atr_multiplier_tp3": 1.0,
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.010
     },
     "EURJPY": {
-        "atr_multiplier_sl": 0.9,
-        "atr_multiplier_tp1": 0.45,
-        "atr_multiplier_tp2": 0.75,
-        "atr_multiplier_tp3": 1.1,
+        "atr_multiplier_sl": 1.4,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.015
     },
     "GBPJPY": {
-        "atr_multiplier_sl": 1.0,
-        "atr_multiplier_tp1": 0.5,
-        "atr_multiplier_tp2": 0.8,
-        "atr_multiplier_tp3": 1.2,
+        "atr_multiplier_sl": 1.5,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.01,
         "decimal_places": 3,
         "typical_spread": 0.020
     },
     "AUDUSD": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,
-        "atr_multiplier_tp2": 0.7,
-        "atr_multiplier_tp3": 1.0,
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
     },
     "USDCAD": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,
-        "atr_multiplier_tp2": 0.7,
-        "atr_multiplier_tp3": 1.0,
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00015
     },
     "USDCHF": {
-        "atr_multiplier_sl": 0.8,
-        "atr_multiplier_tp1": 0.4,
-        "atr_multiplier_tp2": 0.7,
-        "atr_multiplier_tp3": 1.0,
+        "atr_multiplier_sl": 1.2,
+        "atr_multiplier_tp1": 0.33,  # TP1 = 5 pips
+        "atr_multiplier_tp2": 0.67,  # TP2 = 10 pips
+        "atr_multiplier_tp3": 1.0,   # TP3 = 15 pips
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
@@ -827,6 +830,90 @@ async def get_signals_history(
         logger.error(f"Error getting signals history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============ SIGNAL OUTCOME TRACKER ENDPOINTS ============
+# NOTE: These must come BEFORE /signals/{signal_id} to avoid route conflicts
+
+@api_router.post("/signals/check-outcomes")
+async def manual_check_outcomes(current_user: dict = Depends(get_current_user)):
+    """Manually trigger a check of all active signals for TP/SL hits"""
+    try:
+        tracker = get_outcome_tracker()
+        if not tracker:
+            raise HTTPException(status_code=500, detail="Outcome tracker not initialized")
+        
+        results = await tracker.check_all_active_signals()
+        
+        return {
+            "success": True,
+            "message": "Outcome check completed",
+            "results": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in manual outcome check: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/signals/tracker-status")
+async def get_tracker_status(current_user: dict = Depends(get_current_user)):
+    """Get the status of the signal outcome tracker"""
+    try:
+        tracker = get_outcome_tracker()
+        if not tracker:
+            return {
+                "success": True,
+                "status": "not_initialized",
+                "is_running": False
+            }
+        
+        # Count active signals
+        active_count = await db.signals.count_documents({"status": "ACTIVE"})
+        closed_today = await db.signals.count_documents({
+            "closed_at": {"$gte": datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)}
+        })
+        
+        return {
+            "success": True,
+            "status": "running" if tracker.is_running else "stopped",
+            "is_running": tracker.is_running,
+            "active_signals": active_count,
+            "closed_today": closed_today,
+            "check_interval_seconds": 60
+        }
+    except Exception as e:
+        logger.error(f"Error getting tracker status: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/signals/active")
+async def get_active_signals(current_user: dict = Depends(get_current_user)):
+    """Get all currently active signals with their current distance from TP/SL"""
+    try:
+        active_signals = await db.signals.find({"status": "ACTIVE"}).sort("created_at", -1).to_list(length=100)
+        
+        signals_with_status = []
+        for signal in active_signals:
+            signal_data = {
+                "id": str(signal["_id"]),
+                "pair": signal.get("pair"),
+                "type": signal.get("type"),
+                "entry_price": signal.get("entry_price"),
+                "current_price": signal.get("current_price"),
+                "tp_levels": signal.get("tp_levels", []),
+                "sl_price": signal.get("sl_price"),
+                "created_at": signal.get("created_at").isoformat() if signal.get("created_at") else None,
+                "regime": signal.get("regime", "UNKNOWN")
+            }
+            signals_with_status.append(signal_data)
+        
+        return {
+            "success": True,
+            "count": len(signals_with_status),
+            "signals": signals_with_status
+        }
+    except Exception as e:
+        logger.error(f"Error getting active signals: {e}")
+        return {"success": False, "error": str(e)}
+
 @api_router.get("/signals/{signal_id}", response_model=Signal)
 async def get_signal(signal_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific signal"""
@@ -1236,20 +1323,29 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
     total_signals = await db.signals.count_documents({})
     active_signals = await db.signals.count_documents({"status": "ACTIVE"})
     
-    # Win rate calculation
-    closed_signals = await db.signals.find({"status": {"$in": ["HIT_TP", "HIT_SL"]}}).to_list(1000)
-    wins = sum(1 for s in closed_signals if s.get("result") == "WIN")
-    win_rate = (wins / len(closed_signals) * 100) if closed_signals else 0
+    # Win rate calculation - count closed signals with new status format
+    closed_statuses = ["CLOSED_TP1", "CLOSED_TP2", "CLOSED_TP3", "CLOSED_SL", "HIT_TP", "HIT_SL"]
+    closed_signals = await db.signals.find({"status": {"$in": closed_statuses}}).to_list(5000)
     
-    # Average pips
-    avg_pips = sum(s.get("pips", 0) for s in closed_signals if s.get("pips")) / len(closed_signals) if closed_signals else 0
+    # Calculate wins and losses
+    wins = sum(1 for s in closed_signals if s.get("result") == "WIN")
+    losses = sum(1 for s in closed_signals if s.get("result") == "LOSS")
+    total_closed = wins + losses
+    
+    win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+    
+    # Average pips (only count signals with pips data)
+    signals_with_pips = [s for s in closed_signals if s.get("pips") is not None]
+    avg_pips = sum(s.get("pips", 0) for s in signals_with_pips) / len(signals_with_pips) if signals_with_pips else 0
     
     return {
         "total_signals": total_signals,
         "active_signals": active_signals,
         "win_rate": round(win_rate, 2),
         "avg_pips": round(avg_pips, 2),
-        "total_closed": len(closed_signals)
+        "total_closed": total_closed,
+        "wins": wins,
+        "losses": losses
     }
 
 # ============ BACKGROUND TASKS ============
@@ -1286,6 +1382,17 @@ app.add_middleware(
 async def startup_event():
     """Start background tasks"""
     logger.info("Starting Forex & Gold Signals API...")
+    
+    # Initialize and start Signal Outcome Tracker (checks TP/SL every 60 seconds)
+    tracker = init_outcome_tracker(
+        db=db,
+        twelve_data_api_key=TWELVE_DATA_API_KEY,
+        telegram_bot_token=TELEGRAM_BOT_TOKEN,
+        telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
+    )
+    tracker.start(interval_seconds=60)  # Check every minute
+    logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
+    
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())
 
