@@ -65,7 +65,13 @@ load_dotenv(ROOT_DIR / '.env')
 
 # Configuration
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
+# Add serverSelectionTimeoutMS for faster failure detection in production
+client = AsyncIOMotorClient(
+    mongo_url,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=30000
+)
 db = client[os.environ['DB_NAME']]
 
 JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key')
@@ -2186,8 +2192,8 @@ async def create_checkout_session(
         if not sub_service:
             raise HTTPException(status_code=500, detail="Subscription service not available")
         
-        # Get the origin URL from environment or use default
-        origin_url = os.environ.get('FRONTEND_URL', 'https://grandcom-pro-signals.preview.emergentagent.com')
+        # Get the origin URL from environment (will be set by Emergent in production)
+        origin_url = os.environ.get('FRONTEND_URL', os.environ.get('EXPO_PUBLIC_BACKEND_URL', ''))
         
         result = await sub_service.create_checkout_session(
             user_id=str(current_user["_id"]),
