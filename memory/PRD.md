@@ -178,22 +178,26 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 
 ## Prioritized Backlog
 
-### P0 - Critical (Done)
+### P0 - Critical (COMPLETE ✅)
 - [x] Automatic signal outcome tracking
-- [x] Fixed pip TP levels for Forex (5/10/15 pips)
-- [x] Push notification infrastructure
+- [x] Fixed pip TP levels for ALL pairs (5/10/15 pips) - incl XAUUSD, XAUEUR
+- [x] Push notification infrastructure + frontend UI
+- [x] Historical backtesting engine (3-10 years)
+- [x] Performance charts (daily pips, by-pair breakdown)
+- [x] Health check endpoint
 
-### P1 - High Priority
-- [ ] Frontend push notification registration UI
-- [ ] Historical backtesting engine
+### P1 - High Priority (COMPLETE ✅)
+- [x] Frontend push notification registration UI
+- [x] Performance by pair analytics
+- [x] Daily performance charts
 
-### P2 - Medium Priority
-- [ ] In-App Purchases / Subscription
+### P2 - Medium Priority (Future)
+- [ ] In-App Purchases / Subscription (de-prioritized)
 - [ ] Admin Management UI
 
 ### P3 - Future
-- [ ] More granular TP/SL tuning per market condition
-- [ ] Advanced reporting dashboard
+- [ ] Advanced backtesting with custom strategies
+- [ ] ML model training with historical data
 
 ## Credentials
 - **Admin**: admin@forexsignals.com / Admin@2024!Forex

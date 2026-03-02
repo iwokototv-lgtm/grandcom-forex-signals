@@ -74,12 +74,33 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 # FastAPI App
-app = FastAPI(title="Forex & Gold Signals API")
+app = FastAPI(title="Forex & Gold Signals API", version="2.0.0")
 api_router = APIRouter(prefix="/api")
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Health check endpoint (no auth required)
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        await db.command("ping")
+        db_status = "healthy"
+    except Exception:
+        db_status = "unhealthy"
+    
+    tracker = get_outcome_tracker()
+    tracker_status = "running" if tracker and tracker.is_running else "stopped"
+    
+    return {
+        "status": "healthy",
+        "version": "2.0.0",
+        "database": db_status,
+        "signal_tracker": tracker_status,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # Initialize ML Engine Components
 signal_optimizer = SignalOptimizer()
@@ -1523,6 +1544,95 @@ async def test_push_notification(current_user: dict = Depends(get_current_user))
         return {"success": result["success"] > 0, "result": result}
     except Exception as e:
         logger.error(f"Error sending test notification: {e}")
+        return {"success": False, "error": str(e)}
+
+# ============ PERFORMANCE CHART ENDPOINTS ============
+@api_router.get("/performance/daily")
+async def get_daily_performance(
+    days: int = 30,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get daily performance data for charts"""
+    try:
+        from_date = datetime.utcnow() - timedelta(days=days)
+        
+        # Aggregate signals by day
+        pipeline = [
+            {"$match": {
+                "closed_at": {"$gte": from_date},
+                "status": {"$in": ["CLOSED_TP1", "CLOSED_TP2", "CLOSED_TP3", "CLOSED_SL"]}
+            }},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$closed_at"}},
+                "total_trades": {"$sum": 1},
+                "wins": {"$sum": {"$cond": [{"$eq": ["$result", "WIN"]}, 1, 0]}},
+                "losses": {"$sum": {"$cond": [{"$eq": ["$result", "LOSS"]}, 1, 0]}},
+                "total_pips": {"$sum": {"$ifNull": ["$pips", 0]}}
+            }},
+            {"$sort": {"_id": 1}}
+        ]
+        
+        results = await db.signals.aggregate(pipeline).to_list(100)
+        
+        # Format for chart
+        labels = []
+        pips_data = []
+        win_rate_data = []
+        
+        for r in results:
+            labels.append(r["_id"][5:])  # MM-DD format
+            pips_data.append(round(r["total_pips"], 1))
+            wr = (r["wins"] / r["total_trades"] * 100) if r["total_trades"] > 0 else 0
+            win_rate_data.append(round(wr, 1))
+        
+        return {
+            "success": True,
+            "labels": labels,
+            "datasets": {
+                "pips": pips_data,
+                "win_rate": win_rate_data
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting daily performance: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/performance/by-pair")
+async def get_performance_by_pair(current_user: dict = Depends(get_current_user)):
+    """Get performance breakdown by trading pair"""
+    try:
+        pipeline = [
+            {"$match": {
+                "status": {"$in": ["CLOSED_TP1", "CLOSED_TP2", "CLOSED_TP3", "CLOSED_SL"]}
+            }},
+            {"$group": {
+                "_id": "$pair",
+                "total_trades": {"$sum": 1},
+                "wins": {"$sum": {"$cond": [{"$eq": ["$result", "WIN"]}, 1, 0]}},
+                "total_pips": {"$sum": {"$ifNull": ["$pips", 0]}}
+            }},
+            {"$sort": {"total_trades": -1}}
+        ]
+        
+        results = await db.signals.aggregate(pipeline).to_list(20)
+        
+        formatted = []
+        for r in results:
+            win_rate = (r["wins"] / r["total_trades"] * 100) if r["total_trades"] > 0 else 0
+            formatted.append({
+                "pair": r["_id"],
+                "trades": r["total_trades"],
+                "wins": r["wins"],
+                "win_rate": round(win_rate, 1),
+                "pips": round(r["total_pips"], 1)
+            })
+        
+        return {
+            "success": True,
+            "pairs": formatted
+        }
+    except Exception as e:
+        logger.error(f"Error getting performance by pair: {e}")
         return {"success": False, "error": str(e)}
 
 # ============ BACKTEST ENGINE ENDPOINTS ============

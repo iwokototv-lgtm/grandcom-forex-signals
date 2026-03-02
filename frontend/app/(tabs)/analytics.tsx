@@ -13,7 +13,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { LineChart, BarChart } from 'react-native-chart-kit';
 import api from '../../utils/api';
+
+const screenWidth = Dimensions.get('window').width;
 
 interface Stats {
   total_signals: number;
@@ -27,6 +30,22 @@ interface RegimeInfo {
   name: string;
   confidence: number;
   risk_multiplier: number;
+}
+
+interface DailyPerformance {
+  labels: string[];
+  datasets: {
+    pips: number[];
+    win_rate: number[];
+  };
+}
+
+interface PairPerformance {
+  pair: string;
+  trades: number;
+  wins: number;
+  win_rate: number;
+  pips: number;
 }
 
 interface MTFAnalysis {
@@ -66,6 +85,8 @@ export default function AnalyticsScreen() {
   const [mtfLoading, setMtfLoading] = useState(false);
   const [showMtfModal, setShowMtfModal] = useState(false);
   const [regimeData, setRegimeData] = useState<{[key: string]: RegimeInfo}>({});
+  const [dailyPerformance, setDailyPerformance] = useState<DailyPerformance | null>(null);
+  const [pairPerformance, setPairPerformance] = useState<PairPerformance[]>([]);
 
   useEffect(() => {
     loadAllData();
@@ -73,7 +94,7 @@ export default function AnalyticsScreen() {
 
   const loadAllData = async () => {
     try {
-      await Promise.all([loadStats(), loadMlStats()]);
+      await Promise.all([loadStats(), loadMlStats(), loadPerformanceData()]);
     } catch (error) {
       console.error('Error loading data:', error);
     } finally {
@@ -99,6 +120,24 @@ export default function AnalyticsScreen() {
       }
     } catch (error) {
       console.error('Error loading ML stats:', error);
+    }
+  };
+
+  const loadPerformanceData = async () => {
+    try {
+      const [dailyRes, pairRes] = await Promise.all([
+        api.get('/performance/daily?days=14'),
+        api.get('/performance/by-pair')
+      ]);
+      
+      if (dailyRes.data.success) {
+        setDailyPerformance(dailyRes.data);
+      }
+      if (pairRes.data.success) {
+        setPairPerformance(pairRes.data.pairs);
+      }
+    } catch (error) {
+      console.error('Error loading performance data:', error);
     }
   };
 
@@ -240,6 +279,63 @@ export default function AnalyticsScreen() {
             <Text style={styles.statLabel}>Closed</Text>
           </View>
         </View>
+
+        {/* Daily Performance Chart */}
+        {dailyPerformance && dailyPerformance.labels.length > 0 && (
+          <View style={styles.chartCard}>
+            <Text style={styles.chartTitle}>Daily Pips (Last 14 Days)</Text>
+            <LineChart
+              data={{
+                labels: dailyPerformance.labels.slice(-7),
+                datasets: [{
+                  data: dailyPerformance.datasets.pips.slice(-7).map(p => p || 0)
+                }]
+              }}
+              width={screenWidth - 48}
+              height={180}
+              chartConfig={{
+                backgroundColor: '#1A1F3A',
+                backgroundGradientFrom: '#1A1F3A',
+                backgroundGradientTo: '#1A1F3A',
+                decimalPlaces: 0,
+                color: (opacity = 1) => `rgba(255, 215, 0, ${opacity})`,
+                labelColor: (opacity = 1) => `rgba(139, 143, 168, ${opacity})`,
+                style: { borderRadius: 16 },
+                propsForDots: {
+                  r: '4',
+                  strokeWidth: '2',
+                  stroke: '#FFD700'
+                }
+              }}
+              bezier
+              style={{ marginVertical: 8, borderRadius: 16 }}
+            />
+          </View>
+        )}
+
+        {/* Performance by Pair */}
+        {pairPerformance.length > 0 && (
+          <View style={styles.chartCard}>
+            <Text style={styles.chartTitle}>Performance by Pair</Text>
+            {pairPerformance.slice(0, 6).map((pair, index) => (
+              <View key={pair.pair} style={styles.pairRow}>
+                <View style={styles.pairInfo}>
+                  <Text style={styles.pairName}>{pair.pair}</Text>
+                  <Text style={styles.pairTrades}>{pair.trades} trades</Text>
+                </View>
+                <View style={styles.pairStats}>
+                  <Text style={[
+                    styles.pairPips,
+                    { color: pair.pips >= 0 ? '#4CAF50' : '#F44336' }
+                  ]}>
+                    {pair.pips >= 0 ? '+' : ''}{pair.pips} pips
+                  </Text>
+                  <Text style={styles.pairWinRate}>{pair.win_rate}%</Text>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* ML Risk Status */}
         {mlStats?.risk_metrics && (
@@ -874,5 +970,52 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#0A0E27',
     opacity: 0.7,
+  },
+  chartCard: {
+    backgroundColor: '#1A1F3A',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#2A2F4A',
+  },
+  chartTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+    marginBottom: 12,
+  },
+  pairRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2A2F4A',
+  },
+  pairInfo: {
+    flex: 1,
+  },
+  pairName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  pairTrades: {
+    fontSize: 12,
+    color: '#8B8FA8',
+    marginTop: 2,
+  },
+  pairStats: {
+    alignItems: 'flex-end',
+  },
+  pairPips: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  pairWinRate: {
+    fontSize: 12,
+    color: '#FFD700',
+    marginTop: 2,
   },
 });
