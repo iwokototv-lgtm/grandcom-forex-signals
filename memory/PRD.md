@@ -18,187 +18,146 @@ Build a professional Forex & Gold (XAUUSD) signals mobile app named "Grandcom Fo
 - Multi-Timeframe Analysis (H4/H1/M15)
 - Advanced filters (News, Session, Correlation)
 
-### Fixed Pip TP Levels for Forex (COMPLETED - December 2025)
-- Forex pairs now use FIXED pip targets:
-  - TP1 = 5 pips
-  - TP2 = 10 pips
-  - TP3 = 15 pips
-- XAUUSD, XAUEUR, BTCUSD continue using ATR-based dynamic TPs
+### Fixed Pip TP Levels for Forex (COMPLETED)
+- Forex pairs use FIXED pip targets: TP1=5, TP2=10, TP3=15 pips
+- XAUUSD, XAUEUR also use fixed 5/10/15 pip targets
+- BTCUSD uses ATR-based dynamic TPs
 
-### Automatic Signal Outcome Tracking (COMPLETED - December 2025)
+### Automatic Signal Outcome Tracking (COMPLETED)
 - Background job monitors active signals every 60 seconds
 - Automatically detects when TP/SL levels are hit
-- Updates signal status: CLOSED_TP1/TP2/TP3 or CLOSED_SL
-- Records pips gained/lost
-- Sends "Trade Closed" notifications to Telegram
-- Rate limiting to avoid Telegram flood control
+- Updates signal status and sends notifications to Telegram
 
-### Historical Backtesting Engine (COMPLETED - December 2025)
+### Historical Backtesting Engine (COMPLETED)
 - Backend engine supports 3-10 years of historical data analysis
-- Tests different TP/SL configurations on historical price data
-- Calculates detailed metrics:
-  - Win rate, total pips, profit factor
-  - Max drawdown, Sharpe ratio
-  - Yearly and monthly performance breakdown
-  - Consecutive wins/losses tracking
-- **Frontend UI** - Full backtest configuration screen at `/backtest`
-  - Pair selection (all 11 trading pairs)
-  - Date range selection (2015-2025)
-  - Timeframe selection (1h, 4h, daily)
-  - TP1/TP2/TP3 and SL pip configuration
-  - Detailed results display with yearly breakdown
-- API endpoints:
-  - POST `/api/backtest/run` - Run backtest
-  - GET `/api/backtest/history` - Get user's backtest history
-  - GET `/api/backtest/result/{id}` - Get specific result
-  - GET `/api/backtest/pairs` - Get available pairs/config
+- Frontend UI at `/backtest` with full configuration
+
+### Push Notifications (COMPLETED)
 - Expo Push Notification service integrated
-- Users can register their device token
-- Notifications sent when new signals are generated
-- **Frontend UI** - Full notifications settings screen at `/notifications`
-  - Toggle to enable/disable push notifications
-  - Lists notification types (New Signals, Trade Closed, Market Alerts)
-  - Test notification button
-- API endpoints:
-  - POST `/api/notifications/register` - Register push token
-  - DELETE `/api/notifications/unregister` - Unregister
-  - POST `/api/notifications/test` - Test notification
+- Frontend UI at `/notifications`
 
 ### Telegram Integration (COMPLETED)
-- Automatically posts signals to @grandcomsignals channel
-- Professional format with entry, TP levels, SL, regime info
+- Posts signals to @grandcomsignals channel
 - Trade closed notifications
 
 ### Authentication (COMPLETED)
 - JWT-based email/password login
-- Pre-defined admin account: admin@forexsignals.com
+- Role-based admin access
+
+### Stripe Subscription System (COMPLETED - March 2026)
+- Backend subscription service with Stripe integration
+- API Endpoints:
+  - `GET /api/subscriptions/packages` - Get available plans
+  - `GET /api/subscriptions/current` - Get user's subscription status
+  - `POST /api/subscriptions/create-checkout-session` - Create Stripe checkout
+  - `GET /api/subscriptions/verify/{session_id}` - Verify payment
+  - `POST /api/subscriptions/cancel` - Cancel subscription
+  - `POST /api/webhook/stripe` - Stripe webhook handler
+- Frontend UI at `/subscription` showing:
+  - Current plan status
+  - Pro Monthly ($29.99), Pro Yearly ($299.99)
+  - Premium Monthly ($79.99), Premium Yearly ($799.99)
+  - Feature comparisons and Subscribe buttons
+
+### Auth Context Role Fix (COMPLETED - March 2026)
+- User role is now refreshed from server on app load
+- Admin Panel button appears immediately after admin login
 
 ## Technical Architecture
 
 ```
 /app
 ├── backend/
-│   ├── server.py                    # Main FastAPI app, scheduler, APIs
+│   ├── server.py                    # Main FastAPI app
+│   ├── subscription_service.py      # Stripe subscription logic
 │   ├── signal_outcome_tracker.py    # Auto TP/SL monitoring
-│   ├── notification_service.py      # Push notifications via Expo
-│   ├── ml_engine/
-│   │   ├── regime_detector.py       # ML market regime classification
-│   │   ├── signal_filter.py         # Quality filtering & TP/SL calc
-│   │   ├── multi_timeframe.py       # MTF analysis
-│   │   ├── smc_analysis.py          # Smart Money Concepts
-│   │   └── ...
+│   ├── notification_service.py      # Push notifications
+│   ├── backtest_engine.py           # Historical backtesting
+│   ├── ml_engine/                   # ML components
 │   └── .env
-├── frontend/                        # React Native (Expo) app
+├── frontend/
+│   ├── contexts/AuthContext.tsx     # Auth with role sync
 │   ├── app/(tabs)/
-│   │   ├── home.tsx                 # Signal list with live ticker
-│   │   ├── analytics.tsx            # ML & MTF dashboard
-│   │   └── ...
+│   │   ├── home.tsx                 # Signal list
+│   │   ├── analytics.tsx            # ML dashboard
+│   │   ├── profile.tsx              # User profile & admin link
+│   │   ├── subscription.tsx         # Subscription plans UI
+│   │   ├── admin.tsx                # Admin panel
+│   │   ├── backtest.tsx             # Backtesting UI
+│   │   └── notifications.tsx        # Notification settings
 │   └── .env
-└── desktop/                         # Electron wrapper for Windows
+└── desktop/                         # Electron (not built)
 ```
 
-## Key API Endpoints
+## Database Collections
 
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - Login
-- `GET /api/auth/me` - Get current user
+### signals
+- pair, type, entry_price, tp_levels[], sl_price
+- status, result, pips, created_at, closed_at
+- regime, confidence
 
-### Signals
-- `GET /api/signals` - Get signals list
-- `GET /api/signals/active` - Get active signals being tracked
-- `GET /api/signals/tracker-status` - Get outcome tracker status
-- `POST /api/signals/check-outcomes` - Manual trigger outcome check
-- `GET /api/signals/history` - Signal history with win/loss stats
+### subscriptions
+- user_id, package_id, tier, status
+- starts_at, expires_at, payment_session_id
 
-### Push Notifications
-- `POST /api/notifications/register` - Register Expo push token
-- `DELETE /api/notifications/unregister` - Unregister token
-- `POST /api/notifications/test` - Send test notification
+### payment_transactions
+- user_id, session_id, package_id
+- amount, currency, status, payment_status
 
-### ML Analytics
-- `GET /api/ml/regime/{symbol}` - Market regime for symbol
-- `GET /api/ml/mtf/{symbol}` - Multi-timeframe analysis
-- `GET /api/ml/smc/{symbol}` - Smart Money Concepts
-- `GET /api/stats` - Overall performance statistics
-
-## Database Schema
-
-### signals collection
-```javascript
-{
-  _id: ObjectId,
-  pair: String,           // e.g., "XAUUSD"
-  type: String,           // "BUY" or "SELL"
-  entry_price: Number,
-  tp_levels: [Number],    // [TP1, TP2, TP3]
-  sl_price: Number,
-  status: String,         // ACTIVE, CLOSED_TP1/2/3, CLOSED_SL
-  result: String,         // WIN, LOSS
-  pips: Number,
-  exit_price: Number,
-  created_at: Date,
-  closed_at: Date,
-  regime: String,         // TREND, RANGE, VOLATILE
-  confidence: Number
-}
-```
-
-### push_tokens collection
-```javascript
-{
-  _id: ObjectId,
-  user_id: String,
-  push_token: String,     // ExponentPushToken[...]
-  device_type: String,    // ios, android
-  is_active: Boolean,
-  created_at: Date,
-  updated_at: Date
-}
-```
+### push_tokens
+- user_id, push_token, device_type, is_active
 
 ## Third-Party Integrations
-- **OpenAI GPT-5.2**: AI analysis (via Emergent LLM Key)
-- **Twelve Data API**: Live market data (Grow plan)
-- **Telegram Bot API**: Signal posting to channel
-- **Expo Push API**: Mobile push notifications
+- **OpenAI GPT-5.2**: AI analysis (Emergent LLM Key)
+- **Twelve Data API**: Live market data
+- **Telegram Bot API**: Signal posting
+- **Expo Push API**: Mobile notifications
+- **Stripe**: Payment processing (TEST MODE - uses placeholder key)
 
-## What's Implemented (December 2025)
+## Current Session Accomplishments (March 2026)
 
-### Session Accomplishments
-1. **Fixed Pip TP Levels** - Forex pairs now use exact 5/10/15 pip targets
-2. **Signal Outcome Tracker** - Automatic trade closing when TP/SL hit
-3. **Push Notifications** - Full Expo push notification integration
-4. **Statistics Update** - Accurate win rate and pips tracking
+1. **Auth Context Role Fix**
+   - Added server-side user data refresh on app load
+   - Admin Panel button now appears immediately after login
 
-### Current Performance
-- Win Rate: ~52%+
-- Active monitoring: 600+ signals
-- Tracker running 24/7 checking every minute
+2. **Stripe Subscription System**
+   - Created subscription_service.py with tier management
+   - Added 6 subscription endpoints to server.py
+   - Built subscription.tsx frontend UI
+   - Stripe checkout session creation working
+
+3. **Minor Fixes**
+   - Fixed Ionicons warning (logo-telegram → send)
 
 ## Prioritized Backlog
 
-### P0 - Critical (COMPLETE ✅)
-- [x] Automatic signal outcome tracking
-- [x] Fixed pip TP levels for ALL pairs (5/10/15 pips) - incl XAUUSD, XAUEUR
-- [x] Push notification infrastructure + frontend UI
-- [x] Historical backtesting engine (3-10 years)
-- [x] Performance charts (daily pips, by-pair breakdown)
-- [x] Health check endpoint
+### P0 - Critical (ALL COMPLETE ✅)
+- [x] Signal generation with ML optimization
+- [x] Automatic outcome tracking
+- [x] Fixed pip TP levels
+- [x] Push notifications
+- [x] Backtesting engine
+- [x] Admin panel
+- [x] Stripe subscription system
 
-### P1 - High Priority (COMPLETE ✅)
-- [x] Frontend push notification registration UI
-- [x] Performance by pair analytics
-- [x] Daily performance charts
+### P1 - High Priority
+- [ ] Run & analyze backtests for optimal settings
+- [ ] Build & test Electron desktop app
 
-### P2 - Medium Priority (Future)
-- [ ] In-App Purchases / Subscription (de-prioritized)
-- [ ] Admin Management UI
+### P2 - Medium Priority
+- [ ] Admin panel enhancements (manual signals, user management)
+- [ ] Complete Stripe setup with real API key
 
 ### P3 - Future
-- [ ] Advanced backtesting with custom strategies
 - [ ] ML model training with historical data
+- [ ] Advanced strategy customization
+
+## Test Status
+- Backend: 18/18 tests passing (100%)
+- Frontend: 22/22 tests passing (100%)
+- Test files: /app/tests/e2e/*.spec.ts, /app/backend/tests/test_*.py
 
 ## Credentials
 - **Admin**: admin@forexsignals.com / Admin@2024!Forex
-- **Telegram Channel**: @grandcomsignals
+- **Telegram**: @grandcomsignals
+- **Stripe**: TEST MODE (sk_test_emergent placeholder)

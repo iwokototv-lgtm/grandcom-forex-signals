@@ -112,7 +112,7 @@ export default function ProfileScreen() {
 
           <TouchableOpacity style={styles.menuItem}>
             <View style={styles.menuItemLeft}>
-              <Ionicons name="logo-telegram" size={24} color="#8B8FA8" />
+              <Ionicons name="send" size={24} color="#8B8FA8" />
               <Text style={styles.menuItemText}>Connect Telegram</Text>
             </View>
             <Ionicons name="chevron-forward" size={24} color="#8B8FA8" />
