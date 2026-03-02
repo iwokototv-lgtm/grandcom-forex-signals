@@ -27,6 +27,7 @@ SYMBOL_MAP = {
     "GBPJPY": "GBP/JPY",
     "AUDUSD": "AUD/USD",
     "USDCAD": "USD/CAD",
+    "USDCHF": "USD/CHF",
     "USDCHF": "USD/CHF"
 }
 
