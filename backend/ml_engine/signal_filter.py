@@ -512,70 +512,75 @@ class SignalQualityFilter:
 
 class RegimeEnforcedTPSL:
     """
-    Regime-enforced TP/SL management.
+    Regime-enforced TP/SL management with REALISTIC profit targets.
+    
+    CORRECTED: Much tighter TP levels for actual profit taking
     
     RANGE regime:
-    - TP targets: 0.5R-1R
-    - Break-even at +0.5R
-    - Risk multiplier: 0.5x-0.7x
+    - TP1: 0.3R (quick scalp)
+    - TP2: 0.5R
+    - TP3: 0.8R
+    - Break-even at +0.3R
     
     TREND regime:
-    - TP targets: 2R+
-    - Break-even at +1R
-    - Full risk multiplier
+    - TP1: 0.5R
+    - TP2: 1.0R
+    - TP3: 1.5R
+    - Break-even at +0.5R
     """
     
     def __init__(self):
+        # CORRECTED: Much tighter, realistic TP ratios
         self.regime_settings = {
             "RANGE": {
-                "tp1_ratio": 0.5,  # 0.5R
-                "tp2_ratio": 0.8,  # 0.8R
-                "tp3_ratio": 1.0,  # 1R
-                "breakeven_at": 0.5,  # Move to BE at +0.5R
+                "tp1_ratio": 0.3,   # Quick profit - 0.3R
+                "tp2_ratio": 0.5,   # 0.5R
+                "tp3_ratio": 0.8,   # 0.8R max
+                "breakeven_at": 0.3,  # Move to BE at +0.3R
                 "max_risk_mult": 0.7,
                 "partial_close_tp1": 0.5,  # Close 50% at TP1
             },
             "TREND_UP": {
-                "tp1_ratio": 1.5,  # 1.5R
-                "tp2_ratio": 2.5,  # 2.5R
-                "tp3_ratio": 4.0,  # 4R
-                "breakeven_at": 1.0,  # Move to BE at +1R
+                "tp1_ratio": 0.5,   # 0.5R
+                "tp2_ratio": 1.0,   # 1R
+                "tp3_ratio": 1.5,   # 1.5R
+                "breakeven_at": 0.5,  # Move to BE at +0.5R
                 "max_risk_mult": 1.0,
-                "partial_close_tp1": 0.3,  # Close 30% at TP1
+                "partial_close_tp1": 0.4,
             },
             "TREND_DOWN": {
-                "tp1_ratio": 1.5,
-                "tp2_ratio": 2.5,
-                "tp3_ratio": 4.0,
-                "breakeven_at": 1.0,
+                "tp1_ratio": 0.5,
+                "tp2_ratio": 1.0,
+                "tp3_ratio": 1.5,
+                "breakeven_at": 0.5,
                 "max_risk_mult": 1.0,
-                "partial_close_tp1": 0.3,
+                "partial_close_tp1": 0.4,
             },
             "HIGH_VOL": {
-                "tp1_ratio": 1.0,
-                "tp2_ratio": 1.5,
-                "tp3_ratio": 2.0,
-                "breakeven_at": 0.5,
+                "tp1_ratio": 0.4,   # Tighter in high vol
+                "tp2_ratio": 0.7,
+                "tp3_ratio": 1.0,
+                "breakeven_at": 0.3,
                 "max_risk_mult": 0.6,
                 "partial_close_tp1": 0.5,
             },
             "LOW_VOL": {
-                "tp1_ratio": 0.8,
-                "tp2_ratio": 1.2,
-                "tp3_ratio": 1.5,
-                "breakeven_at": 0.6,
-                "max_risk_mult": 1.2,
-                "partial_close_tp1": 0.4,
+                "tp1_ratio": 0.3,   # Even tighter in low vol
+                "tp2_ratio": 0.5,
+                "tp3_ratio": 0.7,
+                "breakeven_at": 0.25,
+                "max_risk_mult": 1.0,
+                "partial_close_tp1": 0.5,
             }
         }
         
         self.default_settings = {
-            "tp1_ratio": 1.0,
-            "tp2_ratio": 2.0,
-            "tp3_ratio": 3.0,
-            "breakeven_at": 1.0,
+            "tp1_ratio": 0.4,
+            "tp2_ratio": 0.7,
+            "tp3_ratio": 1.0,
+            "breakeven_at": 0.3,
             "max_risk_mult": 0.8,
-            "partial_close_tp1": 0.4,
+            "partial_close_tp1": 0.5,
         }
     
     def calculate_regime_adjusted_levels(
