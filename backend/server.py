@@ -344,7 +344,8 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.40
     },
     "BTCUSD": {
-        "use_fixed_pips": False,  # Keep ATR-based for BTC due to high volatility
+        "enabled": False,  # DISABLED: 17.5% win rate, PF 0.14 - too volatile
+        "use_fixed_pips": False,
         "atr_multiplier_sl": 2.0,
         "atr_multiplier_tp1": 1.5,
         "atr_multiplier_tp2": 3.0,
@@ -418,11 +419,11 @@ PAIR_PARAMETERS = {
     },
     "AUDUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.15, WR 44.4%
-        "fixed_tp2_pips": 6,
-        "fixed_tp3_pips": 9,
-        "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2,
+        "fixed_tp1_pips": 2,   # ADJUSTED: Ultra-conservative due to 23.6% WR
+        "fixed_tp2_pips": 4,   # Tighter TPs to capture more wins
+        "fixed_tp3_pips": 6,
+        "fixed_sl_pips": 8,    # Tighter SL for better R:R
+        "atr_multiplier_sl": 1.0,
         "min_rr": 1.5,
         "pip_value": 0.0001,
         "decimal_places": 5,
@@ -2129,19 +2130,27 @@ async def get_ml_performance_analysis(admin_user: dict = Depends(require_admin))
 async def get_system_config(admin_user: dict = Depends(require_admin)):
     """Get current system configuration (admin only)"""
     tracker = get_outcome_tracker()
+    
+    # Get active pairs count
+    active_pairs = [p for p, c in PAIR_PARAMETERS.items() if c.get('enabled', True)]
+    disabled_pairs = [p for p, c in PAIR_PARAMETERS.items() if not c.get('enabled', True)]
+    
     return {
         "success": True,
         "config": {
             "signal_generation": {
                 "interval_minutes": 15,
-                "pairs_count": 11,
-                "pairs": list(PAIR_PARAMETERS.keys())
+                "total_pairs": len(PAIR_PARAMETERS),
+                "active_pairs": len(active_pairs),
+                "active_pairs_list": active_pairs,
+                "disabled_pairs": disabled_pairs
             },
             "tp_sl": {
                 "forex": {"tp1": 3, "tp2": 6, "tp3": 9, "sl": 10, "note": "OPTIMIZED - Conservative"},
                 "xauusd": {"tp1": 7, "tp2": 15, "tp3": 25, "sl": "ATR-based", "note": "OPTIMIZED - Balanced"},
                 "xaueur": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
-                "btc": {"tp": "ATR-based", "sl": "ATR-based"}
+                "audusd": {"tp1": 2, "tp2": 4, "tp3": 6, "sl": 8, "note": "ADJUSTED - Ultra-conservative"},
+                "btcusd": {"status": "DISABLED", "reason": "17.5% win rate, PF 0.14"}
             },
             "partial_close": {
                 "tp1_percent": 33,
@@ -2155,7 +2164,9 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
             "optimization_notes": {
                 "forex": "Conservative (3/6/9) - PF +11% avg, WR +15-20%",
                 "xauusd": "Balanced (7/15/25) - PF 1.27, Return 1114%",
-                "xaueur": "Current (5/10/15) - PF 1.27, WR 63.9%"
+                "xaueur": "Current (5/10/15) - PF 1.27, WR 63.9%",
+                "audusd": "Ultra-conservative (2/4/6) - Adjusted for low WR",
+                "btcusd": "DISABLED due to poor performance"
             }
         }
     }
@@ -2289,13 +2300,18 @@ async def stripe_webhook(request: Request):
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
-    # Full pairs list including XAUEUR and BTCUSD (Grow plan enabled)
-    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
+    # Get active pairs (filter out disabled ones)
+    active_pairs = [
+        pair for pair, config in PAIR_PARAMETERS.items()
+        if config.get('enabled', True)  # Default to enabled if not specified
+    ]
+    
+    logger.info(f"Active trading pairs: {active_pairs}")
     
     while True:
         try:
             logger.info("Starting automatic signal generation...")
-            for pair in pairs:
+            for pair in active_pairs:
                 await generate_signal_for_pair(pair)
                 await asyncio.sleep(10)  # Wait between pairs
             
