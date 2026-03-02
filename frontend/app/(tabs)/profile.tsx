@@ -179,6 +179,17 @@ export default function ProfileScreen() {
             </View>
             <Ionicons name="chevron-forward" size={24} color="#8B8FA8" />
           </TouchableOpacity>
+
+          {/* Admin Panel - Only visible to admin users */}
+          {user?.role === 'admin' && (
+            <TouchableOpacity style={[styles.menuItem, { borderColor: '#FFD700', borderWidth: 1 }]} onPress={() => router.push('/(tabs)/admin')}>
+              <View style={styles.menuItemLeft}>
+                <Ionicons name="settings" size={24} color="#FFD700" />
+                <Text style={[styles.menuItemText, { color: '#FFD700' }]}>Admin Panel</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={24} color="#FFD700" />
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Settings */}

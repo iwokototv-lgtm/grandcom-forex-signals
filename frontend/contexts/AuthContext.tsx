@@ -11,6 +11,7 @@ interface User {
   subscription_tier: string;
   telegram_id: string | null;
   created_at: string;
+  role?: string;
 }
 
 interface AuthContextType {

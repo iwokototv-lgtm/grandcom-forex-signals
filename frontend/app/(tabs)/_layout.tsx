@@ -62,6 +62,13 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="admin"
+        options={{
+          href: null, // Hide from tab bar
+          title: 'Admin',
+        }}
+      />
+      <Tabs.Screen
         name="help"
         options={{
           href: null,

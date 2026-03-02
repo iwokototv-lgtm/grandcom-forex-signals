@@ -138,6 +138,7 @@ class UserResponse(BaseModel):
     subscription_tier: str
     telegram_id: Optional[str]
     created_at: datetime
+    role: str = "user"
 
 class Token(BaseModel):
     access_token: str
@@ -857,7 +858,8 @@ async def register(user_data: UserRegister):
         full_name=user["full_name"],
         subscription_tier=user["subscription_tier"],
         telegram_id=user["telegram_id"],
-        created_at=user["created_at"]
+        created_at=user["created_at"],
+        role=user.get("role", "user")
     )
     
     return Token(access_token=access_token, token_type="bearer", user=user_response)
@@ -877,7 +879,8 @@ async def login(user_data: UserLogin):
         full_name=user["full_name"],
         subscription_tier=user["subscription_tier"],
         telegram_id=user["telegram_id"],
-        created_at=user["created_at"]
+        created_at=user["created_at"],
+        role=user.get("role", "user")
     )
     
     return Token(access_token=access_token, token_type="bearer", user=user_response)
@@ -891,7 +894,8 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         full_name=current_user.get("full_name"),
         subscription_tier=current_user["subscription_tier"],
         telegram_id=current_user.get("telegram_id"),
-        created_at=current_user["created_at"]
+        created_at=current_user["created_at"],
+        role=current_user.get("role", "user")
     )
 
 # ============ SIGNAL ENDPOINTS ============
@@ -1806,6 +1810,104 @@ async def get_available_pairs(current_user: dict = Depends(get_current_user)):
             {"value": "1day", "label": "Daily"},
         ],
         "year_range": {"min": 2015, "max": 2025}
+    }
+
+# ============ ADMIN ENDPOINTS ============
+def require_admin(current_user: dict = Depends(get_current_user)):
+    """Dependency that requires admin role"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+@api_router.get("/admin/users")
+async def get_all_users(admin_user: dict = Depends(require_admin)):
+    """Get all users (admin only)"""
+    try:
+        users = await db.users.find({}).to_list(1000)
+        formatted = []
+        for user in users:
+            formatted.append({
+                "id": str(user["_id"]),
+                "email": user.get("email"),
+                "role": user.get("role", "user"),
+                "created_at": user.get("created_at").isoformat() if user.get("created_at") else None,
+                "subscription_status": user.get("subscription_status", "free")
+            })
+        return {"success": True, "users": formatted}
+    except Exception as e:
+        logger.error(f"Error getting users: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.post("/admin/signals/{signal_id}/close")
+async def admin_close_signal(
+    signal_id: str,
+    data: dict,
+    admin_user: dict = Depends(require_admin)
+):
+    """Manually close a signal (admin only)"""
+    try:
+        status = data.get("status", "CLOSED_MANUAL")
+        result = "WIN" if "WIN" in status else "LOSS"
+        
+        update_result = await db.signals.update_one(
+            {"_id": ObjectId(signal_id)},
+            {"$set": {
+                "status": status,
+                "result": result,
+                "closed_at": datetime.utcnow(),
+                "closed_by": "admin"
+            }}
+        )
+        
+        if update_result.modified_count > 0:
+            return {"success": True, "message": "Signal closed"}
+        return {"success": False, "error": "Signal not found"}
+    except Exception as e:
+        logger.error(f"Error closing signal: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.delete("/admin/signals/{signal_id}")
+async def admin_delete_signal(
+    signal_id: str,
+    admin_user: dict = Depends(require_admin)
+):
+    """Delete a signal (admin only)"""
+    try:
+        delete_result = await db.signals.delete_one({"_id": ObjectId(signal_id)})
+        if delete_result.deleted_count > 0:
+            return {"success": True, "message": "Signal deleted"}
+        return {"success": False, "error": "Signal not found"}
+    except Exception as e:
+        logger.error(f"Error deleting signal: {e}")
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/admin/system-config")
+async def get_system_config(admin_user: dict = Depends(require_admin)):
+    """Get current system configuration (admin only)"""
+    tracker = get_outcome_tracker()
+    return {
+        "success": True,
+        "config": {
+            "signal_generation": {
+                "interval_minutes": 15,
+                "pairs_count": 11,
+                "pairs": list(PAIR_PARAMETERS.keys())
+            },
+            "tp_sl": {
+                "forex": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
+                "gold": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
+                "btc": {"tp": "ATR-based", "sl": "ATR-based"}
+            },
+            "partial_close": {
+                "tp1_percent": 33,
+                "tp2_percent": 33,
+                "tp3_percent": 34
+            },
+            "outcome_tracker": {
+                "status": "running" if tracker and tracker.is_running else "stopped",
+                "check_interval_seconds": 60
+            }
+        }
     }
 
 # ============ BACKGROUND TASKS ============
