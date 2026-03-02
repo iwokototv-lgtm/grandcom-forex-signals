@@ -839,7 +839,7 @@ async def trigger_signal_generation(
 ):
     """Manually trigger signal generation (admin only)"""
     # Full pairs list including XAUEUR and BTCUSD (Grow plan enabled)
-    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
     
     for pair in pairs:
         background_tasks.add_task(generate_signal_for_pair, pair)
@@ -917,7 +917,7 @@ async def get_mtf_analysis(symbol: str, current_user: dict = Depends(get_current
     """Get multi-timeframe analysis for a symbol"""
     try:
         # Validate symbol
-        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
         symbol = symbol.upper()
         
         if symbol not in valid_symbols:
@@ -940,7 +940,7 @@ async def get_mtf_analysis(symbol: str, current_user: dict = Depends(get_current
 async def get_all_mtf_analysis(current_user: dict = Depends(get_current_user)):
     """Get multi-timeframe analysis for all pairs"""
     try:
-        all_pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        all_pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
         results = {}
         
         for pair in all_pairs:
@@ -988,7 +988,7 @@ async def collect_historical_data(
     return {
         "success": True,
         "message": "Historical data collection started in background",
-        "pairs": ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"],
+        "pairs": ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"],
         "timeframes": ["1h", "4h", "15min"]
     }
 
@@ -1063,7 +1063,7 @@ async def update_signal_result(
 async def get_live_prices(current_user: dict = Depends(get_current_user)):
     """Get live prices for all trading pairs"""
     try:
-        pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
         prices = {}
         
         for pair in pairs:
@@ -1095,7 +1095,7 @@ async def get_smc_analysis(symbol: str, current_user: dict = Depends(get_current
     """Get Smart Money Concepts analysis for a symbol"""
     try:
         # Validate symbol
-        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
         symbol = symbol.upper()
         
         if symbol not in valid_symbols:
@@ -1136,7 +1136,7 @@ async def get_quality_filter_status(current_user: dict = Depends(get_current_use
 async def get_full_analysis(symbol: str, current_user: dict = Depends(get_current_user)):
     """Get comprehensive analysis for a symbol (Regime + MTF + SMC)"""
     try:
-        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+        valid_symbols = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
         symbol = symbol.upper()
         
         if symbol not in valid_symbols:
@@ -1245,7 +1245,7 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
     # Full pairs list including XAUEUR and BTCUSD (Grow plan enabled)
-    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD"]
+    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
     
     while True:
         try:
