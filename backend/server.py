@@ -482,17 +482,17 @@ SESSION_FILTERS = {
     "EURGBP": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
     "XAUUSD": {"optimal_hours": list(range(8, 21)), "timezone": "UTC"},  # London + NY overlap
     "XAUEUR": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
-    
-    # New York Session (13:00-21:00 UTC)  
-    "USDJPY": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
-    "USDCAD": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
     "USDCHF": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
     
-    # Overlap (13:00-16:00 UTC) - Best for most pairs
-    "EURJPY": {"optimal_hours": list(range(8, 22)), "timezone": "UTC"},
-    "GBPJPY": {"optimal_hours": list(range(8, 22)), "timezone": "UTC"},
+    # New York Session (13:00-21:00 UTC)  
+    "USDCAD": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
     
-    # Asian Session (0:00-8:00 UTC)
+    # JPY Pairs - Extended to include Asian Session (0:00-8:00 UTC)
+    "USDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # Asian + NY
+    "EURJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
+    "GBPJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
+    
+    # AUD Pairs - Asian Session (0:00-8:00 UTC) + NY overlap
     "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},
 }
 
