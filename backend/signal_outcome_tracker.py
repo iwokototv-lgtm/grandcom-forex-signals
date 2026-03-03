@@ -204,7 +204,7 @@ class SignalOutcomeTracker:
             logger.error(f"Error calculating pips: {e}")
             return 0.0
     
-    async def close_signal(self, signal_id: str, outcome: Dict[str, Any]) -> bool:
+    async def close_signal(self, signal_id: str, outcome: Dict[str, Any], on_close_callback=None) -> bool:
         """Update signal status in database and send Telegram notification"""
         try:
             # Update in database
@@ -224,6 +224,14 @@ class SignalOutcomeTracker:
                 signal = await self.db.signals.find_one({"_id": ObjectId(signal_id)})
                 if signal:
                     await self.send_close_notification(signal, outcome)
+                    
+                    # Call the callback to record result for drawdown protection
+                    if on_close_callback:
+                        try:
+                            on_close_callback(signal.get("pair"), outcome["result"], outcome["pips"])
+                        except Exception as cb_err:
+                            logger.warning(f"Callback error: {cb_err}")
+                            
                 logger.info(f"Signal {signal_id} closed: {outcome['status']} - {outcome['result']}")
                 return True
             

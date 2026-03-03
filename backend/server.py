@@ -463,6 +463,116 @@ PAIR_PARAMETERS = {
     }
 }
 
+# ============ PROFITABILITY FILTERS ============
+# These filters help increase win rate by only trading in optimal conditions
+
+# 1. REGIME FILTER - Only trade in trending markets
+ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN"]  # Skip RANGE markets (48% WR)
+SKIP_REGIME = ["RANGE", "VOLATILE"]  # These regimes have lower win rates
+
+# 2. CONFIDENCE THRESHOLD - Require high ML confidence
+MIN_CONFIDENCE_THRESHOLD = 70  # Only trade when ML confidence > 70%
+MIN_REGIME_CONFIDENCE = 0.65   # Minimum regime detection confidence
+
+# 3. SESSION FILTER - Trade pairs during optimal sessions
+SESSION_FILTERS = {
+    # London Session (8:00-16:00 UTC)
+    "EURUSD": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    "GBPUSD": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    "EURGBP": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    "XAUUSD": {"optimal_hours": list(range(8, 21)), "timezone": "UTC"},  # London + NY overlap
+    "XAUEUR": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    
+    # New York Session (13:00-21:00 UTC)  
+    "USDJPY": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
+    "USDCAD": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
+    "USDCHF": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    
+    # Overlap (13:00-16:00 UTC) - Best for most pairs
+    "EURJPY": {"optimal_hours": list(range(8, 22)), "timezone": "UTC"},
+    "GBPJPY": {"optimal_hours": list(range(8, 22)), "timezone": "UTC"},
+    
+    # Asian Session (0:00-8:00 UTC)
+    "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},
+}
+
+# 4. DRAWDOWN PROTECTION - Auto-pause losing pairs
+DRAWDOWN_PROTECTION = {
+    "enabled": True,
+    "max_daily_losses": 3,      # Max losing trades per day before pause
+    "max_daily_loss_pips": 50,  # Max pips lost per day before pause
+    "pause_duration_hours": 4,  # How long to pause after hitting limit
+}
+
+# Track daily performance for drawdown protection
+daily_pair_performance = {}
+
+def is_session_optimal(pair: str) -> bool:
+    """Check if current time is optimal for trading this pair"""
+    current_hour = datetime.utcnow().hour
+    
+    if pair not in SESSION_FILTERS:
+        return True  # Allow if no filter defined
+    
+    optimal_hours = SESSION_FILTERS[pair].get("optimal_hours", list(range(24)))
+    return current_hour in optimal_hours
+
+def check_drawdown_protection(pair: str) -> tuple[bool, str]:
+    """Check if pair should be paused due to drawdown protection"""
+    global daily_pair_performance
+    
+    if not DRAWDOWN_PROTECTION["enabled"]:
+        return True, ""
+    
+    today = datetime.utcnow().date().isoformat()
+    key = f"{pair}_{today}"
+    
+    if key not in daily_pair_performance:
+        daily_pair_performance[key] = {
+            "losses": 0,
+            "loss_pips": 0,
+            "paused_until": None
+        }
+    
+    perf = daily_pair_performance[key]
+    
+    # Check if currently paused
+    if perf["paused_until"]:
+        if datetime.utcnow() < perf["paused_until"]:
+            remaining = (perf["paused_until"] - datetime.utcnow()).seconds // 60
+            return False, f"Paused for {remaining} more minutes (drawdown protection)"
+        else:
+            perf["paused_until"] = None  # Reset pause
+    
+    # Check if limits exceeded
+    if perf["losses"] >= DRAWDOWN_PROTECTION["max_daily_losses"]:
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
+        return False, f"Max daily losses ({perf['losses']}) reached"
+    
+    if perf["loss_pips"] >= DRAWDOWN_PROTECTION["max_daily_loss_pips"]:
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
+        return False, f"Max daily loss pips ({perf['loss_pips']}) reached"
+    
+    return True, ""
+
+def record_trade_result(pair: str, result: str, pips: float):
+    """Record trade result for drawdown protection"""
+    global daily_pair_performance
+    
+    today = datetime.utcnow().date().isoformat()
+    key = f"{pair}_{today}"
+    
+    if key not in daily_pair_performance:
+        daily_pair_performance[key] = {
+            "losses": 0,
+            "loss_pips": 0,
+            "paused_until": None
+        }
+    
+    if result == "LOSS":
+        daily_pair_performance[key]["losses"] += 1
+        daily_pair_performance[key]["loss_pips"] += abs(pips)
+
 # Default parameters for any unlisted pair
 DEFAULT_PAIR_PARAMS = {
     "atr_multiplier_sl": 1.5,
@@ -656,10 +766,22 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         return None
 
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
-    """Generate a complete trading signal for a pair with ML optimization"""
+    """Generate a complete trading signal for a pair with ML optimization and profitability filters"""
     try:
         # Get pair-specific parameters
         params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+        
+        # ============ FILTER 1: SESSION CHECK ============
+        if not is_session_optimal(pair):
+            current_hour = datetime.utcnow().hour
+            logger.info(f"⏰ {pair} skipped - not in optimal session (current hour: {current_hour})")
+            return None
+        
+        # ============ FILTER 2: DRAWDOWN PROTECTION ============
+        can_trade, pause_reason = check_drawdown_protection(pair)
+        if not can_trade:
+            logger.warning(f"🛑 {pair} paused - {pause_reason}")
+            return None
         
         # Get price data - 1H timeframe
         df = await get_price_data(pair, interval="1h", outputsize=100)
@@ -676,6 +798,12 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         ai_analysis = await generate_ai_analysis(pair, indicators)
         if ai_analysis is None or ai_analysis.get("signal") == "NEUTRAL":
             logger.info(f"No trade signal for {pair} (NEUTRAL or None)")
+            return None
+        
+        # ============ FILTER 3: CONFIDENCE THRESHOLD ============
+        ai_confidence = ai_analysis.get("confidence", 0)
+        if ai_confidence < MIN_CONFIDENCE_THRESHOLD:
+            logger.info(f"📊 {pair} skipped - confidence {ai_confidence}% < {MIN_CONFIDENCE_THRESHOLD}% threshold")
             return None
         
         # ============ ML OPTIMIZATION ============
@@ -703,6 +831,16 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_confidence = regime_info.get('confidence', 0.5)
             risk_multiplier = regime_info.get('risk_multiplier', 1.0)
             
+            # ============ FILTER 4: REGIME FILTER ============
+            if regime_name in SKIP_REGIME:
+                logger.info(f"📉 {pair} skipped - {regime_name} regime has lower win rate")
+                return None
+            
+            # ============ FILTER 5: REGIME CONFIDENCE ============
+            if regime_confidence < MIN_REGIME_CONFIDENCE:
+                logger.info(f"🎯 {pair} skipped - regime confidence {regime_confidence:.2f} < {MIN_REGIME_CONFIDENCE} threshold")
+                return None
+            
             # Use optimized levels if available
             if optimized.get('optimized'):
                 entry_price = optimized.get('entry_price', ai_analysis['entry_price'])
@@ -713,7 +851,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 tp_levels = ai_analysis['tp_levels']
                 sl_price = ai_analysis['sl_price']
             
-            logger.info(f"ML Optimization for {pair}: Regime={regime_name}, RiskMult={risk_multiplier:.2f}")
+            logger.info(f"✅ ML Optimization for {pair}: Regime={regime_name}, Conf={regime_confidence:.2f}, RiskMult={risk_multiplier:.2f}")
             
         except Exception as ml_error:
             logger.warning(f"ML optimization failed for {pair}: {ml_error}. Using raw AI signal.")
@@ -2067,6 +2205,71 @@ async def get_pair_config(admin_user: dict = Depends(require_admin)):
         "success": True,
         "pairs": PAIR_PARAMETERS,
         "valid_pairs": list(PAIR_PARAMETERS.keys())
+    }
+
+@api_router.get("/admin/filters")
+async def get_profitability_filters(admin_user: dict = Depends(require_admin)):
+    """Get current profitability filter settings (admin only)"""
+    return {
+        "success": True,
+        "filters": {
+            "regime_filter": {
+                "allowed_regimes": ALLOWED_REGIMES,
+                "skip_regimes": SKIP_REGIME,
+                "description": "Only trade in trending markets"
+            },
+            "confidence_filter": {
+                "min_ai_confidence": MIN_CONFIDENCE_THRESHOLD,
+                "min_regime_confidence": MIN_REGIME_CONFIDENCE,
+                "description": "Require high ML confidence before trading"
+            },
+            "session_filter": {
+                "pairs": SESSION_FILTERS,
+                "current_hour_utc": datetime.utcnow().hour,
+                "description": "Trade pairs only during optimal sessions"
+            },
+            "drawdown_protection": {
+                **DRAWDOWN_PROTECTION,
+                "current_status": daily_pair_performance,
+                "description": "Auto-pause pairs after consecutive losses"
+            }
+        }
+    }
+
+@api_router.get("/admin/filter-stats")
+async def get_filter_statistics(admin_user: dict = Depends(require_admin)):
+    """Get filter impact statistics (admin only)"""
+    # Get recent signals to analyze filter impact
+    recent_signals = []
+    async for signal in db.signals.find({
+        "created_at": {"$gte": datetime.utcnow() - timedelta(hours=24)}
+    }).sort("created_at", -1).limit(100):
+        signal['id'] = str(signal.pop('_id'))
+        recent_signals.append(signal)
+    
+    # Analyze regime distribution
+    regime_counts = {}
+    for signal in recent_signals:
+        regime = signal.get('regime', 'UNKNOWN')
+        if regime not in regime_counts:
+            regime_counts[regime] = {'total': 0, 'wins': 0, 'losses': 0}
+        regime_counts[regime]['total'] += 1
+        if signal.get('result') == 'WIN':
+            regime_counts[regime]['wins'] += 1
+        elif signal.get('result') == 'LOSS':
+            regime_counts[regime]['losses'] += 1
+    
+    return {
+        "success": True,
+        "last_24h": {
+            "total_signals": len(recent_signals),
+            "regime_distribution": regime_counts
+        },
+        "filter_impact": {
+            "regime_filter": "Blocking RANGE and VOLATILE regimes",
+            "confidence_filter": f"Requiring >{MIN_CONFIDENCE_THRESHOLD}% AI confidence",
+            "session_filter": "Trading only during optimal hours"
+        }
     }
 
 @api_router.post("/admin/ml/optimize")
