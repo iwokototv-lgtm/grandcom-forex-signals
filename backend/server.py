@@ -328,7 +328,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 # GOLD: XAUUSD uses Balanced (7/15/25), XAUEUR keeps (5/10/15)
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "enabled": False,  # DISABLED: Live performance shows -5238.9 pips, 48% WR, PF 0.59
+        "enabled": True,   # RE-ENABLED for monitoring - User requested 1 month trial
         "use_fixed_pips": True,
         "fixed_tp1_pips": 7,
         "fixed_tp2_pips": 15,
@@ -2155,7 +2155,7 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
             },
             "tp_sl": {
                 "forex": {"tp1": 3, "tp2": 6, "tp3": 9, "sl": 10, "note": "OPTIMIZED - Conservative"},
-                "xauusd": {"status": "DISABLED", "reason": "Live: -5238.9 pips, 48% WR, PF 0.59"},
+                "xauusd": {"tp1": 7, "tp2": 15, "tp3": 25, "sl": "ATR-based", "note": "MONITORING - 1 month trial"},
                 "xaueur": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based", "note": "TOP PERFORMER: +4847 pips, 96% WR"},
                 "audusd": {"tp1": 2, "tp2": 4, "tp3": 6, "sl": 8, "note": "ADJUSTED - Ultra-conservative"},
                 "btcusd": {"status": "DISABLED", "reason": "17.5% win rate, PF 0.14"}
