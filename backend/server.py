@@ -460,6 +460,46 @@ PAIR_PARAMETERS = {
         "pip_value": 0.0001,
         "decimal_places": 5,
         "typical_spread": 0.00012
+    },
+    # ===== NEW ASIAN SESSION PAIRS =====
+    "NZDUSD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,   # Conservative for new pair
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.2,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00015
+    },
+    "AUDJPY": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,   # JPY cross - conservative
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.3,
+        "min_rr": 1.5,
+        "pip_value": 0.01,    # JPY pair
+        "decimal_places": 3,
+        "typical_spread": 0.015
+    },
+    "CADJPY": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,   # JPY cross - conservative
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.3,
+        "min_rr": 1.5,
+        "pip_value": 0.01,    # JPY pair
+        "decimal_places": 3,
+        "typical_spread": 0.015
     }
 }
 
@@ -491,9 +531,12 @@ SESSION_FILTERS = {
     "USDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # Asian + NY
     "EURJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
     "GBPJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
+    "AUDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
+    "CADJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
     
-    # AUD Pairs - Asian Session (0:00-8:00 UTC) + NY overlap
+    # AUD/NZD Pairs - Asian Session (0:00-8:00 UTC) + NY overlap
     "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},
+    "NZDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
 }
 
 # 4. DRAWDOWN PROTECTION - Auto-pause losing pairs
