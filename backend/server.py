@@ -328,24 +328,26 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 # GOLD: XAUUSD uses Balanced (7/15/25), XAUEUR keeps (5/10/15)
 PAIR_PARAMETERS = {
     "XAUUSD": {
+        "enabled": False,  # DISABLED: Live performance shows -5238.9 pips, 48% WR, PF 0.59
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 7,   # OPTIMIZED: Balanced settings
-        "fixed_tp2_pips": 15,  # Backtest: PF 1.27, Return 1114%
+        "fixed_tp1_pips": 7,
+        "fixed_tp2_pips": 15,
         "fixed_tp3_pips": 25,
         "atr_multiplier_sl": 1.5,
         "min_rr": 1.5,
-        "pip_value": 0.1,  # Gold pip = $0.10
+        "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.30
     },
     "XAUEUR": {
+        "enabled": True,   # KEEP: Live performance shows +4847.4 pips, 96% WR, PF 6.44
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 5,   # Keep current - PF 1.27, WR 63.9%
+        "fixed_tp1_pips": 5,
         "fixed_tp2_pips": 10,
         "fixed_tp3_pips": 15,
         "atr_multiplier_sl": 1.5,
         "min_rr": 1.5,
-        "pip_value": 0.1,  # Gold pip = €0.10
+        "pip_value": 0.1,
         "decimal_places": 2,
         "typical_spread": 0.40
     },
@@ -2153,8 +2155,8 @@ async def get_system_config(admin_user: dict = Depends(require_admin)):
             },
             "tp_sl": {
                 "forex": {"tp1": 3, "tp2": 6, "tp3": 9, "sl": 10, "note": "OPTIMIZED - Conservative"},
-                "xauusd": {"tp1": 7, "tp2": 15, "tp3": 25, "sl": "ATR-based", "note": "OPTIMIZED - Balanced"},
-                "xaueur": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based"},
+                "xauusd": {"status": "DISABLED", "reason": "Live: -5238.9 pips, 48% WR, PF 0.59"},
+                "xaueur": {"tp1": 5, "tp2": 10, "tp3": 15, "sl": "ATR-based", "note": "TOP PERFORMER: +4847 pips, 96% WR"},
                 "audusd": {"tp1": 2, "tp2": 4, "tp3": 6, "sl": 8, "note": "ADJUSTED - Ultra-conservative"},
                 "btcusd": {"status": "DISABLED", "reason": "17.5% win rate, PF 0.14"}
             },
