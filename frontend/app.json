@@ -46,8 +46,10 @@
     },
     "extra": {
       "eas": {
-        "projectId": "your-project-id"
-      }
-    }
+        "projectId": "55915523-a13c-437e-9c0c-0856347209df"
+      },
+      "router": {}
+    },
+    "owner": "grandcomfxsignals"
   }
 }
