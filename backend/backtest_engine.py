@@ -155,6 +155,10 @@ class BacktestEngine:
         "AUDUSD": {"pip_value": 0.0001, "decimals": 5, "symbol": "AUD/USD"},
         "USDCAD": {"pip_value": 0.0001, "decimals": 5, "symbol": "USD/CAD"},
         "USDCHF": {"pip_value": 0.0001, "decimals": 5, "symbol": "USD/CHF"},
+        # New Asian session pairs
+        "NZDUSD": {"pip_value": 0.0001, "decimals": 5, "symbol": "NZD/USD"},
+        "AUDJPY": {"pip_value": 0.01, "decimals": 3, "symbol": "AUD/JPY"},
+        "CADJPY": {"pip_value": 0.01, "decimals": 3, "symbol": "CAD/JPY"},
     }
     
     def __init__(self, twelve_data_api_key: str, db=None):

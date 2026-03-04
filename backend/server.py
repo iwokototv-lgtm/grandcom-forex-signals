@@ -238,7 +238,11 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
             "AUDUSD": "AUD/USD",
             "USDCAD": "USD/CAD",
             "USDCHF": "USD/CHF",
-            "BTCUSD": "BTC/USD"
+            "BTCUSD": "BTC/USD",
+            # New Asian session pairs
+            "NZDUSD": "NZD/USD",
+            "AUDJPY": "AUD/JPY",
+            "CADJPY": "CAD/JPY"
         }
         
         api_symbol = symbol_map.get(symbol, symbol)
@@ -328,7 +332,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 # GOLD: XAUUSD uses Balanced (7/15/25), XAUEUR keeps (5/10/15)
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "enabled": True,   # RE-ENABLED for monitoring - User requested 1 month trial
+        "enabled": False,  # DISABLED: Live shows -5619.8 pips, 53.7% WR, PF 0.56
         "use_fixed_pips": True,
         "fixed_tp1_pips": 7,
         "fixed_tp2_pips": 15,
@@ -340,7 +344,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.30
     },
     "XAUEUR": {
-        "enabled": True,   # KEEP: Live performance shows +4847.4 pips, 96% WR, PF 6.44
+        "enabled": False,  # DISABLED: Live shows -8436.5 pips, 60.4% WR, PF 0.35
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5,
         "fixed_tp2_pips": 10,
@@ -414,8 +418,9 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.015
     },
     "GBPJPY": {
+        "enabled": False,  # DISABLED: Live shows -1115.0 pips, 65.1% WR, PF 0.26
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3,   # OPTIMIZED: PF 1.17, WR 65.1%
+        "fixed_tp1_pips": 3,
         "fixed_tp2_pips": 6,
         "fixed_tp3_pips": 9,
         "fixed_sl_pips": 10,
@@ -426,11 +431,12 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.020
     },
     "AUDUSD": {
+        "enabled": False,  # DISABLED: Live shows -596.6 pips, 34.6% WR, PF 0.34
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 2,   # ADJUSTED: Ultra-conservative due to 23.6% WR
-        "fixed_tp2_pips": 4,   # Tighter TPs to capture more wins
+        "fixed_tp1_pips": 2,
+        "fixed_tp2_pips": 4,
         "fixed_tp3_pips": 6,
-        "fixed_sl_pips": 8,    # Tighter SL for better R:R
+        "fixed_sl_pips": 8,
         "atr_multiplier_sl": 1.0,
         "min_rr": 1.5,
         "pip_value": 0.0001,
@@ -510,9 +516,9 @@ PAIR_PARAMETERS = {
 ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN"]  # Skip RANGE markets (48% WR)
 SKIP_REGIME = ["RANGE", "VOLATILE"]  # These regimes have lower win rates
 
-# 2. CONFIDENCE THRESHOLD - Require high ML confidence
-MIN_CONFIDENCE_THRESHOLD = 70  # Only trade when ML confidence > 70%
-MIN_REGIME_CONFIDENCE = 0.65   # Minimum regime detection confidence
+# 2. CONFIDENCE THRESHOLD - Require reasonable ML confidence
+MIN_CONFIDENCE_THRESHOLD = 55  # Lowered from 70% - most signals were 55-68%
+MIN_REGIME_CONFIDENCE = 0.60   # Minimum regime detection confidence
 
 # 3. SESSION FILTER - Trade pairs during optimal sessions
 SESSION_FILTERS = {

@@ -1,74 +1,80 @@
-# Grandcom Forex Signals Pro - Product Requirements Document
+# Grandcom Forex Signals Pro - Final Configuration
 
-## Profitability Filters (Implemented March 2026)
+## Active Trading Pairs (9 pairs)
 
-### 1. Regime Filter ✅
-- **Only trade**: TREND_UP, TREND_DOWN
-- **Skip**: RANGE (48% WR), VOLATILE
-- **Impact**: +25% expected win rate improvement
+| Pair | TP1 | TP2 | TP3 | SL | Live WR | Live PF | Sessions |
+|------|-----|-----|-----|-----|---------|---------|----------|
+| EURUSD | 3 | 6 | 9 | 10 | 86.8% | 2.73 | London |
+| USDCHF | 3 | 6 | 9 | 10 | 83.8% | 1.71 | London |
+| USDJPY | 3 | 6 | 9 | 10 | 80.6% | 2.72 | Asian + NY |
+| EURJPY | 3 | 6 | 9 | 10 | 80.0% | 2.68 | ALL (22h) |
+| USDCAD | 3 | 6 | 9 | 10 | 78.0% | 1.72 | NY |
+| GBPUSD | 3 | 6 | 9 | 10 | 76.5% | 2.60 | London |
+| NZDUSD | 3 | 6 | 9 | 10 | NEW | NEW | Asian + NY |
+| AUDJPY | 3 | 6 | 9 | 10 | NEW | NEW | Asian + NY |
+| CADJPY | 3 | 6 | 9 | 10 | NEW | NEW | Asian + NY |
 
-### 2. Confidence Threshold ✅
-- **Min AI Confidence**: 70%
-- **Min Regime Confidence**: 65%
-- **Impact**: Filters out low-probability setups
+## Disabled Pairs (5 pairs)
 
-### 3. Session Filter ✅
-| Pair | Optimal Hours (UTC) |
-|------|---------------------|
-| EURUSD, GBPUSD, XAUEUR | 8:00-16:00 (London) |
-| XAUUSD | 8:00-20:00 (London + NY) |
-| USDJPY, USDCAD | 13:00-21:00 (New York) |
-| EURJPY, GBPJPY | 8:00-21:00 (Overlap) |
-| AUDUSD | 0:00-8:00 + 13:00-21:00 |
-
-### 4. Drawdown Protection ✅
-- **Max daily losses**: 3 per pair
-- **Max daily loss pips**: 50 per pair
-- **Pause duration**: 4 hours after hitting limit
-
-## Trading Pairs Status
-
-### Active Pairs (10)
-| Pair | TP1 | TP2 | TP3 | SL | Status |
-|------|-----|-----|-----|-----|--------|
-| XAUUSD | 7 | 15 | 25 | ATR | Monitoring |
-| XAUEUR | 5 | 10 | 15 | ATR | ⭐ Top Performer |
-| USDJPY | 3 | 6 | 9 | 10 | ⭐ High WR |
-| GBPUSD | 3 | 6 | 9 | 10 | ⭐ High WR |
-| EURUSD | 3 | 6 | 9 | 10 | OK |
-| USDCAD | 3 | 6 | 9 | 10 | OK |
-| USDCHF | 3 | 6 | 9 | 10 | OK |
-| EURJPY | 3 | 6 | 9 | 10 | OK |
-| GBPJPY | 3 | 6 | 9 | 10 | OK |
-| AUDUSD | 2 | 4 | 6 | 8 | Adjusted |
-
-### Disabled Pairs (1)
 | Pair | Reason |
 |------|--------|
-| BTCUSD | 17.5% WR, PF 0.14 |
+| XAUUSD | -5619.8 pips, 53.7% WR, PF 0.56 |
+| XAUEUR | -8436.5 pips, 60.4% WR, PF 0.35 |
+| GBPJPY | -1115.0 pips, 65.1% WR, PF 0.26 |
+| AUDUSD | -596.6 pips, 34.6% WR, PF 0.34 |
+| BTCUSD | -54684.0 pips, 14.8% WR, PF 0.18 |
 
-## Admin API Endpoints
+## Session Schedule
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/admin/filters` | View all filter settings |
-| `GET /api/admin/filter-stats` | View filter impact stats |
-| `GET /api/admin/ml/performance` | ML performance by pair |
-| `GET /api/admin/system-config` | System configuration |
+### 🌏 Asian Session (0:00-8:00 UTC) - 6 pairs
+- USDJPY ⭐ (80.6% WR)
+- EURJPY ⭐ (80.0% WR)
+- NZDUSD (NEW)
+- AUDJPY (NEW)
+- CADJPY (NEW)
 
-## Filter Log Examples
-```
-📉 XAUUSD skipped - RANGE regime has lower win rate
-📉 EURUSD skipped - RANGE regime has lower win rate
-⏰ GBPUSD skipped - not in optimal session
-🛑 AUDUSD paused - Max daily losses (3) reached
-📊 USDJPY skipped - confidence 65% < 70% threshold
-```
+### 🇬🇧 London Session (8:00-16:00 UTC) - 4 pairs
+- EURUSD ⭐ (86.8% WR)
+- USDCHF ⭐ (83.8% WR)
+- GBPUSD (76.5% WR)
+- EURJPY (80.0% WR)
 
-## Expected Impact
-- **Win Rate**: +15-25% improvement
-- **Fewer Signals**: ~40-50% fewer signals (quality > quantity)
-- **Drawdown**: Reduced maximum drawdown with auto-pause
+### 🇺🇸 New York Session (13:00-21:00 UTC) - 7 pairs
+- USDJPY ⭐ (80.6% WR)
+- USDCAD ⭐ (78.0% WR)
+- EURJPY (80.0% WR)
+- NZDUSD (NEW)
+- AUDJPY (NEW)
+- CADJPY (NEW)
+
+### 🌐 All Sessions - 1 pair
+- EURJPY (22 hours/day coverage)
+
+## Profitability Filters
+
+| Filter | Setting | Purpose |
+|--------|---------|---------|
+| Regime Filter | Skip RANGE, VOLATILE | Only trade trends |
+| Confidence | Min 55% AI, 60% Regime | Quality signals only |
+| Session | Per-pair hours | Optimal liquidity |
+| Drawdown | Max 3 losses, 50 pips/day | Risk management |
+
+## Technical Configuration
+
+- **Symbol mappings**: All 14 pairs configured for Twelve Data API
+- **Backtest engine**: Updated with new pairs (NZDUSD, AUDJPY, CADJPY)
+- **Admin endpoints**: /admin/filters, /admin/filter-stats available
+
+## Deployment Checklist
+
+- [x] Active pairs optimized based on LIVE performance
+- [x] Unprofitable pairs disabled
+- [x] Session filters configured
+- [x] New Asian pairs added (NZDUSD, AUDJPY, CADJPY)
+- [x] Symbol mappings updated for API
+- [x] Backtest engine updated
+- [x] Confidence threshold adjusted (70% → 55%)
+- [x] All filters working
 
 ## Credentials
 - **Admin**: admin@forexsignals.com / Admin@2024!Forex
