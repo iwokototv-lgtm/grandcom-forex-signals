@@ -42,10 +42,12 @@ Professional Forex & Gold (XAUUSD) signals mobile app with fully automatic signa
 
 | Filter | Setting | Purpose |
 |--------|---------|---------|
-| Regime Filter | Skip RANGE, VOLATILE | Only trade trends |
+| Regime Filter | Skip VOLATILE only | Allow RANGE with reduced confidence |
 | Confidence | Min 55% AI, 60% Regime | Quality signals only |
 | Session | Per-pair hours | Optimal liquidity |
 | Drawdown | Max 3 losses, 50 pips/day | Risk management |
+
+**Note:** Regime filter updated to allow RANGE markets (previously blocked all signals)
 
 ## Technical Stack
 - **Frontend:** React Native, Expo, Expo Router

@@ -512,9 +512,10 @@ PAIR_PARAMETERS = {
 # ============ PROFITABILITY FILTERS ============
 # These filters help increase win rate by only trading in optimal conditions
 
-# 1. REGIME FILTER - Only trade in trending markets
-ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN"]  # Skip RANGE markets (48% WR)
-SKIP_REGIME = ["RANGE", "VOLATILE"]  # These regimes have lower win rates
+# 1. REGIME FILTER - Trade all regimes but with confidence adjustment
+ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE"]  # Allow RANGE with lower confidence
+SKIP_REGIME = ["VOLATILE"]  # Only skip highly volatile markets (too risky)
+# Note: RANGE signals will still generate but with reduced confidence multiplier
 
 # 2. CONFIDENCE THRESHOLD - Require reasonable ML confidence
 MIN_CONFIDENCE_THRESHOLD = 55  # Lowered from 70% - most signals were 55-68%
