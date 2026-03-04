@@ -1233,7 +1233,10 @@ async def get_tracker_status(current_user: dict = Depends(get_current_user)):
 async def get_active_signals(current_user: dict = Depends(get_current_user)):
     """Get all currently active signals with their current distance from TP/SL"""
     try:
-        active_signals = await db.signals.find({"status": "ACTIVE"}).sort("created_at", -1).to_list(length=100)
+        active_signals = await db.signals.find(
+            {"status": "ACTIVE"},
+            {"pair": 1, "type": 1, "entry_price": 1, "current_price": 1, "tp_levels": 1, "sl_price": 1, "created_at": 1, "regime": 1}
+        ).sort("created_at", -1).to_list(length=100)
         
         signals_with_status = []
         for signal in active_signals:
@@ -1670,7 +1673,10 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
     
     # Win rate calculation - count closed signals with new status format
     closed_statuses = ["CLOSED_TP1", "CLOSED_TP2", "CLOSED_TP3", "CLOSED_SL", "HIT_TP", "HIT_SL"]
-    closed_signals = await db.signals.find({"status": {"$in": closed_statuses}}).to_list(5000)
+    closed_signals = await db.signals.find(
+        {"status": {"$in": closed_statuses}},
+        {"result": 1, "pips": 1}
+    ).to_list(5000)
     
     # Calculate wins and losses
     wins = sum(1 for s in closed_signals if s.get("result") == "WIN")
