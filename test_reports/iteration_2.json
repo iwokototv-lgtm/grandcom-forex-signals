@@ -1,0 +1,96 @@
+{
+  "summary": "Pair re-enablement verification tests - All 4 pairs (XAUUSD, XAUEUR, GBPJPY, AUDUSD) confirmed enabled and active in system config. 31 out of 32 backend tests passed.",
+  "mode": "generate",
+  "baseline_commit": "c3c5406d4ffa09bd46442eb5cce8a7a23c57a0c9",
+  "head_commit": "0329b23ee9d17b6d11f63dcca84504815afe790c",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/subscriptions/create-checkout-session",
+        "issue": "Stripe checkout session creation fails with 'Not a valid URL' error - pre-existing issue with Stripe test mode configuration",
+        "priority": "LOW"
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "regression_results": {
+    "total_specs": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0
+  },
+  "backend_test_results": {
+    "total": 32,
+    "passed": 31,
+    "failed": 1
+  },
+  "specs_created": [],
+  "specs_updated": [],
+  "quarantined_tests": [
+    "test_create_checkout_session_valid_package - Stripe test mode URL validation issue (pre-existing)"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_admin_config.py",
+    "/app/backend/tests/test_auth.py",
+    "/app/backend/tests/test_signals.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Fix Stripe checkout URL configuration - origin_url from FRONTEND_URL/EXPO_PUBLIC_BACKEND_URL may not be a valid URL for Stripe success/cancel redirects"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_config.py"
+  ],
+  "success_rate": {
+    "backend": "96.9%",
+    "frontend": "N/A - Expo mobile app"
+  },
+  "features_tested": {
+    "pair_re_enablement_XAUUSD": {
+      "status": "PASS",
+      "details": "XAUUSD confirmed in active_pairs_list via /api/admin/system-config"
+    },
+    "pair_re_enablement_XAUEUR": {
+      "status": "PASS",
+      "details": "XAUEUR confirmed in active_pairs_list via /api/admin/system-config"
+    },
+    "pair_re_enablement_GBPJPY": {
+      "status": "PASS",
+      "details": "GBPJPY confirmed in active_pairs_list via /api/admin/system-config"
+    },
+    "pair_re_enablement_AUDUSD": {
+      "status": "PASS",
+      "details": "AUDUSD confirmed in active_pairs_list via /api/admin/system-config"
+    },
+    "system_config_endpoint": {
+      "status": "PASS",
+      "details": "Returns active_pairs_list, disabled_pairs, tp_sl config, and outcome_tracker status"
+    },
+    "admin_authentication": {
+      "status": "PASS",
+      "details": "Admin login returns correct role, system-config endpoint requires admin auth"
+    },
+    "signal_generation": {
+      "status": "PASS",
+      "details": "Signal generate endpoint accessible, signals list endpoint working"
+    },
+    "health_check": {
+      "status": "PASS",
+      "details": "Returns healthy status, database healthy, signal_tracker running"
+    },
+    "btcusd_disabled": {
+      "status": "PASS",
+      "details": "BTCUSD confirmed in disabled_pairs (poor performance - 17.5% win rate)"
+    }
+  },
+  "seed_data_creation": "None - used existing admin user",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All pair re-enablement tests pass. Stripe checkout has pre-existing URL validation issue but is not related to this feature. Frontend is Expo (React Native mobile app), so no Playwright E2E tests created."
+}

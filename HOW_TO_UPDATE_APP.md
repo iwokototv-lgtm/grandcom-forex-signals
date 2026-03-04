@@ -2,7 +2,7 @@
 
 ## 🎯 Quick Start Guide
 
-Your app is running at: **https://grandcom-pro-signals.preview.emergentagent.com**
+Your app is running at: **https://grandcom-trading.preview.emergentagent.com**
 
 ---
 
@@ -293,7 +293,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8001/api/signals?limit=5
 ```
 
 ### Test Frontend:
-Open in browser: https://grandcom-pro-signals.preview.emergentagent.com
+Open in browser: https://grandcom-trading.preview.emergentagent.com
 
 ---
 

@@ -332,7 +332,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 # GOLD: XAUUSD uses Balanced (7/15/25), XAUEUR keeps (5/10/15)
 PAIR_PARAMETERS = {
     "XAUUSD": {
-        "enabled": False,  # DISABLED: Live shows -5619.8 pips, 53.7% WR, PF 0.56
+        "enabled": True,   # RE-ENABLED: User tested and confirmed OK
         "use_fixed_pips": True,
         "fixed_tp1_pips": 7,
         "fixed_tp2_pips": 15,
@@ -344,7 +344,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.30
     },
     "XAUEUR": {
-        "enabled": False,  # DISABLED: Live shows -8436.5 pips, 60.4% WR, PF 0.35
+        "enabled": True,   # RE-ENABLED: User tested and confirmed OK
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5,
         "fixed_tp2_pips": 10,
@@ -418,7 +418,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.015
     },
     "GBPJPY": {
-        "enabled": False,  # DISABLED: Live shows -1115.0 pips, 65.1% WR, PF 0.26
+        "enabled": True,   # RE-ENABLED: User tested and confirmed OK
         "use_fixed_pips": True,
         "fixed_tp1_pips": 3,
         "fixed_tp2_pips": 6,
@@ -431,7 +431,7 @@ PAIR_PARAMETERS = {
         "typical_spread": 0.020
     },
     "AUDUSD": {
-        "enabled": False,  # DISABLED: Live shows -596.6 pips, 34.6% WR, PF 0.34
+        "enabled": True,   # RE-ENABLED: User tested and confirmed OK
         "use_fixed_pips": True,
         "fixed_tp1_pips": 2,
         "fixed_tp2_pips": 4,

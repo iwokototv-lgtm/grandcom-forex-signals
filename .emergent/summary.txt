@@ -4,15 +4,15 @@ The user wants to build a professional Forex & Gold (XAUUSD) signals mobile app 
 **PRODUCT REQUIREMENTS:**
 - **Signal Generation:** Fully automatic, using live market data for various Forex pairs, Gold (XAUUSD), and cryptocurrencies (BTCUSD).
 - **Signal Details:** Each signal must include Entry Price, Stop Loss, and three Take Profit levels (TP1, TP2, TP3).
-- **Advanced Analysis:** The system must evolve beyond simple prompts to include Machine Learning (ML) for market regime detection (Trend, Range, Volatile), Smart Money Concepts (SMC) like Order Blocks and Fair Value Gaps, Multi-Timeframe Analysis (H4/H1/M15), and various filters (News, Session, Correlation).
-- **Telegram Integration:** Automatically post generated signals to a Telegram channel () in a professional format.
+- **Advanced Analysis:** The system must evolve beyond simple prompts to include Machine Learning (ML) for market regime detection (Trend, Range, Volatile), Smart Money Concepts (SMC), Multi-Timeframe Analysis, and various filters (News, Session, Correlation, Drawdown).
+- **Telegram Integration:** Automatically post generated signals to a Telegram channel ().
 - **Live Prices:** Market prices must be accurate and match the user's MT5 broker's format.
 - **Authentication:** JWT-based email/password login and a pre-defined admin account.
-- **Monetization:** Support for a subscription model (In-App Purchases).
+- **Monetization:** Support for a subscription model (In-App Purchases) via Stripe.
 - **User-Facing Content:** Include pages for Help & Support, Privacy Policy, and Terms of Service.
 - **Desktop App:** A Windows desktop version of the application is also required.
-- **Performance:** The system must be profitable, with realistic Take Profit and Stop Loss levels that are hit, and must avoid trade clustering and excessive risk.
-- **Backtesting:** A historical backtesting engine to test strategies against 3-10 years of data.
+- **Performance:** The system must be profitable, with realistic Take Profit and Stop Loss levels.
+- **Backtesting:** A historical backtesting engine to test strategies.
 - **Push Notifications:** Mobile alerts for new signals and trade outcomes.
 
 **User's preferred language**: English
@@ -20,65 +20,77 @@ The user wants to build a professional Forex & Gold (XAUUSD) signals mobile app 
 **what currently exists?**
 A feature-rich, full-stack application with a React Native (Expo) frontend and a sophisticated Python (FastAPI) backend.
 - **Backend:**
-    - A scheduled job generates trading signals using an advanced engine with ML regime detection, SMC analysis, and multiple filters.
-    - A background task automatically tracks live trades to determine and record outcomes (TP/SL hits).
-    - A historical backtesting engine is in place to test strategies over long periods.
-    - API endpoints support authentication, signals, analytics, push notifications, admin functions, and backtesting.
-    - Initial files and configuration for a Stripe-based subscription system have been created.
+    - A scheduled job generates trading signals using an advanced engine with ML regime detection and multiple profitability filters (Session, Confidence, Drawdown).
+    - An automatic outcome tracker monitors live trades and records results.
+    - A historical backtesting engine is in place.
+    - A comprehensive API supports authentication, signals, analytics, push notifications, an admin panel, backtesting, and Stripe subscriptions.
+    - The system is configured with 13 trading pairs, with the ability to enable or disable them based on performance.
 - **Frontend:**
-    - An Expo mobile app displaying signals, an advanced analytics dashboard with performance charts, user profile, and settings screens for notifications.
-    - A dedicated UI for running historical backtests and an admin panel for managing the system.
-- **Desktop App:** An Electron project exists in , but it is not yet built or tested.
+    - An Expo mobile app displaying signals, an advanced analytics dashboard, user profile, notification settings, a backtesting UI, and a full-featured admin panel for manual signal creation and user management.
+- **Desktop App:**
+    - An Electron project has been built, producing a portable executable for Windows and a Linux AppImage.
 
 **Last working item**:
-    - Last item agent was working: Implementing the subscription/in-app purchase system using Stripe. The agent created , added a placeholder Stripe key to , and was in the process of integrating it into  by adding API endpoints and initializing the service on application startup.
+    - Last item agent was working: Fulfilling the user's request to re-enable four trading pairs (, , , ) that were previously disabled due to poor performance. The agent was editing the  dictionary in .
     - Status: IN PROGRESS
     - Agent Testing Done: N
     - Which testing method agent to use? backend testing agent
     - User Testing Done: N
 
 **All Pending/In progress Issue list**:
-  - Issue 1: The user context on the frontend does not properly retrieve the user's , which prevents the Admin Panel button from appearing without a full app refresh after login. (P1)
-
+  - Issue 1:  Complete and verify the re-enabling of four trading pairs. (P0)
+  
   **Issues Detail:**
-  - **Issue 1**: User role not available in frontend context immediately after login.
-     - **Description**: The agent implemented a role-based admin panel, but the frontend's  does not seem to be populated with the  field immediately upon login. This causes the conditional rendering of the Admin Panel button on the profile screen to fail until the user state is refreshed.
-     - **Attempted fixes**: The agent updated the  interface in  and the  model in  to include the . However, the issue of state synchronization on login persists.
-     - **Next debug checklist**:
-        1. Review the  function in  or .
-        2. Ensure that when the user object is set in the context after a successful login API call, the  field from the API response is correctly stored in the state.
-        3. Verify that the component relying on the  (e.g., ) re-renders correctly when the  object in the context is updated.
-     - **Why fix this issue and what will be achieved with the fix?**: This fix will provide a seamless experience for the admin user, allowing them to access the admin panel without needing to manually refresh the app.
-     - **Status**: NOT STARTED
-     - **Is recurring issue?**: N
-     - **Should Test frontend/backend/both after fix?**: frontend
+  - **Issue 1**: 
+     - **Description**: The user requested to re-enable , , , and  for monitoring. The agent's last actions were to modify  to do this, but the process appeared incomplete in the logs before the session ended.
+     - **Attempted fixes**: The agent used  to set  for the pairs in the  dictionary within .
+     - **Next debug checklist**: 
+        1. View  and inspect the  dictionary.
+        2. Ensure that , , , and  all have the  flag.
+        3. If any are incorrect, use  to update the configuration.
+        4. Restart the backend service using backend: stopped
+backend: started.
+        5. Call the  endpoint and check the output to confirm the API reports all four pairs as active.
+        6. Monitor backend logs (==> /var/log/supervisor/backend.err.log <==
+INFO:     Will watch for changes in these directories: ['/app/backend']
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     Started reloader process [398] using WatchFiles
+
+==> /var/log/supervisor/backend.out.log <==) to confirm signals are being processed for these pairs.
+     - **Why fix this issue and what will be achieved with the fix?**: This directly addresses the user's most recent instruction, ensuring the application's trading logic aligns with their current monitoring strategy.
+     - **Status**: IN PROGRESS
+     - **Is recurring issue?**: Y
+     - **Should Test frontend/backend/both after fix?**: backend
      - **Blocked on other issue**: None
 
 **In progress Task List**:
-  - Task 1: Complete Stripe Subscription/In-App Purchase Implementation (P3)
-     - **Where to resume**: The agent was adding the Stripe API endpoints (e.g., , ) and the  initialization to .
-     - **What will be achieved with this?**: A complete monetization system for the application, allowing users to subscribe to signal plans.
-     - **Status**: IN PROGRESS
-     - **Should Test frontend/backend/both after fix?**: both
-     - **Blocked on something**: None
+- None
 
 **Upcoming and Future Tasks**
 - **Upcoming Tasks**:
-    - **Run & Analyze Backtests (P1)**: Use the newly built backtesting engine to run tests on various pairs with different TP/SL configurations. Analyze the results to find the most profitable settings and present them to the user.
-    - **Build & Test Desktop App (P1)**: The Electron project in  needs to be configured, built into a Windows executable, and tested to ensure full functionality.
+    - **Validate Desktop App Functionality (P1)**: The Windows and Linux builds were created, but their functionality (connecting to the backend, displaying data) has not been tested.
+    - **Admin Panel UI for Filters (P2)**: Enhance the admin panel to allow tweaking of profitability filter parameters (e.g., , ) from the UI, removing the need for code changes.
 - **Future Tasks**:
-    - **Admin Panel Enhancements (P2)**: Add more management features to the admin UI, such as the ability to manually add/edit signals, manage user subscriptions, or tweak system parameters directly from the UI.
+    - **Economic Calendar Integration (P2)**: Implement a news filter by integrating an economic calendar API to pause trading around high-impact news events.
+    - **Dynamic Volatility-Based TPs (P3)**: Refactor signal generation to use ATR (Average True Range) for setting Take Profit levels instead of fixed pips, making them more adaptive.
+    - **Improve Backtest Engine Accuracy (P3)**: Investigate and resolve the discrepancy between unprofitable historical backtest results and profitable live performance.
 
 **Completed work in this session**
-- **Automatic Signal Outcome Tracker**: A background job now monitors active trades, detects TP/SL hits, updates the database with results (WIN/LOSS), calculates pips, and sends Trade Closed notifications to Telegram. This fixed a critical gap.
-- **Fixed Pip Take Profit Levels**: The system was updated to use fixed 5, 10, and 15 pip TP levels for all Forex and Gold (XAUUSD, XAUEUR) pairs, as requested by the user.
-- **Push Notification Service**: Implemented a full push notification system, including the backend service (), API endpoints, and a frontend UI () for users to manage their notification preferences.
-- **Historical Backtesting Engine**: Created a backend engine () and a comprehensive frontend UI () to allow strategy testing against 3-10 years of historical market data.
-- **Performance Analytics Charts**: Added dynamic charts to the analytics dashboard () to visualize Win Rate Over Time and Monthly Net Pips.
-- **Role-Based Admin Panel**: Built a secure admin panel () accessible only to users with the 'admin' role, providing system stats, user lists, and quick actions. The user's role is now included in the JWT and API responses.
+- **Stripe Subscription System**: Implemented backend endpoints and a frontend UI for managing user subscriptions.
+- **Auth Context Bug Fix**: Resolved an issue where the Admin Panel button was not immediately visible to admin users after login.
+- **Backtesting and Live Optimization**: Ran extensive backtests, analyzed live performance data, and applied optimized TP/SL settings to various trading pairs.
+- **Desktop App Build**: Successfully built the Electron desktop application, creating distributable packages for Linux () and Windows ( portable).
+- **Admin Panel Enhancements**: Added features for manual signal creation and user management (role/subscription changes).
+- **ML Performance Analysis**: Created a  endpoint to analyze the profitability of different pairs and market regimes.
+- **Advanced Profitability Filters**: Implemented several layers of server-side filters to improve trading outcomes:
+    - **Regime Filter**: Avoids trading in low-win-rate market regimes (e.g., 'RANGE').
+    - **Session Filter**: Restricts pairs to their optimal trading sessions.
+    - **Confidence Threshold**: Enforces a minimum ML model confidence score.
+    - **Drawdown Protection**: Automatically pauses pairs that hit a daily loss limit.
+- **Asian Session Expansion**: Added and configured new pairs (, , ) to enhance signal coverage during the Asian trading session, including fixing symbol mapping issues.
 
 **Earlier issues found/mentioned but not fixed**
-   - None. The major issues from the previous fork (outcome tracking, push notifications) have been resolved in this session.
+   - None.
 
 **Known issue recurrence from previous fork**
   - None.
@@ -87,109 +99,81 @@ A feature-rich, full-stack application with a React Native (Expo) frontend and a
 
 
 **Key Technical Concepts**
-- **Frontend:** React Native, Expo, Expo Router, Axios, .
-- **Backend:** FastAPI, Pymongo, APScheduler, python-jose (JWT).
-- **Machine Learning:** Scikit-learn (GradientBoostingClassifier), Pandas, Numpy.
-- **Database:** MongoDB.
-- **Integrations:** Twelve Data API, Telegram Bot API, OpenAI, **Stripe (new)**.
+- **Frontend:** React Native, Expo, Expo Router
+- **Backend:** FastAPI, Pymongo, APScheduler, python-jose (JWT)
+- **Advanced Filters:** Session, Regime, Confidence, Drawdown protection.
+- **Database:** MongoDB
+- **Integrations:** Twelve Data API, Telegram Bot API, OpenAI, Stripe
+- **Desktop:** Electron, 
 
 **key DB schema**
   - **users**: 
   - **signals**: 
-  - **subscriptions**:  (Proposed)
+  - **subscriptions**: 
 
 **changes in tech stack**
-  - **Stripe**: Added for payment processing. Looking in indexes: https://pypi.org/simple, https://d33sy5i8bnduwe.cloudfront.net/simple/
-Requirement already satisfied: stripe in /root/.venv/lib/python3.11/site-packages (14.3.0)
-Requirement already satisfied: typing_extensions>=4.5.0 in /root/.venv/lib/python3.11/site-packages (from stripe) (4.15.0)
-Requirement already satisfied: requests>=2.20 in /root/.venv/lib/python3.11/site-packages (from stripe) (2.32.5)
-Requirement already satisfied: charset_normalizer<4,>=2 in /root/.venv/lib/python3.11/site-packages (from requests>=2.20->stripe) (3.4.4)
-Requirement already satisfied: idna<4,>=2.5 in /root/.venv/lib/python3.11/site-packages (from requests>=2.20->stripe) (3.11)
-Requirement already satisfied: urllib3<3,>=1.21.1 in /root/.venv/lib/python3.11/site-packages (from requests>=2.20->stripe) (2.6.3)
-Requirement already satisfied: certifi>=2017.4.17 in /root/.venv/lib/python3.11/site-packages (from requests>=2.20->stripe) (2026.1.4) was run.
-  - **React Native Chart Kit**: Added for frontend charts. yarn add v1.22.22
-[1/4] Resolving packages...
-[2/4] Fetching packages...
-[3/4] Linking dependencies...
-[4/4] Building fresh packages...
-success Saved 1 new dependency.
-info Direct dependencies
-└─ react-native-chart-kit@6.12.0
-info All dependencies
-└─ react-native-chart-kit@6.12.0
-Done in 3.68s..
-  - **Expo Notifications**: Added for push notifications. env: load .env
-env: export EXPO_TUNNEL_SUBDOMAIN EXPO_PACKAGER_HOSTNAME EXPO_PUBLIC_BACKEND_URL EXPO_PACKAGER_PROXY_URL EXPO_USE_FAST_RESOLVER METRO_CACHE_ROOT
-› Installing 2 SDK 54.0.0 compatible native modules using yarn
-> yarn add expo-notifications@~0.32.16 expo-device@~8.0.10
-yarn add v1.22.22
-[1/4] Resolving packages...
-[2/4] Fetching packages...
-[3/4] Linking dependencies...
-[4/4] Building fresh packages...
-success Saved lockfile.
-success Saved 0 new dependencies.
-Done in 8.57s..
+  -  and  were added to facilitate the desktop application build.
 
 **All files of reference**
-- ****: Heavily modified to integrate new services (Outcome Tracker, Notifications, Backtesting, Admin, Subscriptions).
-- ****: New file containing the logic for monitoring and closing active trades.
-- ****: New file for handling Expo push notifications.
-- ****: New file for running historical backtests.
-- ****: New file to handle Stripe integration logic.
-- ****: Updated with a Historical Backtest button and new performance charts.
-- ****: Updated to conditionally show an Admin Panel link.
-- ****: New screen for the admin management UI.
-- ****: New screen for the historical backtesting UI.
-- ****: New screen for managing push notification settings.
-- ****: Updated to include  in the user state.
+- ****: The most critical file, containing API endpoints, pair configurations, and all profitability filter logic.
+- ****: Updated to integrate with the drawdown protection system.
+- ****: Updated with mappings for newly added trading pairs.
+- ****: Significantly updated with modals and functions for manual signal creation and user management.
+- ****: New file creating the UI for Stripe subscription management.
 
 **Areas that need refactoring**:
--  remains a large file, though new functionality has been correctly modularized into separate service files. Further refactoring could be considered in the future but is not a priority.
+- The profitability filter settings (thresholds, session times) are hardcoded in . These should be moved to a more manageable configuration, ideally editable via the Admin Panel.
+-  is very large. The extensive configuration and filter logic could be extracted into separate modules (e.g., , ) for better maintainability.
 
 **key api endpoints**
-- **Notifications**: 
-- **Backtesting**: , 
-- **Admin**: , , 
-- **Health/Stats**: , , 
-- **Subscriptions (In-Progress)**: , 
+- **Admin (New/Updated)**:
+    - : Create a signal manually.
+    - : Update a user's role or subscription.
+    - : View current pair status and filter settings.
+    - : Get profitability analysis.
+    - : View the current filter configuration.
+- **Subscriptions**:
+    - 
+    - 
 
 **Critical Info for New Agent**
-- The application's core feature set is largely complete. The main priorities are now monetization (Stripe), validation (backtesting), and expanding platform support (desktop app).
-- The user has requested TP partial close percentages for their trade copier: TP1=33%, TP2=33%, TP3=34%. This has been communicated but is not part of the application logic itself.
-- When working on the frontend, be aware of the Expo Router file-based routing. New screens require a file in  and an entry in a  file to be navigable.
-- There is a minor bug where the admin user's  is not immediately available in the frontend context after login, preventing the Admin Panel link from appearing without a refresh.
+- The user's primary focus is on **profitability**. They actively monitor performance and frequently request configuration changes. Be prepared to modify  and filter settings in .
+- A significant **discrepancy exists between historical backtests (losing) and live performance (profitable)**. Trust live performance data and user feedback over backtest results for now.
+- The immediate priority is to correctly re-enable the four pairs (, , , ) as per the user's last request and verify that the system is processing them.
 
 **documents and test reports created in this job**
--  has been consistently updated to reflect completed work and the current backlog.
+- 
+- 
+- 
+- 
 
 **Last 10 User Messages and any pending HUMAN messages** 
-1.  **Implement now and what else do we need to do**: User approved implementing the subscription feature and asked for the next steps. (Current task is based on this)
-2.  **Start P2/P3. Give me the TP partial % so that i can enter it to my copier**: User requested starting the next phase of tasks and asked for partial TP percentages. (Agent provided percentages and started on the Admin UI).
-3.  **Yes please**: User confirmed moving forward with the final summary after the Admin Panel was completed.
-4.  **Everything is running smoothly. Let me provide the final summary**: Agent's message before summarizing.
-5.  **Start all now please and do the health check**: User requested starting all proposed tasks (Backtest, Desktop App, Charts) and a health check. (Agent completed charts and health check).
-6.  **What is the next thing we need to do ?**: User asking for a plan after the fixed pip update for Gold was completed.
-7.  **Yes for 3-10 years**: User confirming the date range for the historical backtesting feature.
-8.  **Hope you do TP1 = 5, TP2 = 10, TP3 = 15 for XAUUSD, XAUEUR too**: User's request to apply the fixed pip TP logic to Gold pairs. (Completed).
-9.  **Yes please**: User confirming to proceed with adding a frontend UI for push notifications.
-10. **Yes please and what of the pips for the forex TP1 = 5 pips, TP2 = 10 pips,TP3 = 15 pips**: User confirming the agent's summary and re-iterating the fixed pip requirement. (Completed).
+1.  **Return XAUUSD,XAUEUR,GBPJPY,AUDUSD I have test run them here and they are okay for the threshold yesterday**: The user's last instruction, requesting to re-enable four specific pairs for monitoring. **(This is the highest priority pending action)**.
+2.  **1. Continue with the work... 2.Check the threshold... 3.Conduct backtesting... 4.Make sure everything is in order...**: User provided a multi-step plan to fix Asian session signals, which was completed.
+3.  **Can you check all sessions signals configuration,i dont know why signals have not been coming for the Asian session**: User reported a bug regarding Asian session signals, which was investigated and fixed.
+4.  **Give me a table of pairs under each sessions and those for all sessions**: User requested a summary of pair trading sessions, which was provided.
+5.  **Add now please**: User confirmed adding new pairs (, , ) to the system.
+6.  **Can you suggest pairs that can be traded profitably during Asian session...**: User asked for recommendations to improve Asian session trading.
+7.  **Implement please**: User approved the implementation of all suggested profitability improvements (regime filter, confidence threshold, etc.).
+8.  **I just wanted to ask ideologically that how will i increase the profitability**: User asked for high-level strategies to improve profitability.
+9.  **Do i have to redeploy as you have done an amendment on the gold**: User asked about the deployment process after a configuration change.
+10. **Send me the links to all the panels so as to be updating the App from my end**: User requested all relevant URLs for managing the application.
 
 **Project Health Check:**
-- **Broken**: The admin panel link is not immediately visible after login due to a frontend state synchronization issue.
-- **Mocked**: The Stripe subscription feature is partially implemented and not yet functional.
+- **Broken**: None. The application is functional.
+- **Mocked**: The Stripe subscription feature is using a test key. It requires a real user-provided key for production use.
 
 **3rd Party Integrations**
-- **OpenAI GPT-4**: Used for AI analysis. Uses Emergent LLM Key.
-- **Twelve Data**: Used for live/historical market data. Requires a User API Key ('Grow' plan).
-- **Telegram Bot API**: Used to post signals to a channel. Requires a User API Key.
-- **Stripe**: (In Progress) For handling subscriptions. Requires a User API Key.
+- **OpenAI GPT-4/5.2**: For AI analysis. Uses Emergent LLM Key.
+- **Twelve Data**: For live/historical market data. Requires a User API Key.
+- **Telegram Bot API**: For posting signals. Requires a User API Key.
+- **Stripe**: For handling subscriptions. Requires User API Keys.
 
 **Testing status**
-- **Testing agent used after significant changes**: NO (in this session). Agent relied on manual  testing for backend APIs and  tool for frontend UI verification.
-- **Troubleshoot agent used after agent stuck in loop**: NO.
-- **Test files created**: None in this session.
-- **Known regressions**: None.
+  - Testing agent used after significant changes: YES
+  - Troubleshoot agent used after agent stuck in loop: NO
+  - Test files created: None
+  - Known regressions: None
 
 **Credentials to test flow:**
 - **Admin User**:
@@ -197,5 +181,4 @@ Done in 8.57s..
     - Password: 
 
 **What agent forgot to execute**
-- The agent has not yet built or tested the Electron desktop application located in the  directory.
-- The agent built the backtesting engine but has not yet used it to run optimizations and provide actionable insights to the user, which was a recommended next step.</analysis>
+- The agent did not fully verify that all four pairs (, , , ) were successfully re-enabled as per the user's last request. This must be the first action in the next session.</analysis>

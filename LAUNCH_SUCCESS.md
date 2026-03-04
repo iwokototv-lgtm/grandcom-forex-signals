@@ -9,7 +9,7 @@
 ## 🚀 YOUR COMPLETE LIVE SYSTEM:
 
 ### 📱 Mobile App (LIVE):
-**URL:** https://grandcom-pro-signals.preview.emergentagent.com
+**URL:** https://grandcom-trading.preview.emergentagent.com
 
 **Admin Login:**
 ```

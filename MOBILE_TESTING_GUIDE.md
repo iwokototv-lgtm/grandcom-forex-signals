@@ -6,7 +6,7 @@
 
 **Just open this link on your phone:**
 ```
-https://grandcom-pro-signals.preview.emergentagent.com
+https://grandcom-trading.preview.emergentagent.com
 ```
 
 ✅ Works on ANY smartphone (iPhone/Android)

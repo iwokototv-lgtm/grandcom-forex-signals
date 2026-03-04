@@ -4,7 +4,7 @@
 
 **App Name:** Grandcom Forex Signals Pro
 **Status:** LIVE and fully functional
-**URL:** https://grandcom-pro-signals.preview.emergentagent.com
+**URL:** https://grandcom-trading.preview.emergentagent.com
 
 ---
 
