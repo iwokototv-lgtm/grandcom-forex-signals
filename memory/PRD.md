@@ -108,3 +108,8 @@ Professional Forex & Gold (XAUUSD) signals mobile app with fully automatic signa
 ## Known Items
 - Stripe subscription uses TEST key - requires production key for real payments
 - Historical backtests show lower performance than live trading (trust live data)
+
+## Deployment Fix (March 4, 2025)
+- **Fixed:** bcrypt/passlib compatibility issue - downgraded bcrypt from 4.1.3 to 4.0.1
+- **Issue:** passlib 1.7.4 expects `bcrypt.__about__.__version__` which was removed in bcrypt 4.1+
+- **Note:** ML libraries (scikit-learn, scipy, hmmlearn) may exceed Emergent's 1Gi RAM limit in production
