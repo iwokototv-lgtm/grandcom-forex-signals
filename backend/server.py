@@ -239,10 +239,19 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
             "USDCAD": "USD/CAD",
             "USDCHF": "USD/CHF",
             "BTCUSD": "BTC/USD",
-            # New Asian session pairs
+            # Asian session pairs
             "NZDUSD": "NZD/USD",
             "AUDJPY": "AUD/JPY",
-            "CADJPY": "CAD/JPY"
+            "CADJPY": "CAD/JPY",
+            # NEW Institutional pairs
+            "CHFJPY": "CHF/JPY",
+            "EURAUD": "EUR/AUD",
+            "GBPCAD": "GBP/CAD",
+            "EURCAD": "EUR/CAD",
+            "GBPAUD": "GBP/AUD",
+            "AUDNZD": "AUD/NZD",
+            "EURGBP": "EUR/GBP",
+            "EURCHF": "EUR/CHF",
         }
         
         api_symbol = symbol_map.get(symbol, symbol)
@@ -506,44 +515,163 @@ PAIR_PARAMETERS = {
         "pip_value": 0.01,    # JPY pair
         "decimal_places": 3,
         "typical_spread": 0.015
+    },
+    # ===== NEW INSTITUTIONAL PAIRS (Added per user request) =====
+    "CHFJPY": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.3,
+        "min_rr": 1.5,
+        "pip_value": 0.01,
+        "decimal_places": 3,
+        "typical_spread": 0.015
+    },
+    "EURAUD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 4,
+        "fixed_tp2_pips": 8,
+        "fixed_tp3_pips": 12,
+        "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.4,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00020
+    },
+    "GBPCAD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 4,
+        "fixed_tp2_pips": 8,
+        "fixed_tp3_pips": 12,
+        "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.4,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00025
+    },
+    "EURCAD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.3,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00020
+    },
+    "GBPAUD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 4,
+        "fixed_tp2_pips": 8,
+        "fixed_tp3_pips": 12,
+        "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.5,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00025
+    },
+    "AUDNZD": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 3,
+        "fixed_tp2_pips": 6,
+        "fixed_tp3_pips": 9,
+        "fixed_sl_pips": 10,
+        "atr_multiplier_sl": 1.2,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00018
+    },
+    "EURGBP": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 2,
+        "fixed_tp2_pips": 4,
+        "fixed_tp3_pips": 6,
+        "fixed_sl_pips": 8,
+        "atr_multiplier_sl": 1.0,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00012
+    },
+    "EURCHF": {
+        "enabled": True,
+        "use_fixed_pips": True,
+        "fixed_tp1_pips": 2,
+        "fixed_tp2_pips": 4,
+        "fixed_tp3_pips": 6,
+        "fixed_sl_pips": 8,
+        "atr_multiplier_sl": 1.0,
+        "min_rr": 1.5,
+        "pip_value": 0.0001,
+        "decimal_places": 5,
+        "typical_spread": 0.00015
     }
 }
 
 # ============ PROFITABILITY FILTERS ============
 # These filters help increase win rate by only trading in optimal conditions
+# UPDATED: Institutional trading strategy with liquidity sweep detection
 
-# 1. REGIME FILTER - Trade all regimes but with confidence adjustment
-ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE"]  # Allow RANGE with lower confidence
+# 1. REGIME FILTER - Trade based on institutional behavior
+# Trend Up/Down + High Volatility = Liquidity Sweep + Trend Continuation
+# Range/Sideways = Mean Reversion after liquidity sweep
+ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE"]
 SKIP_REGIME = ["VOLATILE"]  # Only skip highly volatile markets (too risky)
-# Note: RANGE signals will still generate but with reduced confidence multiplier
 
-# 2. CONFIDENCE THRESHOLD - Require reasonable ML confidence
-MIN_CONFIDENCE_THRESHOLD = 55  # Lowered from 70% - most signals were 55-68%
-MIN_REGIME_CONFIDENCE = 0.60   # Minimum regime detection confidence
+# 2. CONFIDENCE THRESHOLD - UPDATED per institutional strategy
+# Only execute trades when confidence >= 65% (prefer >= 70% for live capital)
+MIN_CONFIDENCE_THRESHOLD = 65  # UPDATED: Was 55%, now 65% minimum
+MIN_REGIME_CONFIDENCE = 0.65   # UPDATED: Was 0.60, now 0.65
+HIGH_CONFIDENCE_THRESHOLD = 70  # Preferred threshold for live capital
 
-# 3. SESSION FILTER - Trade pairs during optimal sessions
+# 3. SESSION FILTER - Trade pairs during optimal sessions with institutional timing
+# Key: Asian forms range, London sweeps liquidity, New York drives move
 SESSION_FILTERS = {
-    # London Session (8:00-16:00 UTC)
-    "EURUSD": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
-    "GBPUSD": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
-    "EURGBP": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
-    "XAUUSD": {"optimal_hours": list(range(8, 21)), "timezone": "UTC"},  # London + NY overlap
-    "XAUEUR": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
-    "USDCHF": {"optimal_hours": list(range(8, 17)), "timezone": "UTC"},
+    # London Session (8:00-16:00 UTC) - Primary liquidity sweep session
+    "EURUSD": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "GBPUSD": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "EURGBP": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "XAUUSD": {"optimal_hours": list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
+    "XAUEUR": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "USDCHF": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "EURCHF": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
     
-    # New York Session (13:00-21:00 UTC)  
-    "USDCAD": {"optimal_hours": list(range(13, 22)), "timezone": "UTC"},
+    # New York Session (13:00-21:00 UTC) - Main price move session
+    "USDCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "GBPCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "EURCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
     
-    # JPY Pairs - Extended to include Asian Session (0:00-8:00 UTC)
-    "USDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # Asian + NY
-    "EURJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
-    "GBPJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 22)), "timezone": "UTC"},  # Asian + London + NY
-    "AUDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
-    "CADJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
+    # JPY Pairs - Asian + London + NY Sessions
+    "USDJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
+    "EURJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
+    "GBPJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
+    "AUDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "CADJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "CHFJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
     
-    # AUD/NZD Pairs - Asian Session (0:00-8:00 UTC) + NY overlap
-    "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},
-    "NZDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 22)), "timezone": "UTC"},  # NEW: Asian + NY
+    # AUD/NZD Pairs - Asian Session + NY overlap
+    "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "NZDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
+    "AUDNZD": {"optimal_hours": list(range(0, 9)) + list(range(22, 24)), "timezone": "UTC", "block_before_close": 15},
+    
+    # Cross Pairs - London + Asian overlap
+    "EURAUD": {"optimal_hours": list(range(0, 9)) + list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
+    "GBPAUD": {"optimal_hours": list(range(0, 9)) + list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
 }
 
 # 4. DRAWDOWN PROTECTION - Auto-pause losing pairs
@@ -558,14 +686,36 @@ DRAWDOWN_PROTECTION = {
 daily_pair_performance = {}
 
 def is_session_optimal(pair: str) -> bool:
-    """Check if current time is optimal for trading this pair"""
-    current_hour = datetime.utcnow().hour
+    """Check if current time is optimal for trading this pair based on institutional timing
+    
+    Institutional rules:
+    - Block new entries 15 minutes before session close
+    - Asian Session forms range, London sweeps liquidity, NY drives move
+    """
+    now = datetime.utcnow()
+    current_hour = now.hour
+    current_minute = now.minute
     
     if pair not in SESSION_FILTERS:
         return True  # Allow if no filter defined
     
-    optimal_hours = SESSION_FILTERS[pair].get("optimal_hours", list(range(24)))
-    return current_hour in optimal_hours
+    filter_config = SESSION_FILTERS[pair]
+    optimal_hours = filter_config.get("optimal_hours", list(range(24)))
+    block_before_close = filter_config.get("block_before_close", 15)
+    
+    # Check if within optimal hours
+    if current_hour not in optimal_hours:
+        return False
+    
+    # Block entries near session close (last 15 mins of each session block)
+    # Sessions end at: Asian 8:00, London 16:00, NY 21:00
+    session_end_hours = [8, 16, 21]
+    for end_hour in session_end_hours:
+        if current_hour == end_hour - 1 and current_minute >= (60 - block_before_close):
+            logging.info(f"⏰ {pair} blocked - {block_before_close} mins before session close")
+            return False
+    
+    return True
 
 def check_drawdown_protection(pair: str) -> tuple[bool, str]:
     """Check if pair should be paused due to drawdown protection"""

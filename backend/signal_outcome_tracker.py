@@ -26,7 +26,20 @@ SYMBOL_MAP = {
     "AUDUSD": "AUD/USD",
     "USDCAD": "USD/CAD",
     "USDCHF": "USD/CHF",
-    "BTCUSD": "BTC/USD"
+    "BTCUSD": "BTC/USD",
+    # Asian session pairs
+    "NZDUSD": "NZD/USD",
+    "AUDJPY": "AUD/JPY",
+    "CADJPY": "CAD/JPY",
+    # NEW Institutional pairs
+    "CHFJPY": "CHF/JPY",
+    "EURAUD": "EUR/AUD",
+    "GBPCAD": "GBP/CAD",
+    "EURCAD": "EUR/CAD",
+    "GBPAUD": "GBP/AUD",
+    "AUDNZD": "AUD/NZD",
+    "EURGBP": "EUR/GBP",
+    "EURCHF": "EUR/CHF",
 }
 
 
