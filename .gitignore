@@ -87,3 +87,7 @@ desktop/dist/Grandcom
 Pro-1.0.0-arm64.AppImage
 desktop/dist/Grandcom-Forex-Signals-Pro-Windows-Portable.zip
 desktop/dist/linux-arm64-unpacked/grandcom-forex-signals
+-e 
+# Environment files
+*.env
+*.env.*
