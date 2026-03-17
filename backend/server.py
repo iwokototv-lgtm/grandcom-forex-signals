@@ -13,9 +13,8 @@ import logging
 import jwt
 import asyncio
 import aiohttp
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from telegram import Bot
+from litellm import completion
 import ta
 import pandas as pd
 import numpy as np
@@ -792,11 +791,7 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
         use_fixed_pips = params.get('use_fixed_pips', False)
         
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
-            system_message="You are an elite institutional forex and commodities trader. Provide precise, actionable trading signals with strict risk management."
-        ).with_model("openai", "gpt-5.2")
+        system_message = "You are an elite institutional forex and commodities trader. Provide precise, actionable trading signals with strict risk management."
         
         # Build prompt based on whether using fixed pips or ATR-based
         if use_fixed_pips:
@@ -895,12 +890,22 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
             """
         
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
+        user_message = prompt
+        
+        # Use litellm for LLM calls
+        response = completion(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY)
+        )
+        ai_response = response.choices[0].message.content
         
         # Parse AI response
         import json
-        ai_data = json.loads(response)
+        ai_data = json.loads(ai_response)
         
         # Validate and fix TP levels if needed
         entry = ai_data.get("entry_price", indicators['current_price'])

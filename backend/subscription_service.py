@@ -166,9 +166,8 @@ class SubscriptionService:
     ) -> Dict[str, Any]:
         """Create a Stripe checkout session for subscription"""
         try:
-            from emergentintegrations.payments.stripe.checkout import (
-                StripeCheckout, CheckoutSessionRequest
-            )
+            import stripe
+            stripe.api_key = self.stripe_api_key
             
             # Validate package exists (security: never accept price from frontend)
             if package_id not in SUBSCRIPTION_PACKAGES:
@@ -180,17 +179,21 @@ class SubscriptionService:
             success_url = f"{origin_url}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}"
             cancel_url = f"{origin_url}/subscription"
             
-            # Initialize Stripe
-            webhook_url = f"{origin_url}/api/webhook/stripe"
-            stripe_checkout = StripeCheckout(
-                api_key=self.stripe_api_key,
-                webhook_url=webhook_url
-            )
-            
-            # Create checkout request
-            checkout_request = CheckoutSessionRequest(
-                amount=float(package["price"]),
-                currency=package["currency"],
+            # Create checkout session
+            session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{
+                    'price_data': {
+                        'currency': package["currency"],
+                        'unit_amount': int(float(package["price"]) * 100),  # Convert to cents
+                        'product_data': {
+                            'name': package["name"],
+                            'description': f"Grandcom Forex Signals - {package['name']}"
+                        },
+                    },
+                    'quantity': 1,
+                }],
+                mode='payment',
                 success_url=success_url,
                 cancel_url=cancel_url,
                 metadata={
@@ -201,13 +204,10 @@ class SubscriptionService:
                 }
             )
             
-            # Create session
-            session = await stripe_checkout.create_checkout_session(checkout_request)
-            
             # Record transaction as pending
             await self.db.payment_transactions.insert_one({
                 "user_id": user_id,
-                "session_id": session.session_id,
+                "session_id": session.id,
                 "package_id": package_id,
                 "amount": package["price"],
                 "currency": package["currency"],
@@ -219,7 +219,7 @@ class SubscriptionService:
             return {
                 "success": True,
                 "checkout_url": session.url,
-                "session_id": session.session_id
+                "session_id": session.id
             }
             
         except Exception as e:
@@ -229,7 +229,8 @@ class SubscriptionService:
     async def verify_payment(self, session_id: str) -> Dict[str, Any]:
         """Verify payment status and activate subscription"""
         try:
-            from emergentintegrations.payments.stripe.checkout import StripeCheckout
+            import stripe
+            stripe.api_key = self.stripe_api_key
             
             # Check if already processed
             existing = await self.db.payment_transactions.find_one({
@@ -253,20 +254,20 @@ class SubscriptionService:
                 return {"success": False, "error": "Transaction not found"}
             
             # Check payment status with Stripe
-            stripe_checkout = StripeCheckout(api_key=self.stripe_api_key)
-            status = await stripe_checkout.get_checkout_status(session_id)
+            session = stripe.checkout.Session.retrieve(session_id)
+            payment_status = "paid" if session.payment_status == "paid" else session.payment_status
             
             # Update transaction
             await self.db.payment_transactions.update_one(
                 {"session_id": session_id},
                 {"$set": {
-                    "status": status.status,
-                    "payment_status": status.payment_status,
+                    "status": session.status,
+                    "payment_status": payment_status,
                     "updated_at": datetime.now(timezone.utc)
                 }}
             )
             
-            if status.payment_status == "paid":
+            if payment_status == "paid":
                 # Activate subscription
                 package = SUBSCRIPTION_PACKAGES.get(transaction["package_id"])
                 if package:
