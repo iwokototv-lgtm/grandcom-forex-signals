@@ -14,7 +14,7 @@ import jwt
 import asyncio
 import aiohttp
 from telegram import Bot
-from litellm import completion
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 import ta
 import pandas as pd
 import numpy as np
@@ -892,16 +892,15 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         
         user_message = prompt
         
-        # Use litellm for LLM calls
-        response = completion(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ],
-            api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY)
-        )
-        ai_response = response.choices[0].message.content
+        # Use Emergent LLM integration
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
+            system_message=system_message
+        ).with_model("openai", "gpt-4o-mini")
+        
+        user_msg = UserMessage(text=user_message)
+        ai_response = await chat.send_message(user_msg)
         
         # Parse AI response
         import json
