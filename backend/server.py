@@ -115,8 +115,8 @@ async def health_check():
     }
 
 # Initialize ML Engine Components
-signal_optimizer = SignalOptimizer()
-logger.info("ML Engine initialized: SignalOptimizer ready")
+# signal_optimizer = SignalOptimizer()  # Commented out: SignalOptimizer is not imported
+# logger.info("ML Engine initialized: SignalOptimizer ready")
 
 # ============ MODELS ============
 class PyObjectId(ObjectId):
@@ -978,13 +978,14 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         
         # ============ ML OPTIMIZATION ============
         try:
-            # Optimize signal using ML engine
-            optimized = signal_optimizer.optimize_signal(
-                df=df,
-                symbol=pair,
-                ai_signal=ai_analysis,
-                pair_params=params
-            )
+            # signal_optimizer is not imported; skip ML optimization
+            # optimized = signal_optimizer.optimize_signal(
+            #     df=df,
+            #     symbol=pair,
+            #     ai_signal=ai_analysis,
+            #     pair_params=params
+            # )
+            optimized = {}
             
             # Check if signal was blocked or filtered
             if optimized.get('blocked'):
@@ -1430,10 +1431,11 @@ async def trigger_signal_generation(
 async def get_ml_stats(current_user: dict = Depends(get_current_user)):
     """Get ML engine performance statistics"""
     try:
-        stats = signal_optimizer.get_performance_stats()
+        # signal_optimizer is not imported; ML stats unavailable
+        # stats = signal_optimizer.get_performance_stats()
         return {
-            "success": True,
-            "stats": stats
+            "success": False,
+            "error": "SignalOptimizer is not available"
         }
     except Exception as e:
         logger.error(f"Error getting ML stats: {e}")
@@ -1448,13 +1450,12 @@ async def get_current_regime(symbol: str, current_user: dict = Depends(get_curre
         if df is None or len(df) < 50:
             raise HTTPException(status_code=400, detail="Insufficient data for regime detection")
         
-        # Extract features
-        features = signal_optimizer.feature_engineer.extract_features(df, symbol)
-        if not features:
-            raise HTTPException(status_code=500, detail="Feature extraction failed")
-        
-        # Detect regime
-        regime = signal_optimizer.regime_detector.detect_regime(features)
+        # signal_optimizer is not imported; regime detection unavailable
+        # features = signal_optimizer.feature_engineer.extract_features(df, symbol)
+        # if not features:
+        #     raise HTTPException(status_code=500, detail="Feature extraction failed")
+        # regime = signal_optimizer.regime_detector.detect_regime(features)
+        raise HTTPException(status_code=503, detail="SignalOptimizer is not available")
         
         return {
             "success": True,
@@ -1478,8 +1479,10 @@ async def get_current_regime(symbol: str, current_user: dict = Depends(get_curre
 async def get_risk_status(current_user: dict = Depends(get_current_user)):
     """Get current risk management status"""
     try:
-        risk_check = signal_optimizer.risk_manager.check_trading_allowed()
-        risk_metrics = signal_optimizer.risk_manager.get_risk_metrics()
+        # signal_optimizer is not imported; risk status unavailable
+        # risk_check = signal_optimizer.risk_manager.check_trading_allowed()
+        # risk_metrics = signal_optimizer.risk_manager.get_risk_metrics()
+        return {"success": False, "error": "SignalOptimizer is not available"}
         
         return {
             "success": True,
@@ -1732,10 +1735,10 @@ async def get_full_analysis(symbol: str, current_user: dict = Depends(get_curren
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # 1. Regime Analysis
-        features = signal_optimizer.feature_engineer.extract_features(df, symbol)
-        if features:
-            results["regime"] = signal_optimizer.regime_detector.detect_regime(features)
+        # 1. Regime Analysis — signal_optimizer is not imported; skipped
+        # features = signal_optimizer.feature_engineer.extract_features(df, symbol)
+        # if features:
+        #     results["regime"] = signal_optimizer.regime_detector.detect_regime(features)
         
         # 2. MTF Analysis
         results["mtf"] = await mtf_analyzer.analyze(symbol)
