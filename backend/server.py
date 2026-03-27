@@ -858,15 +858,33 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         
         user_message = prompt
         
-        # Use Emergent LLM integration
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
-            system_message=system_message
-        ).with_model("openai", "gpt-4o-mini")
+        # Use Emergent LLM integration with retry logic
+        max_retries = 3
+        ai_response = None
         
-        user_msg = UserMessage(text=user_message)
-        ai_response = await chat.send_message(user_msg)
+        for attempt in range(max_retries):
+            try:
+                chat = LlmChat(
+                    api_key=EMERGENT_LLM_KEY,
+                    session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
+                    system_message=system_message
+                ).with_model("openai", "gpt-4o-mini")
+                
+                user_msg = UserMessage(text=user_message)
+                ai_response = await chat.send_message(user_msg)
+                
+                if ai_response and len(ai_response.strip()) > 10:
+                    break
+                else:
+                    logger.warning(f"Empty response for {symbol}, attempt {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(1)
+            except Exception as retry_error:
+                logger.warning(f"LLM retry {attempt + 1}/{max_retries} for {symbol}: {retry_error}")
+                await asyncio.sleep(1)
+        
+        if not ai_response or len(ai_response.strip()) < 10:
+            logger.error(f"Failed to get valid AI response for {symbol} after {max_retries} attempts")
+            return None
         
         # Parse AI response
         import json
