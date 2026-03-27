@@ -14,7 +14,7 @@ import jwt
 import asyncio
 import aiohttp
 from telegram import Bot
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# from emergentintegrations.llm.chat import LlmChat, UserMessage
 import ta
 import pandas as pd
 import numpy as np
@@ -864,14 +864,15 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         
         for attempt in range(max_retries):
             try:
-                chat = LlmChat(
-                    api_key=EMERGENT_LLM_KEY,
-                    session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
-                    system_message=system_message
-                ).with_model("openai", "gpt-4o-mini")
-                
-                user_msg = UserMessage(text=user_message)
-                ai_response = await chat.send_message(user_msg)
+                # chat = LlmChat(
+                #     api_key=EMERGENT_LLM_KEY,
+                #     session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
+                #     system_message=system_message
+                # ).with_model("openai", "gpt-4o-mini")
+                #
+                # user_msg = UserMessage(text=user_message)
+                # ai_response = await chat.send_message(user_msg)
+                raise NotImplementedError("emergentintegrations module is not available")
                 
                 if ai_response and len(ai_response.strip()) > 10:
                     break
