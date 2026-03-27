@@ -2741,27 +2741,27 @@ async def startup_event():
     logger.info("Starting Forex & Gold Signals API...")
     
     # Initialize and start Signal Outcome Tracker (checks TP/SL every 60 seconds)
-    tracker = init_outcome_tracker(
-        db=db,
-        twelve_data_api_key=TWELVE_DATA_API_KEY,
-        telegram_bot_token=TELEGRAM_BOT_TOKEN,
-        telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
-    )
-    tracker.start(interval_seconds=60)  # Check every minute
-    logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
+    # tracker = init_outcome_tracker(
+    #     db=db,
+    #     twelve_data_api_key=TWELVE_DATA_API_KEY,
+    #     telegram_bot_token=TELEGRAM_BOT_TOKEN,
+    #     telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
+    # )
+    # tracker.start(interval_seconds=60)  # Check every minute
+    # logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
     
     # Initialize Push Notification Service
-    init_push_service(db)
-    logger.info("Push Notification Service initialized")
+    # init_push_service(db)
+    # logger.info("Push Notification Service initialized")
     
     # Initialize Backtest Engine
-    init_backtest_engine(TWELVE_DATA_API_KEY, db)
-    logger.info("Backtest Engine initialized - ready for historical analysis")
+    # init_backtest_engine(TWELVE_DATA_API_KEY, db)
+    # logger.info("Backtest Engine initialized - ready for historical analysis")
     
     # Initialize Subscription Service
-    if STRIPE_API_KEY:
-        init_subscription_service(db, STRIPE_API_KEY)
-        logger.info("Subscription Service initialized")
+    # if STRIPE_API_KEY:
+    #     init_subscription_service(db, STRIPE_API_KEY)
+    #     logger.info("Subscription Service initialized")
     
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())
