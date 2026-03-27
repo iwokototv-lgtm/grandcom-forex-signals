@@ -14,26 +14,26 @@ import jwt
 import asyncio
 import aiohttp
 from telegram import Bot
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# from emergentintegrations.llm.chat import LlmChat, UserMessage
 import ta
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
 # Import Signal Outcome Tracker
-from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
+# from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
 
 # Import Push Notification Service
-from notification_service import PushNotificationService, init_push_service, get_push_service
+# from notification_service import PushNotificationService, init_push_service, get_push_service
 
 # Import Backtest Engine
-from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine
+# from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine
 
 # Import Subscription Service
-from subscription_service import (
-    SubscriptionService, init_subscription_service, get_subscription_service,
-    SUBSCRIPTION_PACKAGES, TIER_FEATURES
-)
+# from subscription_service import (
+#     SubscriptionService, init_subscription_service, get_subscription_service,
+#     SUBSCRIPTION_PACKAGES, TIER_FEATURES
+# )
 
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
@@ -53,11 +53,11 @@ def serialize_numpy(obj):
         return obj
 
 # Import ML Engine
-from ml_engine import (
-    FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, 
-    mtf_analyzer, historical_collector, signal_tracker,
-    smc_analyzer, signal_quality_filter, regime_enforced_tpsl
-)
+# from ml_engine import (
+#     FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer,
+#     mtf_analyzer, historical_collector, signal_tracker,
+#     smc_analyzer, signal_quality_filter, regime_enforced_tpsl
+# )
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
