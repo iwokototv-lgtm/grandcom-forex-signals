@@ -1,117 +1,100 @@
 # Grandcom Forex Signals Pro - Product Requirements Document
 
 ## Overview
-Professional Forex & Gold (XAUUSD) signals mobile app with fully automatic signal generation system that posts trading signals to a Telegram channel.
+Professional Forex & Gold (XAUUSD) signals mobile app with fully automatic signal generation system.
 
-## Active Trading Pairs (13 pairs) - Updated March 4, 2025
+## Active Trading Pairs (21 pairs) - Updated March 10, 2025
 
-| Pair | TP1 | TP2 | TP3 | SL | Status | Sessions |
-|------|-----|-----|-----|-----|--------|----------|
-| XAUUSD | 7 | 15 | 25 | ATR | RE-ENABLED | London + NY |
-| XAUEUR | 5 | 10 | 15 | ATR | RE-ENABLED | London |
-| EURUSD | 3 | 6 | 9 | 10 | ACTIVE | London |
-| GBPUSD | 3 | 6 | 9 | 10 | ACTIVE | London |
-| USDJPY | 3 | 6 | 9 | 10 | ACTIVE | Asian + NY |
-| EURJPY | 3 | 6 | 9 | 10 | ACTIVE | ALL (22h) |
-| GBPJPY | 3 | 6 | 9 | 10 | RE-ENABLED | Asian + London + NY |
-| AUDUSD | 2 | 4 | 6 | 8 | RE-ENABLED | Asian + NY |
-| USDCAD | 3 | 6 | 9 | 10 | ACTIVE | NY |
-| USDCHF | 3 | 6 | 9 | 10 | ACTIVE | London |
-| NZDUSD | 3 | 6 | 9 | 10 | ACTIVE | Asian + NY |
-| AUDJPY | 3 | 6 | 9 | 10 | ACTIVE | Asian + NY |
-| CADJPY | 3 | 6 | 9 | 10 | ACTIVE | Asian + NY |
+### Major Pairs
+| Pair | TP1 | TP2 | TP3 | SL | Status |
+|------|-----|-----|-----|-----|--------|
+| XAUUSD | 7 | 15 | 25 | ATR | ✅ ACTIVE |
+| XAUEUR | 5 | 10 | 15 | ATR | ✅ ACTIVE |
+| EURUSD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| GBPUSD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| USDJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
 
-## Disabled Pairs (1 pair)
+### Cross Pairs
+| Pair | TP1 | TP2 | TP3 | SL | Status |
+|------|-----|-----|-----|-----|--------|
+| EURJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| GBPJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| AUDUSD | 2 | 4 | 6 | 8 | ✅ ACTIVE |
+| USDCAD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| USDCHF | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| NZDUSD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| AUDJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| CADJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
 
+### New Institutional Pairs
+| Pair | TP1 | TP2 | TP3 | SL | Status |
+|------|-----|-----|-----|-----|--------|
+| CHFJPY | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| EURAUD | 4 | 8 | 12 | 12 | ✅ ACTIVE |
+| GBPCAD | 4 | 8 | 12 | 12 | ✅ ACTIVE |
+| EURCAD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| GBPAUD | 4 | 8 | 12 | 12 | ✅ ACTIVE |
+| AUDNZD | 3 | 6 | 9 | 10 | ✅ ACTIVE |
+| EURGBP | 2 | 4 | 6 | 8 | ✅ ACTIVE |
+| EURCHF | 2 | 4 | 6 | 8 | ✅ ACTIVE |
+
+## Disabled Pairs
 | Pair | Reason |
 |------|--------|
-| BTCUSD | 17.5% win rate, PF 0.14 - too volatile |
+| BTCUSD | 17.5% win rate - too volatile |
 
-## Session Schedule
+## Trading Strategy (Updated March 10, 2025)
 
-### Asian Session (0:00-8:00 UTC) - 6 pairs
-- USDJPY, EURJPY, GBPJPY, NZDUSD, AUDJPY, CADJPY
+### Regime-Based Direction Enforcement
+| Market Regime | Signal Direction | Strategy |
+|---------------|------------------|----------|
+| TREND_UP | BUY only | Follow the trend |
+| TREND_DOWN | SELL only | Follow the trend |
+| RANGE | Both BUY/SELL | Mean reversion |
+| HIGH_VOL | Both BUY/SELL | Breakout strategy |
 
-### London Session (8:00-16:00 UTC) - 5 pairs
-- EURUSD, USDCHF, GBPUSD, EURJPY, XAUUSD, XAUEUR
+### Session Restrictions: **REMOVED**
+- All pairs now trade 24/7
+- No time-based filtering
 
-### New York Session (13:00-21:00 UTC) - 8 pairs
-- USDJPY, USDCAD, EURJPY, NZDUSD, AUDJPY, CADJPY, XAUUSD, AUDUSD
+### Confidence Settings
+| Setting | Value |
+|---------|-------|
+| Min Confidence | 60% |
+| Min Regime Confidence | 55% |
+| High Confidence | 70% |
 
-## Profitability Filters
+## Deployment Status
 
-| Filter | Setting | Purpose |
-|--------|---------|---------|
-| Regime Filter | Skip VOLATILE only | Allow RANGE with reduced confidence |
-| Confidence | Min 55% AI, 60% Regime | Quality signals only |
-| Session | Per-pair hours | Optimal liquidity |
-| Drawdown | Max 3 losses, 50 pips/day | Risk management |
+### Railway (Production)
+- **URL**: https://railway.com/project/a38415b0-428a-4149-a3ca-3c0a720df974
+- **Status**: ✅ ONLINE
+- **Services**:
+  - grandcom-forex-signals: ✅ Online
+  - MongoDB: ✅ Online
 
-**Note:** Regime filter updated to allow RANGE markets (previously blocked all signals)
+### Emergent (Preview/Development)
+- **URL**: https://grandcom-trading.preview.emergentagent.com
+- **Status**: ✅ Working
 
 ## Technical Stack
-- **Frontend:** React Native, Expo, Expo Router
-- **Backend:** FastAPI, Pymongo, APScheduler, python-jose (JWT)
+- **Frontend:** React Native, Expo
+- **Backend:** FastAPI, Python 3.11
 - **Database:** MongoDB
-- **Integrations:** Twelve Data API, Telegram Bot API, OpenAI/Emergent LLM, Stripe
-- **Desktop:** Electron
+- **ML:** scikit-learn, hmmlearn
+- **Integrations:** Twelve Data API, Telegram Bot, OpenAI
 
-## Desktop App
-- Windows Portable: `/app/desktop/dist/Grandcom-Forex-Signals-Pro-Windows-Portable.zip`
-- Linux AppImage: `/app/desktop/dist/Grandcom Forex Signals Pro-1.0.0-arm64.AppImage`
+## Key Fixes Applied (March 10, 2025)
+1. ✅ Removed session restrictions
+2. ✅ Regime-based direction (Uptrend=BUY, Downtrend=SELL)
+3. ✅ XAUUSD/XAUEUR consistency fixed
+4. ✅ pydantic-core>=2.27.0 for Python 3.13 compatibility
+5. ✅ Confidence threshold lowered to 60%
+6. ✅ Added 8 new institutional pairs
 
-## Key API Endpoints
+## Admin Credentials
+- **Email**: admin@forexsignals.com
+- **Password**: Admin@2024!Forex
 
-### Authentication
-- `POST /api/auth/register` - User registration
-- `POST /api/auth/login` - User login
-
-### Signals
-- `GET /api/signals` - Get all signals
-- `GET /api/signals/active` - Get active signals
-- `GET /api/signals/{id}` - Get specific signal
-
-### Admin
-- `GET /api/admin/system-config` - System configuration
-- `GET /api/admin/filters` - Filter settings
-- `GET /api/admin/filter-stats` - Filter statistics
-- `GET /api/admin/ml/performance` - ML performance
-- `POST /api/admin/signals/manual` - Create manual signal
-- `POST /api/admin/users/{id}` - Update user
-
-### Subscriptions (Stripe)
-- `POST /api/subscriptions/create-checkout-session`
-- `POST /api/stripe-webhook`
-
-## Credentials
-- **Admin**: admin@forexsignals.com / Admin@2024!Forex
-- **Telegram**: @grandcomsignals
-
-## Completed Tasks
-- [x] Re-enabled XAUUSD, XAUEUR, GBPJPY, AUDUSD pairs
-- [x] Stripe subscription system
-- [x] Auth context bug fix
-- [x] Backtesting and live optimization
-- [x] Desktop app build (Windows + Linux)
-- [x] Admin panel enhancements
-- [x] ML performance analysis
-- [x] Advanced profitability filters
-- [x] Asian session expansion
-
-## Upcoming Tasks (P1-P2)
-- [ ] Validate Desktop App functionality
-- [ ] Admin Panel UI for filter parameters
-
-## Future Tasks (P3)
-- [ ] Economic Calendar Integration
-- [ ] Dynamic Volatility-Based TPs (ATR)
-- [ ] Improve Backtest Engine accuracy
-
-## Known Items
-- Stripe subscription uses TEST key - requires production key for real payments
-- Historical backtests show lower performance than live trading (trust live data)
-
-## Deployment Fix (March 4, 2025)
-- **Fixed:** bcrypt/passlib compatibility issue - downgraded bcrypt from 4.1.3 to 4.0.1
-- **Issue:** passlib 1.7.4 expects `bcrypt.__about__.__version__` which was removed in bcrypt 4.1+
-- **Note:** ML libraries (scikit-learn, scipy, hmmlearn) may exceed Emergent's 1Gi RAM limit in production
+## Telegram Channel
+- @grandcomsignals
