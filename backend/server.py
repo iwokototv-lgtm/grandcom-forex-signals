@@ -14,26 +14,26 @@ import jwt
 import asyncio
 import aiohttp
 from telegram import Bot
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# from emergentintegrations.llm.chat import LlmChat, UserMessage  # TODO: install emergentintegrations package
 import ta
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
 # Import Signal Outcome Tracker
-from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
+# from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker  # TODO: missing module
 
 # Import Push Notification Service
-from notification_service import PushNotificationService, init_push_service, get_push_service
+# from notification_service import PushNotificationService, init_push_service, get_push_service  # TODO: missing module
 
 # Import Backtest Engine
-from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine
+# from backtest_engine import BacktestEngine, BacktestConfig, init_backtest_engine, get_backtest_engine  # TODO: missing module
 
 # Import Subscription Service
-from subscription_service import (
-    SubscriptionService, init_subscription_service, get_subscription_service,
-    SUBSCRIPTION_PACKAGES, TIER_FEATURES
-)
+# from subscription_service import (  # TODO: missing module
+#     SubscriptionService, init_subscription_service, get_subscription_service,
+#     SUBSCRIPTION_PACKAGES, TIER_FEATURES
+# )
 
 def serialize_numpy(obj):
     """Convert numpy types to native Python types for JSON serialization"""
@@ -53,11 +53,11 @@ def serialize_numpy(obj):
         return obj
 
 # Import ML Engine
-from ml_engine import (
-    FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer, 
-    mtf_analyzer, historical_collector, signal_tracker,
-    smc_analyzer, signal_quality_filter, regime_enforced_tpsl
-)
+# from ml_engine import (  # TODO: missing module
+#     FeatureEngineer, RegimeDetector, RiskManager, SignalOptimizer,
+#     mtf_analyzer, historical_collector, signal_tracker,
+#     smc_analyzer, signal_quality_filter, regime_enforced_tpsl
+# )
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -103,9 +103,10 @@ async def health_check():
     except Exception:
         db_status = "unhealthy"
     
-    tracker = get_outcome_tracker()
-    tracker_status = "running" if tracker and tracker.is_running else "stopped"
-    
+    # tracker = get_outcome_tracker()  # TODO: signal_outcome_tracker module missing
+    # tracker_status = "running" if tracker and tracker.is_running else "stopped"
+    tracker_status = "unavailable"
+
     return {
         "status": "healthy",
         "version": "2.0.0",
@@ -115,8 +116,8 @@ async def health_check():
     }
 
 # Initialize ML Engine Components
-signal_optimizer = SignalOptimizer()
-logger.info("ML Engine initialized: SignalOptimizer ready")
+# signal_optimizer = SignalOptimizer()  # TODO: ml_engine module missing
+# logger.info("ML Engine initialized: SignalOptimizer ready")
 
 # ============ MODELS ============
 class PyObjectId(ObjectId):
@@ -893,14 +894,15 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         user_message = prompt
         
         # Use Emergent LLM integration
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
-            system_message=system_message
-        ).with_model("openai", "gpt-4o-mini")
-        
-        user_msg = UserMessage(text=user_message)
-        ai_response = await chat.send_message(user_msg)
+        # TODO: emergentintegrations module missing — LlmChat unavailable
+        # chat = LlmChat(
+        #     api_key=EMERGENT_LLM_KEY,
+        #     session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}",
+        #     system_message=system_message
+        # ).with_model("openai", "gpt-4o-mini")
+        # user_msg = UserMessage(text=user_message)
+        # ai_response = await chat.send_message(user_msg)
+        raise HTTPException(status_code=503, detail="AI signal generation unavailable: emergentintegrations module not installed")
         
         # Parse AI response
         import json
@@ -2486,9 +2488,13 @@ async def get_filter_statistics(admin_user: dict = Depends(require_admin)):
 async def run_ml_optimization(admin_user: dict = Depends(require_admin)):
     """Run ML model optimization based on historical signals (admin only)"""
     try:
-        from ml_engine.model_trainer import run_model_optimization
-        results = await run_model_optimization(db)
-        return results
+        # TODO: ml_engine module missing
+        # from ml_engine.model_trainer import run_model_optimization
+        # results = await run_model_optimization(db)
+        # return results
+        raise HTTPException(status_code=503, detail="ML optimization unavailable: ml_engine module not installed")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"ML optimization error: {e}")
         return {"success": False, "error": str(e)}
@@ -2497,8 +2503,10 @@ async def run_ml_optimization(admin_user: dict = Depends(require_admin)):
 async def get_ml_performance_analysis(admin_user: dict = Depends(require_admin)):
     """Get detailed ML performance analysis (admin only)"""
     try:
-        from ml_engine.model_trainer import SignalOptimizationEngine
-        
+        # TODO: ml_engine module missing
+        # from ml_engine.model_trainer import SignalOptimizationEngine
+        raise HTTPException(status_code=503, detail="ML performance analysis unavailable: ml_engine module not installed")
+
         # Fetch signals with results
         signals = []
         async for signal in db.signals.find({'result': {'$in': ['WIN', 'LOSS']}}).sort('created_at', -1).limit(500):
@@ -2508,11 +2516,11 @@ async def get_ml_performance_analysis(admin_user: dict = Depends(require_admin))
         if len(signals) < 10:
             return {"success": True, "message": "Not enough data yet", "signals_analyzed": len(signals)}
         
-        optimizer = SignalOptimizationEngine()
+        # optimizer = SignalOptimizationEngine()
         
-        pair_analysis = optimizer.analyze_performance_by_pair(signals)
-        regime_analysis = optimizer.analyze_performance_by_regime(signals)
-        recommendations = optimizer.recommend_pair_settings(pair_analysis)
+        # pair_analysis = optimizer.analyze_performance_by_pair(signals)
+        # regime_analysis = optimizer.analyze_performance_by_regime(signals)
+        # recommendations = optimizer.recommend_pair_settings(pair_analysis)
         
         # Sort by win rate
         sorted_pairs = sorted(
@@ -2550,7 +2558,8 @@ async def get_ml_performance_analysis(admin_user: dict = Depends(require_admin))
 @api_router.get("/admin/system-config")
 async def get_system_config(admin_user: dict = Depends(require_admin)):
     """Get current system configuration (admin only)"""
-    tracker = get_outcome_tracker()
+    # tracker = get_outcome_tracker()  # TODO: signal_outcome_tracker module missing
+    tracker = None
     
     # Get active pairs count
     active_pairs = [p for p, c in PAIR_PARAMETERS.items() if c.get('enabled', True)]
@@ -2759,27 +2768,35 @@ async def startup_event():
     logger.info("Starting Forex & Gold Signals API...")
     
     # Initialize and start Signal Outcome Tracker (checks TP/SL every 60 seconds)
-    tracker = init_outcome_tracker(
-        db=db,
-        twelve_data_api_key=TWELVE_DATA_API_KEY,
-        telegram_bot_token=TELEGRAM_BOT_TOKEN,
-        telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
-    )
-    tracker.start(interval_seconds=60)  # Check every minute
-    logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
-    
+    # TODO: signal_outcome_tracker module missing — skipping initialization
+    # tracker = init_outcome_tracker(
+    #     db=db,
+    #     twelve_data_api_key=TWELVE_DATA_API_KEY,
+    #     telegram_bot_token=TELEGRAM_BOT_TOKEN,
+    #     telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
+    # )
+    # tracker.start(interval_seconds=60)  # Check every minute
+    # logger.info("Signal Outcome Tracker started - monitoring TP/SL levels every 60 seconds")
+    logger.warning("Signal Outcome Tracker skipped - signal_outcome_tracker module not available")
+
     # Initialize Push Notification Service
-    init_push_service(db)
-    logger.info("Push Notification Service initialized")
-    
+    # TODO: notification_service module missing — skipping initialization
+    # init_push_service(db)
+    # logger.info("Push Notification Service initialized")
+    logger.warning("Push Notification Service skipped - notification_service module not available")
+
     # Initialize Backtest Engine
-    init_backtest_engine(TWELVE_DATA_API_KEY, db)
-    logger.info("Backtest Engine initialized - ready for historical analysis")
-    
+    # TODO: backtest_engine module missing — skipping initialization
+    # init_backtest_engine(TWELVE_DATA_API_KEY, db)
+    # logger.info("Backtest Engine initialized - ready for historical analysis")
+    logger.warning("Backtest Engine skipped - backtest_engine module not available")
+
     # Initialize Subscription Service
-    if STRIPE_API_KEY:
-        init_subscription_service(db, STRIPE_API_KEY)
-        logger.info("Subscription Service initialized")
+    # TODO: subscription_service module missing — skipping initialization
+    # if STRIPE_API_KEY:
+    #     init_subscription_service(db, STRIPE_API_KEY)
+    #     logger.info("Subscription Service initialized")
+    logger.warning("Subscription Service skipped - subscription_service module not available")
     
     # Start auto signal generation in background
     asyncio.create_task(auto_generate_signals())
