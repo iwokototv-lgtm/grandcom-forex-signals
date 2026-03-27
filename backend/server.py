@@ -623,55 +623,21 @@ PAIR_PARAMETERS = {
 }
 
 # ============ PROFITABILITY FILTERS ============
-# These filters help increase win rate by only trading in optimal conditions
-# UPDATED: Institutional trading strategy with liquidity sweep detection
+# UPDATED: Removed session restrictions, aligned with user's strategy
 
-# 1. REGIME FILTER - Trade based on institutional behavior
-# Trend Up/Down + High Volatility = Liquidity Sweep + Trend Continuation
-# Range/Sideways = Mean Reversion after liquidity sweep
-ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE"]
-SKIP_REGIME = ["VOLATILE"]  # Only skip highly volatile markets (too risky)
+# 1. REGIME FILTER - Aligned with user's strategy:
+# IF Uptrend: BUY only | IF Downtrend: SELL only | ELSE: Range Strategy
+ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL"]  # Allow ALL regimes
+SKIP_REGIME = []  # No regime restrictions - let strategy logic handle it
 
-# 2. CONFIDENCE THRESHOLD - UPDATED per institutional strategy
-# Only execute trades when confidence >= 65% (prefer >= 70% for live capital)
-MIN_CONFIDENCE_THRESHOLD = 65  # UPDATED: Was 55%, now 65% minimum
-MIN_REGIME_CONFIDENCE = 0.65   # UPDATED: Was 0.60, now 0.65
-HIGH_CONFIDENCE_THRESHOLD = 70  # Preferred threshold for live capital
+# 2. CONFIDENCE THRESHOLD
+MIN_CONFIDENCE_THRESHOLD = 60  # Lowered to allow more signals
+MIN_REGIME_CONFIDENCE = 0.55   # Lowered for more signals
+HIGH_CONFIDENCE_THRESHOLD = 70
 
-# 3. SESSION FILTER - Trade pairs during optimal sessions with institutional timing
-# Key: Asian forms range, London sweeps liquidity, New York drives move
-SESSION_FILTERS = {
-    # London Session (8:00-16:00 UTC) - Primary liquidity sweep session
-    "EURUSD": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "GBPUSD": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "EURGBP": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "XAUUSD": {"optimal_hours": list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
-    "XAUEUR": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "USDCHF": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "EURCHF": {"optimal_hours": list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    
-    # New York Session (13:00-21:00 UTC) - Main price move session
-    "USDCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "GBPCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "EURCAD": {"optimal_hours": list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    
-    # JPY Pairs - Asian + London + NY Sessions
-    "USDJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
-    "EURJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
-    "GBPJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
-    "AUDJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "CADJPY": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "CHFJPY": {"optimal_hours": list(range(0, 9)) + list(range(8, 21)), "timezone": "UTC", "block_before_close": 15},
-    
-    # AUD/NZD Pairs - Asian Session + NY overlap
-    "AUDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "NZDUSD": {"optimal_hours": list(range(0, 9)) + list(range(13, 21)), "timezone": "UTC", "block_before_close": 15},
-    "AUDNZD": {"optimal_hours": list(range(0, 9)) + list(range(22, 24)), "timezone": "UTC", "block_before_close": 15},
-    
-    # Cross Pairs - London + Asian overlap
-    "EURAUD": {"optimal_hours": list(range(0, 9)) + list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-    "GBPAUD": {"optimal_hours": list(range(0, 9)) + list(range(8, 16)), "timezone": "UTC", "block_before_close": 15},
-}
+# 3. SESSION FILTER - DISABLED (No session restrictions as per user request)
+# All pairs trade 24/7 - no time-based restrictions
+SESSION_FILTERS = {}  # Empty = no restrictions, all pairs trade anytime
 
 # 4. DRAWDOWN PROTECTION - Auto-pause losing pairs
 DRAWDOWN_PROTECTION = {
@@ -1044,6 +1010,19 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             if regime_confidence < MIN_REGIME_CONFIDENCE:
                 logger.info(f"🎯 {pair} skipped - regime confidence {regime_confidence:.2f} < {MIN_REGIME_CONFIDENCE} threshold")
                 return None
+            
+            # ============ FILTER 6: REGIME-BASED DIRECTION ENFORCEMENT ============
+            # User's Strategy: Uptrend=BUY only, Downtrend=SELL only, Range=Both
+            signal_type = ai_analysis["signal"]
+            if regime_name == "TREND_UP" and signal_type == "SELL":
+                logger.info(f"📈 {pair} signal changed: SELL→BUY (TREND_UP regime = BUY only)")
+                ai_analysis["signal"] = "BUY"
+                ai_analysis["analysis"] = f"[TREND_UP - Aligned to BUY] {ai_analysis.get('analysis', '')}"
+            elif regime_name == "TREND_DOWN" and signal_type == "BUY":
+                logger.info(f"📉 {pair} signal changed: BUY→SELL (TREND_DOWN regime = SELL only)")
+                ai_analysis["signal"] = "SELL"
+                ai_analysis["analysis"] = f"[TREND_DOWN - Aligned to SELL] {ai_analysis.get('analysis', '')}"
+            # RANGE regime: Allow both BUY and SELL (mean reversion strategy)
             
             # Use optimized levels if available
             if optimized.get('optimized'):
