@@ -2013,176 +2013,871 @@ async def get_performance_by_pair(current_user: dict = Depends(get_current_user)
         return {"success": False, "error": str(e)}
 
 # ============ BACKTEST ENGINE ENDPOINTS ============
+
+# All 21 configured pairs with metadata for backtest UI
+BACKTEST_PAIR_METADATA = {
+    "XAUUSD": {"name": "Gold / US Dollar",              "type": "commodity"},
+    "XAUEUR": {"name": "Gold / Euro",                   "type": "commodity"},
+    "BTCUSD": {"name": "Bitcoin / US Dollar",           "type": "crypto"},
+    "EURUSD": {"name": "Euro / US Dollar",              "type": "forex"},
+    "GBPUSD": {"name": "British Pound / US Dollar",     "type": "forex"},
+    "USDJPY": {"name": "US Dollar / Japanese Yen",      "type": "forex"},
+    "EURJPY": {"name": "Euro / Japanese Yen",           "type": "forex"},
+    "GBPJPY": {"name": "British Pound / Japanese Yen",  "type": "forex"},
+    "AUDUSD": {"name": "Australian Dollar / US Dollar", "type": "forex"},
+    "USDCAD": {"name": "US Dollar / Canadian Dollar",   "type": "forex"},
+    "USDCHF": {"name": "US Dollar / Swiss Franc",       "type": "forex"},
+    "NZDUSD": {"name": "New Zealand Dollar / US Dollar","type": "forex"},
+    "AUDJPY": {"name": "Australian Dollar / Japanese Yen","type": "forex"},
+    "CADJPY": {"name": "Canadian Dollar / Japanese Yen","type": "forex"},
+    "CHFJPY": {"name": "Swiss Franc / Japanese Yen",    "type": "forex"},
+    "EURAUD": {"name": "Euro / Australian Dollar",      "type": "forex"},
+    "GBPCAD": {"name": "British Pound / Canadian Dollar","type": "forex"},
+    "EURCAD": {"name": "Euro / Canadian Dollar",        "type": "forex"},
+    "GBPAUD": {"name": "British Pound / Australian Dollar","type": "forex"},
+    "AUDNZD": {"name": "Australian Dollar / New Zealand Dollar","type": "forex"},
+    "EURGBP": {"name": "Euro / British Pound",          "type": "forex"},
+    "EURCHF": {"name": "Euro / Swiss Franc",            "type": "forex"},
+}
+
+
 class BacktestRequest(BaseModel):
-    pair: str
-    start_year: int = 2020
-    end_year: int = 2025
+    """
+    Request model for POST /api/backtest/run.
+
+    - Set ``pair`` to a specific symbol (e.g. "EURUSD") OR leave it as "ALL"
+      to backtest every active pair sequentially.
+    - ``start_date`` / ``end_date`` default to the last 2 years when omitted.
+    - When ``use_pair_parameters`` is True (default) the engine reads TP/SL
+      values directly from PAIR_PARAMETERS so the backtest mirrors live
+      signal generation exactly.
+    """
+    pair: str = "ALL"                        # symbol or "ALL"
+    start_date: Optional[str] = None         # ISO date "YYYY-MM-DD"; default = 2 years ago
+    end_date: Optional[str] = None           # ISO date "YYYY-MM-DD"; default = today
     timeframe: str = "1h"
-    tp1_pips: float = 5.0
-    tp2_pips: float = 10.0
-    tp3_pips: float = 15.0
-    sl_pips: float = 15.0
+    use_pair_parameters: bool = True         # Use PAIR_PARAMETERS for TP/SL (recommended)
+    # Manual overrides – only used when use_pair_parameters=False
+    tp1_pips: Optional[float] = None
+    tp2_pips: Optional[float] = None
+    tp3_pips: Optional[float] = None
+    sl_pips: Optional[float] = None
     use_atr_for_sl: bool = True
     atr_sl_multiplier: float = 1.5
     initial_balance: float = 10000.0
-    risk_per_trade: float = 0.02
+    risk_per_trade: float = 0.02             # 2 % risk per trade
+    skip_disabled: bool = True               # Skip pairs where enabled=False (e.g. BTCUSD)
+    run_in_background: bool = False          # True → return job_id immediately
 
+
+class BacktestResponse(BaseModel):
+    """Summary response returned after a completed backtest."""
+    pair: str
+    enabled: bool
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float = 0.0
+    total_pips: float = 0.0
+    profit_factor: float = 0.0
+    sharpe_ratio: float = 0.0
+    max_drawdown_percent: float = 0.0
+    return_percent: float = 0.0
+    max_consecutive_wins: int = 0
+    max_consecutive_losses: int = 0
+    # Applied filter settings
+    tp1_pips_used: float = 0.0
+    tp2_pips_used: float = 0.0
+    tp3_pips_used: float = 0.0
+    sl_pips_used: float = 0.0
+    atr_sl_multiplier_used: float = 0.0
+    pip_value_used: float = 0.0
+    # Periodic breakdowns
+    monthly_performance: Dict[str, Any] = {}
+    yearly_performance: Dict[str, Any] = {}
+    result_id: Optional[str] = None
+
+
+def _build_backtest_config_for_pair(
+    pair: str,
+    request: BacktestRequest,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> BacktestConfig:
+    """
+    Build a BacktestConfig for *pair* by merging PAIR_PARAMETERS with the
+    request overrides.  When ``use_pair_parameters`` is True the TP/SL values
+    come from the live PAIR_PARAMETERS dict so the backtest is consistent with
+    actual signal generation.
+    """
+    params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+
+    if request.use_pair_parameters:
+        # --- TP levels ---
+        tp1 = float(params.get("fixed_tp1_pips", params.get("atr_multiplier_tp1", 5.0)))
+        tp2 = float(params.get("fixed_tp2_pips", params.get("atr_multiplier_tp2", 10.0)))
+        tp3 = float(params.get("fixed_tp3_pips", params.get("atr_multiplier_tp3", 15.0)))
+        # --- SL ---
+        sl  = float(params.get("fixed_sl_pips",  params.get("atr_multiplier_sl",  15.0)))
+        use_atr = not params.get("use_fixed_pips", False)
+        atr_mult = float(params.get("atr_multiplier_sl", request.atr_sl_multiplier))
+    else:
+        # Fall back to manual overrides or sensible defaults
+        tp1 = request.tp1_pips or 5.0
+        tp2 = request.tp2_pips or 10.0
+        tp3 = request.tp3_pips or 15.0
+        sl  = request.sl_pips  or 15.0
+        use_atr  = request.use_atr_for_sl
+        atr_mult = request.atr_sl_multiplier
+
+    return BacktestConfig(
+        pair=pair,
+        start_date=start_dt,
+        end_date=end_dt,
+        timeframe=request.timeframe,
+        initial_balance=request.initial_balance,
+        risk_per_trade=request.risk_per_trade,
+        tp1_pips=tp1,
+        tp2_pips=tp2,
+        tp3_pips=tp3,
+        sl_pips=sl,
+        use_atr_for_sl=use_atr,
+        atr_sl_multiplier=atr_mult,
+    )
+
+
+def _result_to_response(
+    pair: str,
+    results,          # BacktestResults
+    config: BacktestConfig,
+    result_id: Optional[str] = None,
+) -> BacktestResponse:
+    """Convert a BacktestResults dataclass into a BacktestResponse Pydantic model."""
+    params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+    pip_value = float(params.get("pip_value", 0.0001))
+
+    return BacktestResponse(
+        pair=pair,
+        enabled=params.get("enabled", True),
+        total_trades=results.total_trades,
+        winning_trades=results.winning_trades,
+        losing_trades=results.losing_trades,
+        win_rate=round(results.win_rate, 2),
+        total_pips=round(results.total_pips, 1),
+        profit_factor=round(results.profit_factor, 2),
+        sharpe_ratio=round(results.sharpe_ratio, 2),
+        max_drawdown_percent=round(results.max_drawdown_percent, 2),
+        return_percent=round(results.return_percent, 2),
+        max_consecutive_wins=results.max_consecutive_wins,
+        max_consecutive_losses=results.max_consecutive_losses,
+        tp1_pips_used=config.tp1_pips,
+        tp2_pips_used=config.tp2_pips,
+        tp3_pips_used=config.tp3_pips,
+        sl_pips_used=config.sl_pips,
+        atr_sl_multiplier_used=config.atr_sl_multiplier,
+        pip_value_used=pip_value,
+        monthly_performance=results.monthly_performance,
+        yearly_performance=results.yearly_performance,
+        result_id=result_id,
+    )
+
+
+async def _run_single_pair_backtest(
+    pair: str,
+    request: BacktestRequest,
+    start_dt: datetime,
+    end_dt: datetime,
+    engine,
+    user_id: str,
+) -> BacktestResponse:
+    """
+    Execute a backtest for one pair, persist the result to MongoDB, and
+    return a BacktestResponse.  Applies all active filters:
+      - PAIR_PARAMETERS (TP/SL, pip value, ATR multiplier)
+      - ALLOWED_REGIMES / SKIP_REGIME awareness (noted in metadata)
+      - MIN_CONFIDENCE_THRESHOLD (noted in metadata)
+      - DRAWDOWN_PROTECTION settings (noted in metadata)
+      - skip_disabled flag (skips pairs with enabled=False)
+    """
+    params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+    is_enabled = params.get("enabled", True)
+
+    # --- Filter: skip disabled pairs ---
+    if request.skip_disabled and not is_enabled:
+        logger.info(f"[Backtest] Skipping disabled pair: {pair}")
+        return BacktestResponse(
+            pair=pair,
+            enabled=False,
+            skipped=True,
+            skip_reason=f"{pair} is disabled in PAIR_PARAMETERS (poor historical performance)",
+        )
+
+    config = _build_backtest_config_for_pair(pair, request, start_dt, end_dt)
+
+    logger.info(
+        f"[Backtest] Running {pair} | {start_dt.date()} → {end_dt.date()} | "
+        f"TF={config.timeframe} | TP={config.tp1_pips}/{config.tp2_pips}/{config.tp3_pips} "
+        f"SL={config.sl_pips} ATR×{config.atr_sl_multiplier}"
+    )
+
+    results = await engine.run_backtest(config)
+
+    # --- Persist to MongoDB ---
+    pip_value = float(params.get("pip_value", 0.0001))
+    result_doc = {
+        "user_id": user_id,
+        "pair": pair,
+        "enabled": is_enabled,
+        "timeframe": config.timeframe,
+        "start_date": start_dt.isoformat(),
+        "end_date": end_dt.isoformat(),
+        "filters_applied": {
+            "use_pair_parameters": request.use_pair_parameters,
+            "skip_disabled": request.skip_disabled,
+            "allowed_regimes": ALLOWED_REGIMES,
+            "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
+            "drawdown_protection": DRAWDOWN_PROTECTION,
+            "partial_close": {"tp1": 0.33, "tp2": 0.33, "tp3": 0.34},
+        },
+        "config": {
+            "tp1_pips": config.tp1_pips,
+            "tp2_pips": config.tp2_pips,
+            "tp3_pips": config.tp3_pips,
+            "sl_pips": config.sl_pips,
+            "use_atr_for_sl": config.use_atr_for_sl,
+            "atr_sl_multiplier": config.atr_sl_multiplier,
+            "pip_value": pip_value,
+            "initial_balance": config.initial_balance,
+            "risk_per_trade": config.risk_per_trade,
+        },
+        "results": results.to_dict(),
+        "created_at": datetime.utcnow(),
+    }
+    insert_result = await db.backtest_results.insert_one(result_doc)
+    result_id = str(insert_result.inserted_id)
+
+    response = _result_to_response(pair, results, config, result_id)
+    logger.info(
+        f"[Backtest] {pair} done → {results.total_trades} trades | "
+        f"WR={results.win_rate:.1f}% | PF={results.profit_factor:.2f} | "
+        f"Pips={results.total_pips:.1f} | DD={results.max_drawdown_percent:.1f}%"
+    )
+    return response
+
+
+async def _run_all_pairs_backtest_bg(
+    request: BacktestRequest,
+    start_dt: datetime,
+    end_dt: datetime,
+    engine,
+    user_id: str,
+    job_id: str,
+):
+    """Background task: run backtest for every active pair and store a
+    consolidated summary document in ``backtest_jobs``."""
+    pairs_to_run = list(PAIR_PARAMETERS.keys())
+    responses = []
+
+    await db.backtest_jobs.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": {"status": "running", "total_pairs": len(pairs_to_run)}},
+    )
+
+    for idx, pair in enumerate(pairs_to_run):
+        try:
+            resp = await _run_single_pair_backtest(
+                pair, request, start_dt, end_dt, engine, user_id
+            )
+            responses.append(resp.dict())
+            await db.backtest_jobs.update_one(
+                {"_id": ObjectId(job_id)},
+                {"$set": {"pairs_completed": idx + 1, f"pair_results.{pair}": resp.dict()}},
+            )
+        except Exception as exc:
+            logger.error(f"[Backtest BG] Error on {pair}: {exc}")
+            responses.append({"pair": pair, "skipped": True, "skip_reason": str(exc)})
+        # Small delay to avoid hammering the Twelve Data API
+        await asyncio.sleep(2)
+
+    # Build aggregate summary
+    completed = [r for r in responses if not r.get("skipped")]
+    summary = {
+        "total_pairs_run": len(completed),
+        "total_pairs_skipped": len(responses) - len(completed),
+        "avg_win_rate": round(
+            sum(r["win_rate"] for r in completed) / len(completed), 2
+        ) if completed else 0,
+        "avg_profit_factor": round(
+            sum(r["profit_factor"] for r in completed) / len(completed), 2
+        ) if completed else 0,
+        "total_pips_all_pairs": round(sum(r["total_pips"] for r in completed), 1),
+        "best_pair": max(completed, key=lambda r: r["profit_factor"])["pair"] if completed else None,
+        "worst_pair": min(completed, key=lambda r: r["profit_factor"])["pair"] if completed else None,
+    }
+
+    await db.backtest_jobs.update_one(
+        {"_id": ObjectId(job_id)},
+        {"$set": {"status": "completed", "summary": summary, "completed_at": datetime.utcnow()}},
+    )
+    logger.info(f"[Backtest BG] Job {job_id} complete. {summary}")
+
+
+# ---------------------------------------------------------------------------
+# POST /api/backtest/run
+# ---------------------------------------------------------------------------
 @api_router.post("/backtest/run")
 async def run_backtest(
     request: BacktestRequest,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """
-    Run a historical backtest for a trading pair.
-    Supports 3-10 years of historical data analysis.
+    Trigger a backtest for a single pair or ALL active pairs.
+
+    **Single pair** (synchronous):
+    ```json
+    { "pair": "EURUSD" }
+    ```
+
+    **All pairs – foreground** (waits for completion, may be slow):
+    ```json
+    { "pair": "ALL" }
+    ```
+
+    **All pairs – background** (returns a job_id immediately):
+    ```json
+    { "pair": "ALL", "run_in_background": true }
+    ```
+
+    Filters applied automatically:
+    - PAIR_PARAMETERS (TP/SL, pip value, ATR multiplier)
+    - skip_disabled=true skips pairs with enabled=False (e.g. BTCUSD)
+    - Partial close logic: 33 % at TP1, 33 % at TP2, 34 % at TP3
+    - ALLOWED_REGIMES, MIN_CONFIDENCE_THRESHOLD and DRAWDOWN_PROTECTION
+      settings are recorded in the stored result for reference.
+
+    Default date range is the **last 2 years** when start_date/end_date are
+    omitted.
     """
     try:
         engine = get_backtest_engine()
         if not engine:
             raise HTTPException(status_code=500, detail="Backtest engine not initialized")
-        
-        # Validate date range
-        years = request.end_year - request.start_year
-        if years < 1 or years > 10:
-            raise HTTPException(status_code=400, detail="Date range must be 1-10 years")
-        
-        # Create backtest config
-        config = BacktestConfig(
-            pair=request.pair,
-            start_date=datetime(request.start_year, 1, 1),
-            end_date=datetime(request.end_year, 12, 31),
-            timeframe=request.timeframe,
-            initial_balance=request.initial_balance,
-            risk_per_trade=request.risk_per_trade,
-            tp1_pips=request.tp1_pips,
-            tp2_pips=request.tp2_pips,
-            tp3_pips=request.tp3_pips,
-            sl_pips=request.sl_pips,
-            use_atr_for_sl=request.use_atr_for_sl,
-            atr_sl_multiplier=request.atr_sl_multiplier
+
+        # --- Resolve date range ---
+        now = datetime.utcnow()
+        if request.end_date:
+            end_dt = datetime.fromisoformat(request.end_date)
+        else:
+            end_dt = now
+
+        if request.start_date:
+            start_dt = datetime.fromisoformat(request.start_date)
+        else:
+            start_dt = now - timedelta(days=730)  # default: 2 years
+
+        if start_dt >= end_dt:
+            raise HTTPException(status_code=400, detail="start_date must be before end_date")
+
+        date_span_days = (end_dt - start_dt).days
+        if date_span_days < 30:
+            raise HTTPException(status_code=400, detail="Date range must be at least 30 days")
+        if date_span_days > 3650:
+            raise HTTPException(status_code=400, detail="Date range cannot exceed 10 years")
+
+        user_id = str(current_user["_id"])
+
+        # ------------------------------------------------------------------ #
+        # ALL PAIRS
+        # ------------------------------------------------------------------ #
+        if request.pair.upper() == "ALL":
+            if request.run_in_background:
+                # Create a job document and run in background
+                job_doc = {
+                    "user_id": user_id,
+                    "type": "all_pairs_backtest",
+                    "status": "queued",
+                    "start_date": start_dt.isoformat(),
+                    "end_date": end_dt.isoformat(),
+                    "timeframe": request.timeframe,
+                    "pairs_completed": 0,
+                    "total_pairs": len(PAIR_PARAMETERS),
+                    "pair_results": {},
+                    "created_at": datetime.utcnow(),
+                }
+                job_insert = await db.backtest_jobs.insert_one(job_doc)
+                job_id = str(job_insert.inserted_id)
+
+                background_tasks.add_task(
+                    _run_all_pairs_backtest_bg,
+                    request, start_dt, end_dt, engine, user_id, job_id,
+                )
+                return {
+                    "success": True,
+                    "mode": "background",
+                    "job_id": job_id,
+                    "message": (
+                        f"Backtest job queued for {len(PAIR_PARAMETERS)} pairs "
+                        f"({start_dt.date()} → {end_dt.date()}). "
+                        f"Poll GET /api/backtest/job/{job_id} for progress."
+                    ),
+                    "pairs_queued": list(PAIR_PARAMETERS.keys()),
+                }
+            else:
+                # Foreground – run all pairs sequentially
+                pairs_to_run = list(PAIR_PARAMETERS.keys())
+                all_responses = []
+                errors = []
+
+                for pair in pairs_to_run:
+                    try:
+                        resp = await _run_single_pair_backtest(
+                            pair, request, start_dt, end_dt, engine, user_id
+                        )
+                        all_responses.append(resp.dict())
+                    except Exception as exc:
+                        logger.error(f"[Backtest] Error on {pair}: {exc}")
+                        errors.append({"pair": pair, "error": str(exc)})
+                    await asyncio.sleep(1)
+
+                completed = [r for r in all_responses if not r.get("skipped")]
+                summary = {
+                    "total_pairs_run": len(completed),
+                    "total_pairs_skipped": len(all_responses) - len(completed),
+                    "avg_win_rate": round(
+                        sum(r["win_rate"] for r in completed) / len(completed), 2
+                    ) if completed else 0,
+                    "avg_profit_factor": round(
+                        sum(r["profit_factor"] for r in completed) / len(completed), 2
+                    ) if completed else 0,
+                    "total_pips_all_pairs": round(
+                        sum(r["total_pips"] for r in completed), 1
+                    ),
+                    "best_pair": max(
+                        completed, key=lambda r: r["profit_factor"]
+                    )["pair"] if completed else None,
+                    "worst_pair": min(
+                        completed, key=lambda r: r["profit_factor"]
+                    )["pair"] if completed else None,
+                    "date_range": f"{start_dt.date()} → {end_dt.date()}",
+                    "timeframe": request.timeframe,
+                }
+
+                return {
+                    "success": True,
+                    "mode": "foreground",
+                    "summary": summary,
+                    "results": all_responses,
+                    "errors": errors,
+                }
+
+        # ------------------------------------------------------------------ #
+        # SINGLE PAIR
+        # ------------------------------------------------------------------ #
+        pair = request.pair.upper()
+        if pair not in PAIR_PARAMETERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown pair '{pair}'. Valid pairs: {list(PAIR_PARAMETERS.keys())}",
+            )
+
+        resp = await _run_single_pair_backtest(
+            pair, request, start_dt, end_dt, engine, user_id
         )
-        
-        # Run backtest
-        logger.info(f"Starting backtest for {request.pair} ({request.start_year}-{request.end_year})")
-        results = await engine.run_backtest(config)
-        
-        # Save results to database
-        result_doc = {
-            "user_id": str(current_user["_id"]),
-            "pair": request.pair,
-            "config": {
-                "start_year": request.start_year,
-                "end_year": request.end_year,
-                "timeframe": request.timeframe,
-                "tp1_pips": request.tp1_pips,
-                "tp2_pips": request.tp2_pips,
-                "tp3_pips": request.tp3_pips,
-                "sl_pips": request.sl_pips,
-            },
-            "results": results.to_dict(),
-            "created_at": datetime.utcnow()
-        }
-        await db.backtest_results.insert_one(result_doc)
-        
+
         return {
             "success": True,
-            "message": f"Backtest completed for {request.pair}",
-            "results": results.to_dict()
+            "mode": "single",
+            "pair": pair,
+            "date_range": f"{start_dt.date()} → {end_dt.date()}",
+            "result": resp.dict(),
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Backtest error: {e}")
+        logger.error(f"[Backtest] Unexpected error: {e}")
         return {"success": False, "error": str(e)}
 
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/results/{pair}
+# ---------------------------------------------------------------------------
+@api_router.get("/backtest/results/{pair}")
+async def get_backtest_results_for_pair(
+    pair: str,
+    limit: int = 5,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve the most recent backtest results stored in MongoDB for a
+    specific pair.  Returns up to ``limit`` runs (default 5), newest first.
+    """
+    try:
+        pair = pair.upper()
+        if pair not in PAIR_PARAMETERS and pair != "ALL":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown pair '{pair}'. Valid pairs: {list(PAIR_PARAMETERS.keys())}",
+            )
+
+        query: dict = {"user_id": str(current_user["_id"])}
+        if pair != "ALL":
+            query["pair"] = pair
+
+        cursor = db.backtest_results.find(query).sort("created_at", -1).limit(limit)
+        docs = await cursor.to_list(length=limit)
+
+        formatted = []
+        for doc in docs:
+            formatted.append({
+                "id": str(doc["_id"]),
+                "pair": doc.get("pair"),
+                "enabled": doc.get("enabled", True),
+                "timeframe": doc.get("timeframe"),
+                "start_date": doc.get("start_date"),
+                "end_date": doc.get("end_date"),
+                "filters_applied": doc.get("filters_applied", {}),
+                "config": doc.get("config", {}),
+                "summary": doc.get("results", {}).get("summary", {}),
+                "monthly_performance": doc.get("results", {}).get("monthly_performance", {}),
+                "yearly_performance": doc.get("results", {}).get("yearly_performance", {}),
+                "created_at": doc["created_at"].isoformat() if doc.get("created_at") else None,
+            })
+
+        return {
+            "success": True,
+            "pair": pair,
+            "count": len(formatted),
+            "results": formatted,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Backtest] Error fetching results for {pair}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/summary
+# ---------------------------------------------------------------------------
+@api_router.get("/backtest/summary")
+async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Return a cross-pair summary of the most recent backtest run for every
+    pair stored in MongoDB.  Useful for comparing strategy consistency across
+    all 21 configured pairs at a glance.
+
+    Each pair entry includes:
+    - Latest win rate, profit factor, Sharpe ratio, max drawdown
+    - Total pips, return %, consecutive win/loss streaks
+    - Monthly and yearly performance breakdowns
+    - Applied filter settings (TP/SL, pip value, ATR multiplier)
+    - Whether the pair is currently enabled in PAIR_PARAMETERS
+    """
+    try:
+        user_id = str(current_user["_id"])
+        summary_rows = []
+
+        for pair in PAIR_PARAMETERS.keys():
+            params = PAIR_PARAMETERS[pair]
+            is_enabled = params.get("enabled", True)
+
+            # Fetch the single most recent result for this pair
+            doc = await db.backtest_results.find_one(
+                {"user_id": user_id, "pair": pair},
+                sort=[("created_at", -1)],
+            )
+
+            if doc is None:
+                summary_rows.append({
+                    "pair": pair,
+                    "enabled": is_enabled,
+                    "has_results": False,
+                    "pair_type": BACKTEST_PAIR_METADATA.get(pair, {}).get("type", "forex"),
+                })
+                continue
+
+            s = doc.get("results", {}).get("summary", {})
+            cfg = doc.get("config", {})
+            summary_rows.append({
+                "pair": pair,
+                "enabled": is_enabled,
+                "has_results": True,
+                "pair_type": BACKTEST_PAIR_METADATA.get(pair, {}).get("type", "forex"),
+                "result_id": str(doc["_id"]),
+                "backtest_date": doc["created_at"].isoformat() if doc.get("created_at") else None,
+                "date_range": f"{doc.get('start_date', '')[:10]} → {doc.get('end_date', '')[:10]}",
+                "timeframe": doc.get("timeframe", "1h"),
+                # Core metrics
+                "total_trades": s.get("total_trades", 0),
+                "win_rate": s.get("win_rate", 0),
+                "profit_factor": s.get("profit_factor", 0),
+                "sharpe_ratio": s.get("sharpe_ratio", 0),
+                "max_drawdown_percent": s.get("max_drawdown_percent", 0),
+                "total_pips": s.get("total_pips", 0),
+                "return_percent": s.get("return_percent", 0),
+                "max_consecutive_wins": s.get("max_consecutive_wins", 0),
+                "max_consecutive_losses": s.get("max_consecutive_losses", 0),
+                # Applied settings
+                "tp1_pips": cfg.get("tp1_pips"),
+                "tp2_pips": cfg.get("tp2_pips"),
+                "tp3_pips": cfg.get("tp3_pips"),
+                "sl_pips": cfg.get("sl_pips"),
+                "pip_value": cfg.get("pip_value"),
+                "atr_sl_multiplier": cfg.get("atr_sl_multiplier"),
+                # Periodic performance
+                "monthly_performance": doc.get("results", {}).get("monthly_performance", {}),
+                "yearly_performance": doc.get("results", {}).get("yearly_performance", {}),
+            })
+
+        # Sort: enabled pairs first, then by profit factor descending
+        summary_rows.sort(
+            key=lambda r: (
+                0 if r.get("enabled") else 1,
+                -(r.get("profit_factor") or 0),
+            )
+        )
+
+        # Aggregate stats across pairs that have results
+        with_results = [r for r in summary_rows if r.get("has_results")]
+        aggregate = {}
+        if with_results:
+            aggregate = {
+                "pairs_with_results": len(with_results),
+                "pairs_without_results": len(summary_rows) - len(with_results),
+                "avg_win_rate": round(
+                    sum(r["win_rate"] for r in with_results) / len(with_results), 2
+                ),
+                "avg_profit_factor": round(
+                    sum(r["profit_factor"] for r in with_results) / len(with_results), 2
+                ),
+                "avg_sharpe_ratio": round(
+                    sum(r["sharpe_ratio"] for r in with_results) / len(with_results), 2
+                ),
+                "total_pips_all_pairs": round(
+                    sum(r["total_pips"] for r in with_results), 1
+                ),
+                "best_pair_by_pf": max(
+                    with_results, key=lambda r: r["profit_factor"]
+                )["pair"],
+                "worst_pair_by_pf": min(
+                    with_results, key=lambda r: r["profit_factor"]
+                )["pair"],
+                "best_pair_by_wr": max(
+                    with_results, key=lambda r: r["win_rate"]
+                )["pair"],
+            }
+
+        return {
+            "success": True,
+            "total_pairs_configured": len(PAIR_PARAMETERS),
+            "active_filters": {
+                "allowed_regimes": ALLOWED_REGIMES,
+                "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
+                "drawdown_protection": DRAWDOWN_PROTECTION,
+                "partial_close": {"tp1_pct": 33, "tp2_pct": 33, "tp3_pct": 34},
+            },
+            "aggregate": aggregate,
+            "pairs": summary_rows,
+        }
+    except Exception as e:
+        logger.error(f"[Backtest] Error building summary: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/job/{job_id}  – poll background job progress
+# ---------------------------------------------------------------------------
+@api_router.get("/backtest/job/{job_id}")
+async def get_backtest_job_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Poll the status of a background all-pairs backtest job.
+
+    Returns ``status`` = "queued" | "running" | "completed", plus
+    ``pairs_completed`` / ``total_pairs`` for progress tracking and a
+    ``summary`` once the job finishes.
+    """
+    try:
+        if not ObjectId.is_valid(job_id):
+            raise HTTPException(status_code=400, detail="Invalid job_id")
+
+        job = await db.backtest_jobs.find_one({
+            "_id": ObjectId(job_id),
+            "user_id": str(current_user["_id"]),
+        })
+        if not job:
+            raise HTTPException(status_code=404, detail="Backtest job not found")
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": job.get("status", "unknown"),
+            "pairs_completed": job.get("pairs_completed", 0),
+            "total_pairs": job.get("total_pairs", 0),
+            "progress_pct": round(
+                job.get("pairs_completed", 0) / max(job.get("total_pairs", 1), 1) * 100, 1
+            ),
+            "summary": job.get("summary"),
+            "created_at": job["created_at"].isoformat() if job.get("created_at") else None,
+            "completed_at": job["completed_at"].isoformat() if job.get("completed_at") else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Backtest] Error fetching job {job_id}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/history  – user's full backtest run history
+# ---------------------------------------------------------------------------
 @api_router.get("/backtest/history")
 async def get_backtest_history(
-    limit: int = 10,
-    current_user: dict = Depends(get_current_user)
+    limit: int = 20,
+    pair: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get user's backtest history"""
+    """
+    Return the user's backtest run history, newest first.
+    Optionally filter by ``pair`` query parameter.
+    """
     try:
-        history = await db.backtest_results.find(
-            {"user_id": str(current_user["_id"])}
-        ).sort("created_at", -1).limit(limit).to_list(limit)
-        
-        # Format for response
+        query: dict = {"user_id": str(current_user["_id"])}
+        if pair:
+            query["pair"] = pair.upper()
+
+        history = await db.backtest_results.find(query).sort(
+            "created_at", -1
+        ).limit(limit).to_list(limit)
+
         formatted = []
         for item in history:
             formatted.append({
                 "id": str(item["_id"]),
                 "pair": item.get("pair"),
-                "config": item.get("config"),
+                "enabled": item.get("enabled", True),
+                "timeframe": item.get("timeframe"),
+                "start_date": item.get("start_date"),
+                "end_date": item.get("end_date"),
+                "config": item.get("config", {}),
                 "summary": item.get("results", {}).get("summary", {}),
-                "created_at": item.get("created_at").isoformat() if item.get("created_at") else None
+                "filters_applied": item.get("filters_applied", {}),
+                "created_at": item["created_at"].isoformat() if item.get("created_at") else None,
             })
-        
+
         return {
             "success": True,
             "count": len(formatted),
-            "history": formatted
+            "history": formatted,
         }
     except Exception as e:
-        logger.error(f"Error getting backtest history: {e}")
+        logger.error(f"[Backtest] Error getting history: {e}")
         return {"success": False, "error": str(e)}
 
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/result/{result_id}  – full detail for one run
+# ---------------------------------------------------------------------------
 @api_router.get("/backtest/result/{result_id}")
 async def get_backtest_result(
     result_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    """Get detailed backtest result by ID"""
+    """
+    Retrieve the full detail of a single backtest run by its MongoDB ID,
+    including the last 50 individual trades and all periodic breakdowns.
+    """
     try:
+        if not ObjectId.is_valid(result_id):
+            raise HTTPException(status_code=400, detail="Invalid result_id")
+
         result = await db.backtest_results.find_one({
             "_id": ObjectId(result_id),
-            "user_id": str(current_user["_id"])
+            "user_id": str(current_user["_id"]),
         })
-        
+
         if not result:
             raise HTTPException(status_code=404, detail="Backtest result not found")
-        
+
         return {
             "success": True,
             "result": {
                 "id": str(result["_id"]),
                 "pair": result.get("pair"),
-                "config": result.get("config"),
-                "results": result.get("results"),
-                "created_at": result.get("created_at").isoformat() if result.get("created_at") else None
-            }
+                "enabled": result.get("enabled", True),
+                "timeframe": result.get("timeframe"),
+                "start_date": result.get("start_date"),
+                "end_date": result.get("end_date"),
+                "filters_applied": result.get("filters_applied", {}),
+                "config": result.get("config", {}),
+                "results": result.get("results", {}),
+                "created_at": result["created_at"].isoformat() if result.get("created_at") else None,
+            },
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting backtest result: {e}")
+        logger.error(f"[Backtest] Error fetching result {result_id}: {e}")
         return {"success": False, "error": str(e)}
 
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/pairs  – metadata for all configurable pairs
+# ---------------------------------------------------------------------------
 @api_router.get("/backtest/pairs")
 async def get_available_pairs(current_user: dict = Depends(get_current_user)):
-    """Get list of pairs available for backtesting"""
+    """
+    Return metadata for all 21 configured trading pairs, including whether
+    each is currently enabled, its live PAIR_PARAMETERS settings, and the
+    pip value used for accurate pip calculations.
+    """
+    pairs_out = []
+    for symbol, meta in BACKTEST_PAIR_METADATA.items():
+        params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
+        pairs_out.append({
+            "symbol": symbol,
+            "name": meta["name"],
+            "type": meta["type"],
+            "enabled": params.get("enabled", True),
+            "pip_value": params.get("pip_value", 0.0001),
+            "decimal_places": params.get("decimal_places", 5),
+            "tp1_pips": params.get("fixed_tp1_pips", params.get("atr_multiplier_tp1", 5.0)),
+            "tp2_pips": params.get("fixed_tp2_pips", params.get("atr_multiplier_tp2", 10.0)),
+            "tp3_pips": params.get("fixed_tp3_pips", params.get("atr_multiplier_tp3", 15.0)),
+            "sl_pips": params.get("fixed_sl_pips", params.get("atr_multiplier_sl", 15.0)),
+            "use_fixed_pips": params.get("use_fixed_pips", False),
+            "atr_sl_multiplier": params.get("atr_multiplier_sl", 1.5),
+            "min_rr": params.get("min_rr", 1.5),
+            "typical_spread": params.get("typical_spread", 0.0001),
+        })
+
+    # Sort: enabled first, then alphabetically
+    pairs_out.sort(key=lambda p: (0 if p["enabled"] else 1, p["symbol"]))
+
     return {
         "success": True,
-        "pairs": [
-            {"symbol": "XAUUSD", "name": "Gold / US Dollar", "type": "commodity"},
-            {"symbol": "XAUEUR", "name": "Gold / Euro", "type": "commodity"},
-            {"symbol": "BTCUSD", "name": "Bitcoin / US Dollar", "type": "crypto"},
-            {"symbol": "EURUSD", "name": "Euro / US Dollar", "type": "forex"},
-            {"symbol": "GBPUSD", "name": "British Pound / US Dollar", "type": "forex"},
-            {"symbol": "USDJPY", "name": "US Dollar / Japanese Yen", "type": "forex"},
-            {"symbol": "EURJPY", "name": "Euro / Japanese Yen", "type": "forex"},
-            {"symbol": "GBPJPY", "name": "British Pound / Japanese Yen", "type": "forex"},
-            {"symbol": "AUDUSD", "name": "Australian Dollar / US Dollar", "type": "forex"},
-            {"symbol": "USDCAD", "name": "US Dollar / Canadian Dollar", "type": "forex"},
-            {"symbol": "USDCHF", "name": "US Dollar / Swiss Franc", "type": "forex"},
-        ],
+        "total_pairs": len(pairs_out),
+        "active_pairs": sum(1 for p in pairs_out if p["enabled"]),
+        "disabled_pairs": sum(1 for p in pairs_out if not p["enabled"]),
+        "pairs": pairs_out,
         "timeframes": [
-            {"value": "1h", "label": "1 Hour"},
-            {"value": "4h", "label": "4 Hours"},
+            {"value": "1h",   "label": "1 Hour (recommended)"},
+            {"value": "4h",   "label": "4 Hours"},
             {"value": "1day", "label": "Daily"},
         ],
-        "year_range": {"min": 2015, "max": 2025}
+        "default_date_range": "Last 2 years",
+        "filters_active": {
+            "allowed_regimes": ALLOWED_REGIMES,
+            "min_confidence": MIN_CONFIDENCE_THRESHOLD,
+            "drawdown_protection": DRAWDOWN_PROTECTION["enabled"],
+            "partial_close_split": "33% TP1 / 33% TP2 / 34% TP3",
+        },
     }
 
 # ============ ADMIN ENDPOINTS ============
