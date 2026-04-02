@@ -57,10 +57,14 @@ class SignalQualityFilter:
         }
         
         # === CORRECTED THRESHOLDS ===
-        self.min_confidence = 65  # RAISED from 55 to 65
-        self.preferred_confidence = 70  # Preferred for live trading
+        self.min_confidence = 70  # RAISED from 65 → 70 (Phase 1: false signal reduction)
+        self.preferred_confidence = 75  # Preferred for live trading (raised from 70 → 75)
         self.min_confluence_score = 2
         self.min_smc_score = 4
+
+        # Gold pairs require stricter confidence threshold
+        self.gold_pairs = ["XAUUSD", "XAUEUR"]
+        self.gold_min_confidence = 75  # Gold pairs: 75% confidence (premium filtering)
         
         # Correlation threshold - reject if > 0.7
         self.max_correlation = 0.7
@@ -69,7 +73,7 @@ class SignalQualityFilter:
         self.max_positions_per_group = 2
         
         # === SIGNAL THROTTLING ===
-        self.min_time_between_trades = timedelta(minutes=30)  # CHANGED from 15 to 30
+        self.min_time_between_trades = timedelta(minutes=45)  # RAISED from 30 → 45 min (Phase 1: false signal reduction)
         self.last_signal_time: Dict[str, datetime] = {}
         self.global_last_signal_time: Optional[datetime] = None
         
@@ -111,20 +115,26 @@ class SignalQualityFilter:
         # Reset daily counters if new day
         self._check_daily_reset()
         
-        # === CHECK 1: CONFIDENCE THRESHOLD (RAISED TO 65%) ===
-        confidence_pass = confidence >= self.min_confidence
+        # === CHECK 1: CONFIDENCE THRESHOLD (RAISED TO 70%; GOLD 75%) ===
+        # Gold pairs require stricter confidence for premium, reliable signals
+        effective_min = self.gold_min_confidence if symbol in self.gold_pairs else self.min_confidence
+        confidence_pass = confidence >= effective_min
         is_high_confidence = confidence >= self.preferred_confidence
         quality_metrics["details"]["confidence"] = {
             "pass": confidence_pass,
             "value": confidence,
-            "threshold": self.min_confidence,
+            "threshold": effective_min,
             "preferred": self.preferred_confidence,
-            "is_high_confidence": is_high_confidence
+            "is_high_confidence": is_high_confidence,
+            "is_gold_pair": symbol in self.gold_pairs
         }
         if confidence_pass:
             quality_metrics["checks_passed"] += 1
         else:
-            quality_metrics["blocked_reasons"].append(f"Confidence {confidence}% < {self.min_confidence}% minimum")
+            quality_metrics["blocked_reasons"].append(
+                f"Confidence {confidence}% < {effective_min}% minimum"
+                + (" (gold premium threshold)" if symbol in self.gold_pairs else "")
+            )
         
         # === CHECK 2: REGIME ENFORCEMENT (STRICT) ===
         regime_pass, regime_details = self._check_regime_enforcement(regime_result, signal_type)
@@ -501,6 +511,7 @@ class SignalQualityFilter:
             "global_throttle_active": self.global_last_signal_time is not None,
             "thresholds": {
                 "min_confidence": self.min_confidence,
+                "gold_min_confidence": self.gold_min_confidence,
                 "preferred_confidence": self.preferred_confidence,
                 "min_confluence": self.min_confluence_score,
                 "min_smc_score": self.min_smc_score,
