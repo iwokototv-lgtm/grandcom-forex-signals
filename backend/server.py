@@ -3088,6 +3088,496 @@ async def get_available_pairs(current_user: dict = Depends(get_current_user)):
         },
     }
 
+# ============ SIGNAL QUALITY MONITORING ENDPOINTS ============
+# All 21 configured pairs for quality tracking
+ALL_TRACKED_PAIRS = list(PAIR_PARAMETERS.keys())
+
+class SignalQualityTrackRequest(BaseModel):
+    """Request model for POST /api/signals/quality/track"""
+    pair: str
+    confidence: float                          # 0–100
+    mtf_alignment: bool                        # H4 + D1 aligned with signal
+    order_block_proximity: bool                # Price near an SMC order block
+    quality_score: float                       # 0–100 composite score
+    signal_type: str                           # BUY or SELL
+    timeframe: str = "1H"
+    regime: Optional[str] = None
+    result: Optional[str] = None              # WIN / LOSS – filled in later
+
+
+@api_router.post("/signals/quality/track")
+async def track_signal_quality(
+    data: SignalQualityTrackRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Log signal quality metrics when a signal is generated.
+
+    Stores: pair, confidence, MTF alignment, order block proximity,
+    quality score, signal type, regime, and optional result (WIN/LOSS)
+    into the ``signal_quality_metrics`` MongoDB collection for later
+    analysis and trend tracking.
+    """
+    try:
+        pair = data.pair.upper()
+        if pair not in PAIR_PARAMETERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown pair '{pair}'. Valid pairs: {ALL_TRACKED_PAIRS}",
+            )
+
+        if data.signal_type.upper() not in ("BUY", "SELL"):
+            raise HTTPException(status_code=400, detail="signal_type must be BUY or SELL")
+
+        doc = {
+            "pair": pair,
+            "confidence": round(float(data.confidence), 2),
+            "mtf_alignment": bool(data.mtf_alignment),
+            "order_block_proximity": bool(data.order_block_proximity),
+            "quality_score": round(float(data.quality_score), 2),
+            "signal_type": data.signal_type.upper(),
+            "timeframe": data.timeframe,
+            "regime": data.regime or "UNKNOWN",
+            "result": data.result.upper() if data.result else None,
+            "is_gold_pair": pair in GOLD_PAIRS,
+            "logged_by": str(current_user["_id"]),
+            "timestamp": datetime.utcnow(),
+        }
+
+        insert_result = await db.signal_quality_metrics.insert_one(doc)
+        metric_id = str(insert_result.inserted_id)
+
+        logger.info(
+            f"[QualityTrack] {pair} logged – conf={data.confidence:.1f}% "
+            f"qs={data.quality_score:.1f} mtf={data.mtf_alignment} "
+            f"ob={data.order_block_proximity} id={metric_id}"
+        )
+
+        return {
+            "success": True,
+            "metric_id": metric_id,
+            "pair": pair,
+            "quality_score": doc["quality_score"],
+            "is_gold_pair": doc["is_gold_pair"],
+            "message": f"Signal quality metric logged for {pair}",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[QualityTrack] Error logging metric: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@api_router.get("/signals/quality/gold-pairs")
+async def get_gold_pair_quality(current_user: dict = Depends(get_current_user)):
+    """
+    Dedicated endpoint for gold pair (XAUUSD and XAUEUR) quality metrics.
+
+    Returns per-pair performance including:
+    - Average confidence and quality score
+    - Win rate and false signal rate
+    - Premium filter effectiveness (% of signals meeting 75 % threshold)
+    - Consistency score (low std-dev of quality scores = more reliable)
+    - Recent signal history (last 20 per pair)
+    """
+    try:
+        result = {}
+
+        for pair in GOLD_PAIRS:
+            metrics = await db.signal_quality_metrics.find(
+                {"pair": pair}
+            ).sort("timestamp", -1).to_list(length=500)
+
+            if not metrics:
+                result[pair] = {
+                    "pair": pair,
+                    "is_gold_pair": True,
+                    "has_data": False,
+                    "message": "No quality metrics recorded yet",
+                }
+                continue
+
+            total = len(metrics)
+            confidences = [m["confidence"] for m in metrics]
+            quality_scores = [m["quality_score"] for m in metrics]
+
+            closed = [m for m in metrics if m.get("result") in ("WIN", "LOSS")]
+            wins = sum(1 for m in closed if m.get("result") == "WIN")
+            losses = sum(1 for m in closed if m.get("result") == "LOSS")
+            win_rate = round(wins / len(closed) * 100, 2) if closed else None
+            false_signal_rate = round(losses / len(closed) * 100, 2) if closed else None
+
+            # Premium filter effectiveness: % of signals that met the 75 % gold threshold
+            premium_signals = sum(1 for c in confidences if c >= GOLD_CONFIDENCE_THRESHOLD)
+            premium_filter_pct = round(premium_signals / total * 100, 2)
+
+            # Consistency: inverse of coefficient of variation (lower CV = more consistent)
+            avg_qs = round(sum(quality_scores) / total, 2)
+            if total > 1:
+                import statistics
+                std_qs = statistics.stdev(quality_scores)
+                cv = std_qs / avg_qs if avg_qs > 0 else 0
+                consistency_score = round(max(0.0, 1.0 - cv) * 100, 2)
+            else:
+                consistency_score = None
+
+            # MTF alignment rate
+            mtf_aligned = sum(1 for m in metrics if m.get("mtf_alignment"))
+            mtf_alignment_rate = round(mtf_aligned / total * 100, 2)
+
+            # Order block proximity rate
+            ob_proximity = sum(1 for m in metrics if m.get("order_block_proximity"))
+            ob_proximity_rate = round(ob_proximity / total * 100, 2)
+
+            # Recent signals (last 20)
+            recent = []
+            for m in metrics[:20]:
+                recent.append({
+                    "id": str(m["_id"]),
+                    "timestamp": m["timestamp"].isoformat() if m.get("timestamp") else None,
+                    "signal_type": m.get("signal_type"),
+                    "confidence": m.get("confidence"),
+                    "quality_score": m.get("quality_score"),
+                    "mtf_alignment": m.get("mtf_alignment"),
+                    "order_block_proximity": m.get("order_block_proximity"),
+                    "regime": m.get("regime"),
+                    "result": m.get("result"),
+                })
+
+            result[pair] = {
+                "pair": pair,
+                "is_gold_pair": True,
+                "has_data": True,
+                "total_signals": total,
+                "avg_confidence": round(sum(confidences) / total, 2),
+                "avg_quality_score": avg_qs,
+                "consistency_score": consistency_score,
+                "win_rate": win_rate,
+                "false_signal_rate": false_signal_rate,
+                "closed_signals": len(closed),
+                "wins": wins,
+                "losses": losses,
+                "premium_filter_effectiveness": {
+                    "threshold_pct": GOLD_CONFIDENCE_THRESHOLD,
+                    "signals_meeting_threshold": premium_signals,
+                    "filter_pass_rate": premium_filter_pct,
+                },
+                "mtf_alignment_rate": mtf_alignment_rate,
+                "order_block_proximity_rate": ob_proximity_rate,
+                "recent_signals": recent,
+            }
+
+        return {
+            "success": True,
+            "gold_pairs": GOLD_PAIRS,
+            "confidence_threshold": GOLD_CONFIDENCE_THRESHOLD,
+            "metrics": result,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"[QualityGold] Error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@api_router.get("/signals/quality/summary")
+async def get_signal_quality_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Cross-pair signal quality comparison ranked by quality score (highest first).
+
+    For each of the 21 configured pairs returns:
+    - Average confidence, average quality score, signal count
+    - Win rate and false signal rate (for signals with recorded results)
+    - MTF alignment rate and order block proximity rate
+    - Whether the pair is a gold pair (premium monitoring)
+
+    Gold pairs (XAUUSD, XAUEUR) are highlighted in a dedicated section.
+    """
+    try:
+        # Aggregate per-pair stats in one MongoDB pipeline
+        pipeline = [
+            {
+                "$group": {
+                    "_id": "$pair",
+                    "total_signals": {"$sum": 1},
+                    "avg_confidence": {"$avg": "$confidence"},
+                    "avg_quality_score": {"$avg": "$quality_score"},
+                    "wins": {
+                        "$sum": {"$cond": [{"$eq": ["$result", "WIN"]}, 1, 0]}
+                    },
+                    "losses": {
+                        "$sum": {"$cond": [{"$eq": ["$result", "LOSS"]}, 1, 0]}
+                    },
+                    "mtf_aligned_count": {
+                        "$sum": {"$cond": ["$mtf_alignment", 1, 0]}
+                    },
+                    "ob_proximity_count": {
+                        "$sum": {"$cond": ["$order_block_proximity", 1, 0]}
+                    },
+                }
+            },
+            {"$sort": {"avg_quality_score": -1}},
+        ]
+
+        rows = await db.signal_quality_metrics.aggregate(pipeline).to_list(length=50)
+
+        formatted = []
+        for row in rows:
+            pair = row["_id"]
+            total = row["total_signals"]
+            wins = row["wins"]
+            losses = row["losses"]
+            closed = wins + losses
+
+            win_rate = round(wins / closed * 100, 2) if closed > 0 else None
+            false_signal_rate = round(losses / closed * 100, 2) if closed > 0 else None
+            mtf_rate = round(row["mtf_aligned_count"] / total * 100, 2) if total > 0 else 0
+            ob_rate = round(row["ob_proximity_count"] / total * 100, 2) if total > 0 else 0
+
+            formatted.append({
+                "pair": pair,
+                "is_gold_pair": pair in GOLD_PAIRS,
+                "pair_type": BACKTEST_PAIR_METADATA.get(pair, {}).get("type", "forex"),
+                "total_signals": total,
+                "avg_confidence": round(row["avg_confidence"], 2),
+                "avg_quality_score": round(row["avg_quality_score"], 2),
+                "win_rate": win_rate,
+                "false_signal_rate": false_signal_rate,
+                "closed_signals": closed,
+                "mtf_alignment_rate": mtf_rate,
+                "order_block_proximity_rate": ob_rate,
+            })
+
+        # Pairs with no metrics yet
+        tracked_pairs = {r["pair"] for r in rows}
+        missing = [
+            {
+                "pair": p,
+                "is_gold_pair": p in GOLD_PAIRS,
+                "pair_type": BACKTEST_PAIR_METADATA.get(p, {}).get("type", "forex"),
+                "total_signals": 0,
+                "avg_confidence": None,
+                "avg_quality_score": None,
+                "win_rate": None,
+                "false_signal_rate": None,
+                "closed_signals": 0,
+                "mtf_alignment_rate": None,
+                "order_block_proximity_rate": None,
+            }
+            for p in ALL_TRACKED_PAIRS
+            if p not in tracked_pairs
+        ]
+
+        all_pairs = formatted + missing
+
+        # Separate gold pairs for the dedicated section
+        gold_section = [p for p in all_pairs if p["is_gold_pair"]]
+        forex_section = [p for p in all_pairs if not p["is_gold_pair"]]
+
+        # Overall aggregate (pairs that have data)
+        with_data = [p for p in formatted]
+        aggregate = {}
+        if with_data:
+            aggregate = {
+                "pairs_with_data": len(with_data),
+                "pairs_without_data": len(missing),
+                "overall_avg_quality_score": round(
+                    sum(p["avg_quality_score"] for p in with_data) / len(with_data), 2
+                ),
+                "overall_avg_confidence": round(
+                    sum(p["avg_confidence"] for p in with_data) / len(with_data), 2
+                ),
+                "best_pair_by_quality": max(with_data, key=lambda p: p["avg_quality_score"])["pair"],
+                "best_pair_by_confidence": max(with_data, key=lambda p: p["avg_confidence"])["pair"],
+            }
+
+        return {
+            "success": True,
+            "total_pairs_configured": len(ALL_TRACKED_PAIRS),
+            "aggregate": aggregate,
+            "gold_pairs": gold_section,
+            "forex_pairs": forex_section,
+            "all_pairs_ranked": all_pairs,
+            "thresholds": {
+                "min_confidence_forex": MIN_CONFIDENCE_THRESHOLD,
+                "min_confidence_gold": GOLD_CONFIDENCE_THRESHOLD,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"[QualitySummary] Error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@api_router.get("/signals/quality/{pair}")
+async def get_pair_signal_quality(
+    pair: str,
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Pair-specific signal quality metrics.
+
+    Returns:
+    - Recent signals with quality scores (up to ``limit``, default 50)
+    - Win rate and false signal rate
+    - Trend analysis: whether quality is improving or declining
+      (compares the average quality score of the most recent 10 signals
+      against the previous 10)
+    - Gold pairs additionally show premium filter effectiveness and
+      consistency score
+    """
+    try:
+        pair = pair.upper()
+        if pair not in PAIR_PARAMETERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown pair '{pair}'. Valid pairs: {ALL_TRACKED_PAIRS}",
+            )
+
+        metrics = await db.signal_quality_metrics.find(
+            {"pair": pair}
+        ).sort("timestamp", -1).to_list(length=max(limit, 100))
+
+        is_gold = pair in GOLD_PAIRS
+        params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
+
+        if not metrics:
+            return {
+                "success": True,
+                "pair": pair,
+                "is_gold_pair": is_gold,
+                "has_data": False,
+                "message": f"No quality metrics recorded yet for {pair}",
+                "pair_config": {
+                    "enabled": params.get("enabled", True),
+                    "confidence_threshold": GOLD_CONFIDENCE_THRESHOLD if is_gold else MIN_CONFIDENCE_THRESHOLD,
+                    "tp1_pips": params.get("fixed_tp1_pips", params.get("atr_multiplier_tp1")),
+                    "tp2_pips": params.get("fixed_tp2_pips", params.get("atr_multiplier_tp2")),
+                    "tp3_pips": params.get("fixed_tp3_pips", params.get("atr_multiplier_tp3")),
+                },
+            }
+
+        total = len(metrics)
+        confidences = [m["confidence"] for m in metrics]
+        quality_scores = [m["quality_score"] for m in metrics]
+
+        closed = [m for m in metrics if m.get("result") in ("WIN", "LOSS")]
+        wins = sum(1 for m in closed if m.get("result") == "WIN")
+        losses = sum(1 for m in closed if m.get("result") == "LOSS")
+        win_rate = round(wins / len(closed) * 100, 2) if closed else None
+        false_signal_rate = round(losses / len(closed) * 100, 2) if closed else None
+
+        # --- Trend analysis ---
+        # Compare avg quality score of most recent 10 vs previous 10
+        trend = "insufficient_data"
+        trend_detail = {}
+        if total >= 20:
+            recent_10 = quality_scores[:10]
+            prev_10 = quality_scores[10:20]
+            avg_recent = sum(recent_10) / 10
+            avg_prev = sum(prev_10) / 10
+            delta = round(avg_recent - avg_prev, 2)
+            if delta > 2:
+                trend = "improving"
+            elif delta < -2:
+                trend = "declining"
+            else:
+                trend = "stable"
+            trend_detail = {
+                "recent_10_avg": round(avg_recent, 2),
+                "previous_10_avg": round(avg_prev, 2),
+                "delta": delta,
+            }
+        elif total >= 10:
+            trend = "early_data"
+            trend_detail = {"note": "Need at least 20 signals for trend analysis"}
+
+        # MTF and OB rates
+        mtf_aligned = sum(1 for m in metrics if m.get("mtf_alignment"))
+        ob_proximity = sum(1 for m in metrics if m.get("order_block_proximity"))
+        mtf_rate = round(mtf_aligned / total * 100, 2)
+        ob_rate = round(ob_proximity / total * 100, 2)
+
+        # Regime distribution
+        regime_counts: Dict[str, int] = {}
+        for m in metrics:
+            r = m.get("regime", "UNKNOWN")
+            regime_counts[r] = regime_counts.get(r, 0) + 1
+
+        # Recent signals (up to requested limit)
+        recent_signals = []
+        for m in metrics[:limit]:
+            recent_signals.append({
+                "id": str(m["_id"]),
+                "timestamp": m["timestamp"].isoformat() if m.get("timestamp") else None,
+                "signal_type": m.get("signal_type"),
+                "confidence": m.get("confidence"),
+                "quality_score": m.get("quality_score"),
+                "mtf_alignment": m.get("mtf_alignment"),
+                "order_block_proximity": m.get("order_block_proximity"),
+                "regime": m.get("regime"),
+                "result": m.get("result"),
+            })
+
+        response: Dict[str, Any] = {
+            "success": True,
+            "pair": pair,
+            "is_gold_pair": is_gold,
+            "has_data": True,
+            "total_signals": total,
+            "avg_confidence": round(sum(confidences) / total, 2),
+            "avg_quality_score": round(sum(quality_scores) / total, 2),
+            "win_rate": win_rate,
+            "false_signal_rate": false_signal_rate,
+            "closed_signals": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "mtf_alignment_rate": mtf_rate,
+            "order_block_proximity_rate": ob_rate,
+            "regime_distribution": regime_counts,
+            "trend": trend,
+            "trend_detail": trend_detail,
+            "recent_signals": recent_signals,
+            "pair_config": {
+                "enabled": params.get("enabled", True),
+                "confidence_threshold": GOLD_CONFIDENCE_THRESHOLD if is_gold else MIN_CONFIDENCE_THRESHOLD,
+                "tp1_pips": params.get("fixed_tp1_pips", params.get("atr_multiplier_tp1")),
+                "tp2_pips": params.get("fixed_tp2_pips", params.get("atr_multiplier_tp2")),
+                "tp3_pips": params.get("fixed_tp3_pips", params.get("atr_multiplier_tp3")),
+                "sl_pips": params.get("fixed_sl_pips", params.get("atr_multiplier_sl")),
+                "pip_value": params.get("pip_value"),
+            },
+        }
+
+        # Gold-pair premium metrics
+        if is_gold:
+            premium_signals = sum(1 for c in confidences if c >= GOLD_CONFIDENCE_THRESHOLD)
+            premium_filter_pct = round(premium_signals / total * 100, 2)
+
+            if total > 1:
+                import statistics
+                std_qs = statistics.stdev(quality_scores)
+                avg_qs = sum(quality_scores) / total
+                cv = std_qs / avg_qs if avg_qs > 0 else 0
+                consistency_score = round(max(0.0, 1.0 - cv) * 100, 2)
+            else:
+                consistency_score = None
+
+            response["premium_metrics"] = {
+                "gold_confidence_threshold": GOLD_CONFIDENCE_THRESHOLD,
+                "signals_meeting_threshold": premium_signals,
+                "premium_filter_pass_rate": premium_filter_pct,
+                "consistency_score": consistency_score,
+            }
+
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[QualityPair] Error for {pair}: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ============ ADMIN ENDPOINTS ============
 def require_admin(current_user: dict = Depends(get_current_user)):
     """Dependency that requires admin role"""
