@@ -1203,14 +1203,24 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         except Exception as chop_err:
             logger.warning(f"⚠️ {pair} chop detection error (allowing signal): {chop_err}")
 
-        # ============ ML OPTIMIZATION ============
+        # ============ ML OPTIMIZATION (Phase 2: pass MTF result for quality scoring) ============
+        # Capture the MTF result from the earlier check so the optimizer can use it
+        # for signal quality scoring (Component 2: multi-timeframe alignment).
+        _mtf_result_for_optimizer: Optional[Dict[str, Any]] = None
         try:
-            # Optimize signal using ML engine
+            _mtf_result_for_optimizer = await mtf_analyzer.analyze(pair)
+        except Exception:
+            pass  # MTF result is optional; optimizer handles None gracefully
+
+        quality_score = 0  # will be populated by optimizer
+        try:
+            # Optimize signal using ML engine (Phase 2: pass mtf_result)
             optimized = signal_optimizer.optimize_signal(
                 df=df,
                 symbol=pair,
                 ai_signal=ai_analysis,
-                pair_params=params
+                pair_params=params,
+                mtf_result=_mtf_result_for_optimizer,
             )
             
             # Check if signal was blocked or filtered
@@ -1227,6 +1237,10 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_name = regime_info.get('name', 'UNKNOWN')
             regime_confidence = regime_info.get('confidence', 0.5)
             risk_multiplier = regime_info.get('risk_multiplier', 1.0)
+
+            # Extract Phase 2 quality score and pair metadata
+            quality_score = optimized.get('quality_score', 0)
+            pair_category = optimized.get('pair_category', 'UNKNOWN')
             
             # ============ FILTER 4: REGIME FILTER ============
             if regime_name in SKIP_REGIME:
@@ -1250,6 +1264,23 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 ai_analysis["signal"] = "SELL"
                 ai_analysis["analysis"] = f"[TREND_DOWN - Aligned to SELL] {ai_analysis.get('analysis', '')}"
             # RANGE regime: Allow both BUY and SELL (mean reversion strategy)
+
+            # ============ FILTER 7: SIGNAL QUALITY SCORE (Phase 2) ============
+            # Only trade signals that score 70+ on the 0-100 quality scale.
+            # The optimizer already enforces pair-specific minimums (gold ≥ 75,
+            # institutional ≥ 72, JPY/standard ≥ 70) inside apply_pair_specific_filter,
+            # but we add a final hard gate here for defence-in-depth.
+            from ml_engine.signal_optimizer import MIN_SIGNAL_QUALITY_SCORE
+            if quality_score < MIN_SIGNAL_QUALITY_SCORE:
+                logger.info(
+                    f"🔬 {pair} skipped - signal quality score {quality_score} "
+                    f"< {MIN_SIGNAL_QUALITY_SCORE} minimum (Phase 2 filter)"
+                )
+                return None
+            logger.info(
+                f"✅ {pair} quality score passed: {quality_score}/100 "
+                f"[category={pair_category}]"
+            )
             
             # Use optimized levels if available
             if optimized.get('optimized'):
@@ -1261,7 +1292,11 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 tp_levels = ai_analysis['tp_levels']
                 sl_price = ai_analysis['sl_price']
             
-            logger.info(f"✅ ML Optimization for {pair}: Regime={regime_name}, Conf={regime_confidence:.2f}, RiskMult={risk_multiplier:.2f}")
+            logger.info(
+                f"✅ ML Optimization for {pair}: Regime={regime_name}, "
+                f"Conf={regime_confidence:.2f}, RiskMult={risk_multiplier:.2f}, "
+                f"QualityScore={quality_score}, Category={pair_category}"
+            )
             
         except Exception as ml_error:
             logger.warning(f"ML optimization failed for {pair}: {ml_error}. Using raw AI signal.")
@@ -1271,6 +1306,8 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_name = 'UNKNOWN'
             regime_confidence = 0.5
             risk_multiplier = 1.0
+            quality_score = 0
+            pair_category = 'UNKNOWN'
         
         # Parse risk_reward if it's in ratio format
         risk_reward = ai_analysis.get("risk_reward", params['min_rr'])
@@ -1287,7 +1324,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         # Adjust confidence based on regime
         adjusted_confidence = ai_analysis["confidence"] * regime_confidence
         
-        # Create signal with ML enhancements
+        # Create signal with ML enhancements (Phase 2: include quality score in analysis)
         signal = Signal(
             pair=pair,
             type=ai_analysis["signal"],
@@ -1296,7 +1333,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             tp_levels=tp_levels,
             sl_price=sl_price,
             confidence=round(adjusted_confidence, 1),
-            analysis=f"[{regime_name}] {ai_analysis['analysis']}",
+            analysis=f"[{regime_name}|Q{quality_score}] {ai_analysis['analysis']}",
             timeframe="1H",
             risk_reward=risk_reward,
             is_premium=adjusted_confidence > 70  # ML-adjusted threshold (raised from 60 → 70)
@@ -1306,11 +1343,13 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         signal_dict = signal.dict(exclude={"id"})
         signal_dict['regime'] = regime_name
         signal_dict['risk_multiplier'] = risk_multiplier
+        signal_dict['quality_score'] = quality_score          # Phase 2: persist quality score
+        signal_dict['pair_category'] = pair_category          # Phase 2: persist pair category
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
         
-        # Send to Telegram with regime info
-        await send_signal_to_telegram(signal, regime_name, risk_multiplier)
+        # Send to Telegram with regime info and quality score
+        await send_signal_to_telegram(signal, regime_name, risk_multiplier, quality_score)
         
         # Send push notification to app users
         try:
@@ -1345,7 +1384,12 @@ def sanitize_html(text: str) -> str:
     text = text.replace(">", "&gt;")
     return text
 
-async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", risk_mult: float = 1.0):
+async def send_signal_to_telegram(
+    signal: Signal,
+    regime_name: str = "UNKNOWN",
+    risk_mult: float = 1.0,
+    quality_score: int = 0,
+):
     """Send signal to Telegram channel - PROFESSIONAL COPIER FORMAT"""
     try:
         if not TELEGRAM_BOT_TOKEN:
@@ -1369,6 +1413,16 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
             regime_emoji = "↔️"
         elif regime_name == "HIGH_VOL":
             regime_emoji = "⚡"
+
+        # Phase 2: quality score badge
+        if quality_score >= 85:
+            quality_badge = "🏆 PREMIUM"
+        elif quality_score >= 75:
+            quality_badge = "⭐ HIGH"
+        elif quality_score >= 70:
+            quality_badge = "✅ GOOD"
+        else:
+            quality_badge = "📊 STANDARD"
         
         # Professional format optimized for copier systems
         message = f"""
@@ -1388,13 +1442,14 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
 <b>⚡ Confidence:</b> {signal.confidence}%
 <b>{regime_emoji} Market Regime:</b> {regime_name}
 <b>⚖️ Risk Factor:</b> {risk_mult:.1f}x
+<b>🔬 Signal Quality:</b> {quality_score}/100 {quality_badge}
 
 <b>📝 Analysis:</b>
 {safe_analysis}
 
 <b>⏰ Time:</b> {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
 
-<i>🤖 Powered by Grandcom ML Engine</i>
+<i>🤖 Powered by Grandcom ML Engine v2 (Phase 2)</i>
         """
         
         await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
