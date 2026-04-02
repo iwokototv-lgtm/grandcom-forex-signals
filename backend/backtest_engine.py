@@ -44,6 +44,7 @@ class BacktestTrade:
     pip_value: float = 0.0001
     max_drawdown: float = 0.0
     max_profit: float = 0.0
+    breakeven_activated: bool = False
 
 
 @dataclass
@@ -88,6 +89,7 @@ class BacktestResults:
     trades: List[BacktestTrade] = field(default_factory=list)
     monthly_performance: Dict[str, float] = field(default_factory=dict)
     yearly_performance: Dict[str, float] = field(default_factory=dict)
+    breakeven_activations: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -117,6 +119,7 @@ class BacktestResults:
                 "sharpe_ratio": round(self.sharpe_ratio, 2),
                 "final_balance": round(self.final_balance, 2),
                 "return_percent": round(self.return_percent, 2),
+                "breakeven_activations": self.breakeven_activations,
             },
             "monthly_performance": self.monthly_performance,
             "yearly_performance": self.yearly_performance,
@@ -130,8 +133,10 @@ class BacktestResults:
                     "exit_time": t.exit_time.isoformat() if t.exit_time else None,
                     "result": t.result.value,
                     "pips": round(t.pips, 1),
+                    "breakeven_activated": t.breakeven_activated,
                 }
                 for t in self.trades[-50:]  # Last 50 trades
+
             ]
         }
 
@@ -367,22 +372,32 @@ class BacktestEngine:
     ) -> BacktestTrade:
         """
         Simulate a trade to determine if it hits TP or SL.
-        Uses partial take profits.
+        Uses partial take profits and break-even stop logic.
+
+        Break-even rule: when unrealised profit reaches 50% of the TP1
+        distance the stop loss is moved to entry price, locking in a
+        risk-free position while preserving full upside.
         """
         pair_config = self.PAIR_CONFIG.get(trade.pair, {"pip_value": 0.0001})
         pip_value = pair_config["pip_value"]
         trade.pip_value = pip_value
-        
+
         remaining_position = 1.0
         total_pips = 0.0
         tp1_hit = False
         tp2_hit = False
-        
+
+        # Break-even threshold: 50% of the distance from entry to TP1
+        if trade.direction == "BUY":
+            be_trigger_price = trade.entry_price + (trade.tp1_price - trade.entry_price) * 0.5
+        else:
+            be_trigger_price = trade.entry_price - (trade.entry_price - trade.tp1_price) * 0.5
+
         for i in range(start_idx + 1, min(start_idx + max_candles, len(df))):
             candle = df.iloc[i]
             high = candle['high']
             low = candle['low']
-            
+
             # Track max drawdown and profit
             if trade.direction == "BUY":
                 current_dd = (trade.entry_price - low) / pip_value
@@ -390,11 +405,17 @@ class BacktestEngine:
             else:
                 current_dd = (high - trade.entry_price) / pip_value
                 current_profit = (trade.entry_price - low) / pip_value
-            
+
             trade.max_drawdown = max(trade.max_drawdown, current_dd)
             trade.max_profit = max(trade.max_profit, current_profit)
-            
+
             if trade.direction == "BUY":
+                # --- Break-even stop: move SL to entry at 50% of TP1 distance ---
+                if not trade.breakeven_activated and high >= be_trigger_price:
+                    if trade.sl_price < trade.entry_price:  # only move SL up
+                        trade.sl_price = trade.entry_price
+                        trade.breakeven_activated = True
+
                 # Check Stop Loss first
                 if low <= trade.sl_price:
                     trade.exit_price = trade.sl_price
@@ -402,7 +423,7 @@ class BacktestEngine:
                     trade.result = TradeResult.LOSS_SL
                     trade.pips = total_pips + ((trade.sl_price - trade.entry_price) / pip_value) * remaining_position
                     return trade
-                
+
                 # Check TP3 (full exit)
                 if high >= trade.tp3_price and not tp2_hit:
                     trade.exit_price = trade.tp3_price
@@ -410,24 +431,32 @@ class BacktestEngine:
                     trade.result = TradeResult.WIN_TP3
                     trade.pips = ((trade.tp3_price - trade.entry_price) / pip_value)
                     return trade
-                
+
                 # Check TP2 (partial)
                 if high >= trade.tp2_price and not tp2_hit:
                     tp2_hit = True
                     partial_pips = ((trade.tp2_price - trade.entry_price) / pip_value) * 0.33
                     total_pips += partial_pips
                     remaining_position -= 0.33
-                    # Move SL to entry (breakeven)
-                    trade.sl_price = trade.entry_price
-                
+                    # Ensure SL is at entry after TP2 (may already be there via BE)
+                    if trade.sl_price < trade.entry_price:
+                        trade.sl_price = trade.entry_price
+                        trade.breakeven_activated = True
+
                 # Check TP1 (partial)
                 if high >= trade.tp1_price and not tp1_hit:
                     tp1_hit = True
                     partial_pips = ((trade.tp1_price - trade.entry_price) / pip_value) * 0.33
                     total_pips += partial_pips
                     remaining_position -= 0.33
-                    
+
             else:  # SELL
+                # --- Break-even stop: move SL to entry at 50% of TP1 distance ---
+                if not trade.breakeven_activated and low <= be_trigger_price:
+                    if trade.sl_price > trade.entry_price:  # only move SL down
+                        trade.sl_price = trade.entry_price
+                        trade.breakeven_activated = True
+
                 # Check Stop Loss first
                 if high >= trade.sl_price:
                     trade.exit_price = trade.sl_price
@@ -435,7 +464,7 @@ class BacktestEngine:
                     trade.result = TradeResult.LOSS_SL
                     trade.pips = total_pips + ((trade.entry_price - trade.sl_price) / pip_value) * remaining_position
                     return trade
-                
+
                 # Check TP3
                 if low <= trade.tp3_price and not tp2_hit:
                     trade.exit_price = trade.tp3_price
@@ -443,28 +472,31 @@ class BacktestEngine:
                     trade.result = TradeResult.WIN_TP3
                     trade.pips = ((trade.entry_price - trade.tp3_price) / pip_value)
                     return trade
-                
+
                 # Check TP2
                 if low <= trade.tp2_price and not tp2_hit:
                     tp2_hit = True
                     partial_pips = ((trade.entry_price - trade.tp2_price) / pip_value) * 0.33
                     total_pips += partial_pips
                     remaining_position -= 0.33
-                    trade.sl_price = trade.entry_price
-                
+                    # Ensure SL is at entry after TP2 (may already be there via BE)
+                    if trade.sl_price > trade.entry_price:
+                        trade.sl_price = trade.entry_price
+                        trade.breakeven_activated = True
+
                 # Check TP1
                 if low <= trade.tp1_price and not tp1_hit:
                     tp1_hit = True
                     partial_pips = ((trade.entry_price - trade.tp1_price) / pip_value) * 0.33
                     total_pips += partial_pips
                     remaining_position -= 0.33
-        
+
         # Trade timed out
         trade.result = TradeResult.TIMEOUT
         trade.exit_price = df.iloc[min(start_idx + max_candles - 1, len(df) - 1)]['close']
         trade.exit_time = df.iloc[min(start_idx + max_candles - 1, len(df) - 1)]['datetime']
         trade.pips = total_pips
-        
+
         return trade
     
     async def run_backtest(self, config: BacktestConfig) -> BacktestResults:
@@ -597,6 +629,7 @@ class BacktestEngine:
         results.average_pips_per_trade = results.total_pips / results.total_trades if results.total_trades > 0 else 0
         results.final_balance = balance
         results.return_percent = ((balance - config.initial_balance) / config.initial_balance * 100)
+        results.breakeven_activations = sum(1 for t in trades if t.breakeven_activated)
         
         # Consecutive wins/losses
         results.max_consecutive_wins, results.max_consecutive_losses = self._calculate_consecutive(trades)
