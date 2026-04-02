@@ -2,6 +2,7 @@
 Multi-Timeframe Analysis Engine
 Implements H4 bias, H1 structure, M15 trigger methodology
 """
+import asyncio
 import pandas as pd
 import numpy as np
 import ta
@@ -51,13 +52,15 @@ def serialize_value(val):
 class MultiTimeframeAnalyzer:
     """
     Multi-timeframe analysis following institutional methodology:
-    - H4: Determines overall bias (trend direction)
-    - H1: Identifies market structure (key levels, patterns)
+    - D1:  Macro trend context (highest timeframe)
+    - H4:  Determines overall bias (trend direction)
+    - H1:  Identifies market structure (key levels, patterns)
     - M15: Finds precise entry triggers
     """
     
     def __init__(self):
         self.timeframes = {
+            'D1': '1day',
             'H4': '4h',
             'H1': '1h',
             'M15': '15min'
@@ -432,6 +435,67 @@ class MultiTimeframeAnalyzer:
             score = 0  # Reset score if no clear direction
         
         return score, direction
+
+
+    async def analyze_htf_alignment(self, symbol: str, signal_direction: str) -> Dict[str, Any]:
+        """
+        Check H4 + D1 alignment for a given signal direction.
+        
+        Used by the Phase 1 false-signal-reduction filter in server.py.
+        
+        Returns a dict with:
+          - aligned (bool): True if H4 and D1 both agree with signal_direction
+          - h4_trend (str): BULLISH / BEARISH / NEUTRAL
+          - d1_trend (str): BULLISH / BEARISH / NEUTRAL
+          - reason (str): human-readable explanation
+        """
+        try:
+            h4_data = await self.fetch_timeframe_data(symbol, '4h', 50)
+            await asyncio.sleep(0.3)
+            d1_data = await self.fetch_timeframe_data(symbol, '1day', 30)
+
+            h4_bias = self._analyze_h4_bias(h4_data) if h4_data is not None and len(h4_data) >= 20 else {'direction': 'NEUTRAL'}
+            d1_bias = self._analyze_h4_bias(d1_data) if d1_data is not None and len(d1_data) >= 20 else {'direction': 'NEUTRAL'}
+
+            h4_trend = h4_bias.get('direction', 'NEUTRAL')
+            d1_trend = d1_bias.get('direction', 'NEUTRAL')
+
+            logger.info(f"HTF alignment {symbol}: H4={h4_trend}, D1={d1_trend}, signal={signal_direction}")
+
+            # Both NEUTRAL → insufficient data, allow
+            if h4_trend == 'NEUTRAL' and d1_trend == 'NEUTRAL':
+                return {
+                    'aligned': True,
+                    'h4_trend': h4_trend,
+                    'd1_trend': d1_trend,
+                    'reason': 'H4=NEUTRAL D1=NEUTRAL (insufficient data, allowing)'
+                }
+
+            if signal_direction == 'BUY':
+                aligned = h4_trend in ('BULLISH', 'NEUTRAL') and d1_trend in ('BULLISH', 'NEUTRAL')
+            elif signal_direction == 'SELL':
+                aligned = h4_trend in ('BEARISH', 'NEUTRAL') and d1_trend in ('BEARISH', 'NEUTRAL')
+            else:
+                aligned = True  # Unknown direction — allow
+
+            reason = (
+                f"H4={h4_trend} D1={d1_trend} {'✓ aligned' if aligned else '✗ conflict'} with {signal_direction}"
+            )
+            return {
+                'aligned': aligned,
+                'h4_trend': h4_trend,
+                'd1_trend': d1_trend,
+                'reason': reason
+            }
+
+        except Exception as e:
+            logger.error(f"analyze_htf_alignment error for {symbol}: {e}")
+            return {
+                'aligned': True,
+                'h4_trend': 'NEUTRAL',
+                'd1_trend': 'NEUTRAL',
+                'reason': f'HTF alignment error (allowing): {e}'
+            }
 
 
 # Global instance

@@ -631,9 +631,16 @@ ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL"]  # Allow ALL r
 SKIP_REGIME = []  # No regime restrictions - let strategy logic handle it
 
 # 2. CONFIDENCE THRESHOLD
-MIN_CONFIDENCE_THRESHOLD = 60  # Lowered to allow more signals
+MIN_CONFIDENCE_THRESHOLD = 70  # RAISED from 60 → 70 (Phase 1: false signal reduction)
 MIN_REGIME_CONFIDENCE = 0.55   # Lowered for more signals
-HIGH_CONFIDENCE_THRESHOLD = 70
+HIGH_CONFIDENCE_THRESHOLD = 75
+
+# Gold pairs require stricter confidence for premium, reliable signals
+GOLD_PAIRS = ["XAUUSD", "XAUEUR"]
+GOLD_CONFIDENCE_THRESHOLD = 75  # Gold pairs: 75% confidence (premium filtering)
+
+# 2b. SIGNAL THROTTLE - minimum minutes between signals on the same pair
+SIGNAL_THROTTLE_MINUTES = 45  # RAISED from 30 → 45 min (Phase 1: false signal reduction)
 
 # 3. SESSION FILTER - DISABLED (No session restrictions as per user request)
 # All pairs trade 24/7 - no time-based restrictions
@@ -954,6 +961,183 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         logger.error(f"Error generating AI analysis for {symbol}: {e}")
         return None
 
+
+# ============ SIGNAL QUALITY HELPERS (Phase 1: False Signal Reduction) ============
+
+async def check_higher_timeframe_alignment(pair: str, signal_direction: str) -> tuple[bool, str]:
+    """
+    Multi-timeframe confirmation: require H4 and D1 to agree with the signal direction.
+    
+    Returns (confirmed: bool, reason: str)
+    - confirmed=True  → H4 and D1 both align with signal_direction (BUY/SELL)
+    - confirmed=False → H4 or D1 disagrees; signal should be skipped
+    
+    Alignment logic:
+    - BUY signal: H4 trend must be BULLISH and D1 trend must be BULLISH
+    - SELL signal: H4 trend must be BEARISH and D1 trend must be BEARISH
+    - If either timeframe is NEUTRAL the signal is allowed (insufficient data to block)
+    """
+    try:
+        # Fetch H4 data (50 candles ≈ ~8 days)
+        h4_df = await get_price_data(pair, interval="4h", outputsize=50)
+        await asyncio.sleep(0.3)
+        # Fetch D1 data (30 candles ≈ 1 month)
+        d1_df = await get_price_data(pair, interval="1day", outputsize=30)
+
+        def get_trend(df: pd.DataFrame, label: str) -> str:
+            """Determine trend direction using EMA-50 and price position."""
+            if df is None or len(df) < 20:
+                return "NEUTRAL"
+            try:
+                df = df.copy()
+                df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=min(50, len(df))).ema_indicator()
+                df["ema_20"] = ta.trend.EMAIndicator(df["close"], window=min(20, len(df))).ema_indicator()
+                adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+                df["adx"] = adx_ind.adx()
+                df["adx_pos"] = adx_ind.adx_pos()
+                df["adx_neg"] = adx_ind.adx_neg()
+                latest = df.iloc[-1]
+                price_above_ema50 = latest["close"] > latest["ema_50"]
+                ema_bullish = latest["ema_20"] > latest["ema_50"]
+                di_bullish = latest["adx_pos"] > latest["adx_neg"]
+                bullish_count = sum([price_above_ema50, ema_bullish, di_bullish])
+                if bullish_count >= 2:
+                    return "BULLISH"
+                elif bullish_count <= 1:
+                    return "BEARISH"
+                return "NEUTRAL"
+            except Exception as e:
+                logger.warning(f"Trend calc error for {label}: {e}")
+                return "NEUTRAL"
+
+        h4_trend = get_trend(h4_df, f"{pair}/H4")
+        d1_trend = get_trend(d1_df, f"{pair}/D1")
+
+        logger.info(f"🕐 {pair} MTF check: H4={h4_trend}, D1={d1_trend}, signal={signal_direction}")
+
+        # If both timeframes are NEUTRAL, allow the signal (insufficient data to block)
+        if h4_trend == "NEUTRAL" and d1_trend == "NEUTRAL":
+            return True, f"H4=NEUTRAL D1=NEUTRAL (insufficient data, allowing)"
+
+        # Check alignment
+        if signal_direction == "BUY":
+            h4_ok = h4_trend in ("BULLISH", "NEUTRAL")
+            d1_ok = d1_trend in ("BULLISH", "NEUTRAL")
+            if h4_ok and d1_ok:
+                return True, f"H4={h4_trend} D1={d1_trend} aligned BULLISH ✓"
+            conflicts = []
+            if not h4_ok:
+                conflicts.append(f"H4={h4_trend}")
+            if not d1_ok:
+                conflicts.append(f"D1={d1_trend}")
+            return False, f"BUY signal conflicts with higher TF: {', '.join(conflicts)}"
+
+        elif signal_direction == "SELL":
+            h4_ok = h4_trend in ("BEARISH", "NEUTRAL")
+            d1_ok = d1_trend in ("BEARISH", "NEUTRAL")
+            if h4_ok and d1_ok:
+                return True, f"H4={h4_trend} D1={d1_trend} aligned BEARISH ✓"
+            conflicts = []
+            if not h4_ok:
+                conflicts.append(f"H4={h4_trend}")
+            if not d1_ok:
+                conflicts.append(f"D1={d1_trend}")
+            return False, f"SELL signal conflicts with higher TF: {', '.join(conflicts)}"
+
+        # Unknown direction — allow
+        return True, f"Direction={signal_direction} (unknown, allowing)"
+
+    except Exception as e:
+        logger.error(f"check_higher_timeframe_alignment error for {pair}: {e}")
+        return True, f"MTF check error (allowing): {e}"
+
+
+def detect_choppy_market(df: pd.DataFrame, pair: str) -> tuple[bool, str]:
+    """
+    Price action filter: detect choppy/ranging markets and block signals.
+    
+    Uses two complementary indicators:
+    1. Choppiness Index (CI) — values near 100 = choppy, near 0 = trending
+       CI = 100 * log10(sum(ATR(1), n) / (highest_high - lowest_low, n)) / log10(n)
+       Threshold: CI > 61.8 (golden ratio) → choppy
+    2. Bollinger Band Width squeeze — very narrow bands = low volatility / no direction
+       Threshold: BB width < 0.5% of price → ranging/squeeze
+    3. ADX < 20 combined with ATR below 14-period average → no clear trend
+    
+    Returns (is_choppy: bool, reason: str)
+    """
+    try:
+        if df is None or len(df) < 20:
+            return False, "Insufficient data for chop detection"
+
+        df = df.copy()
+        n = 14  # Lookback period
+
+        # --- Choppiness Index ---
+        high_n = df["high"].rolling(n).max()
+        low_n = df["low"].rolling(n).min()
+        atr_1 = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=1).average_true_range()
+        atr_sum_n = atr_1.rolling(n).sum()
+        hl_range = high_n - low_n
+        # Avoid division by zero
+        chop_index = np.where(
+            hl_range > 0,
+            100.0 * np.log10(atr_sum_n / hl_range) / np.log10(n),
+            50.0
+        )
+        df["chop_index"] = chop_index
+        latest_chop = float(df["chop_index"].iloc[-1])
+
+        # --- Bollinger Band Width ---
+        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["close"] * 100  # as % of price
+        latest_bb_width = float(df["bb_width"].iloc[-1])
+
+        # --- ADX ---
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        df["adx"] = adx_ind.adx()
+        latest_adx = float(df["adx"].iloc[-1])
+
+        # --- ATR ratio (current vs 14-period average) ---
+        df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
+        atr_mean = float(df["atr"].tail(14).mean())
+        latest_atr = float(df["atr"].iloc[-1])
+        atr_ratio = latest_atr / atr_mean if atr_mean > 0 else 1.0
+
+        logger.info(
+            f"🔍 {pair} chop metrics: CI={latest_chop:.1f}, BB_width={latest_bb_width:.2f}%, "
+            f"ADX={latest_adx:.1f}, ATR_ratio={atr_ratio:.2f}"
+        )
+
+        # Decision logic — flag as choppy if multiple indicators agree
+        chop_signals = 0
+        chop_reasons = []
+
+        if latest_chop > 61.8:
+            chop_signals += 1
+            chop_reasons.append(f"CI={latest_chop:.1f}>61.8")
+
+        if latest_bb_width < 0.5:
+            chop_signals += 1
+            chop_reasons.append(f"BB_width={latest_bb_width:.2f}%<0.5%")
+
+        if latest_adx < 20 and atr_ratio < 0.85:
+            chop_signals += 1
+            chop_reasons.append(f"ADX={latest_adx:.1f}<20 + ATR_ratio={atr_ratio:.2f}<0.85")
+
+        # Require at least 2 choppy signals to block (avoid false positives)
+        if chop_signals >= 2:
+            return True, f"Choppy market detected ({', '.join(chop_reasons)})"
+
+        return False, f"Trending market confirmed (CI={latest_chop:.1f}, ADX={latest_adx:.1f}, BB_w={latest_bb_width:.2f}%)"
+
+    except Exception as e:
+        logger.error(f"detect_choppy_market error for {pair}: {e}")
+        return False, f"Chop detection error (allowing): {e}"
+
+
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
     """Generate a complete trading signal for a pair with ML optimization and profitability filters"""
     try:
@@ -991,10 +1175,34 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         
         # ============ FILTER 3: CONFIDENCE THRESHOLD ============
         ai_confidence = ai_analysis.get("confidence", 0)
-        if ai_confidence < MIN_CONFIDENCE_THRESHOLD:
-            logger.info(f"📊 {pair} skipped - confidence {ai_confidence}% < {MIN_CONFIDENCE_THRESHOLD}% threshold")
+        # Gold pairs require stricter 75% confidence threshold (premium filtering)
+        effective_threshold = GOLD_CONFIDENCE_THRESHOLD if pair in GOLD_PAIRS else MIN_CONFIDENCE_THRESHOLD
+        if ai_confidence < effective_threshold:
+            logger.info(f"📊 {pair} skipped - confidence {ai_confidence}% < {effective_threshold}% threshold {'(gold premium)' if pair in GOLD_PAIRS else ''}")
             return None
-        
+        logger.info(f"✅ {pair} confidence check passed: {ai_confidence}% >= {effective_threshold}%")
+
+        # ============ FILTER 3b: MULTI-TIMEFRAME CONFIRMATION (H4 + D1 alignment) ============
+        try:
+            signal_direction = ai_analysis.get("signal", "NEUTRAL")
+            mtf_confirmed, mtf_reason = await check_higher_timeframe_alignment(pair, signal_direction)
+            if not mtf_confirmed:
+                logger.info(f"🕐 {pair} skipped - MTF confirmation failed: {mtf_reason}")
+                return None
+            logger.info(f"✅ {pair} MTF confirmation passed: {mtf_reason}")
+        except Exception as mtf_err:
+            logger.warning(f"⚠️ {pair} MTF check error (allowing signal): {mtf_err}")
+
+        # ============ FILTER 3c: PRICE ACTION FILTER (choppy/ranging market detection) ============
+        try:
+            is_choppy, chop_reason = detect_choppy_market(df, pair)
+            if is_choppy:
+                logger.info(f"📉 {pair} skipped - choppy/ranging market: {chop_reason}")
+                return None
+            logger.info(f"✅ {pair} price action filter passed: {chop_reason}")
+        except Exception as chop_err:
+            logger.warning(f"⚠️ {pair} chop detection error (allowing signal): {chop_err}")
+
         # ============ ML OPTIMIZATION ============
         try:
             # Optimize signal using ML engine
@@ -1091,7 +1299,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             analysis=f"[{regime_name}] {ai_analysis['analysis']}",
             timeframe="1H",
             risk_reward=risk_reward,
-            is_premium=adjusted_confidence > 60  # ML-adjusted threshold
+            is_premium=adjusted_confidence > 70  # ML-adjusted threshold (raised from 60 → 70)
         )
         
         # Save to database
