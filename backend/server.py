@@ -2259,6 +2259,13 @@ class BacktestRequest(BaseModel):
     - When ``use_pair_parameters`` is True (default) the engine reads TP/SL
       values directly from PAIR_PARAMETERS so the backtest mirrors live
       signal generation exactly.
+
+    Phase 1 & 2 filter flags (all default to True so backtests match live
+    signal generation out of the box):
+    - ``apply_confidence_filter``: enforce pair-specific confidence thresholds
+      (Gold 75%, Institutional/JPY 70%, Standard 65%)
+    - ``apply_mtf_filter``: require H4 + D1 alignment with signal direction
+    - ``apply_order_block_filter``: only trade signals near valid SMC order blocks
     """
     pair: str = "ALL"                        # symbol or "ALL"
     start_date: Optional[str] = None         # ISO date "YYYY-MM-DD"; default = 2 years ago
@@ -2276,6 +2283,10 @@ class BacktestRequest(BaseModel):
     risk_per_trade: float = 0.02             # 2 % risk per trade
     skip_disabled: bool = True               # Skip pairs where enabled=False (e.g. BTCUSD)
     run_in_background: bool = False          # True → return job_id immediately
+    # ── Phase 1 & 2 signal filters ──────────────────────────────────────────
+    apply_confidence_filter: bool = True     # Pair-specific confidence thresholds
+    apply_mtf_filter: bool = True            # H4 + D1 multi-timeframe confirmation
+    apply_order_block_filter: bool = True    # SMC order-block proximity check
 
 
 class BacktestResponse(BaseModel):
@@ -2295,6 +2306,7 @@ class BacktestResponse(BaseModel):
     return_percent: float = 0.0
     max_consecutive_wins: int = 0
     max_consecutive_losses: int = 0
+    breakeven_activations: int = 0
     # Applied filter settings
     tp1_pips_used: float = 0.0
     tp2_pips_used: float = 0.0
@@ -2302,6 +2314,14 @@ class BacktestResponse(BaseModel):
     sl_pips_used: float = 0.0
     atr_sl_multiplier_used: float = 0.0
     pip_value_used: float = 0.0
+    # ── Phase 1 & 2 filter statistics ───────────────────────────────────────
+    signals_generated: int = 0
+    signals_filtered_confidence: int = 0
+    signals_filtered_mtf: int = 0
+    signals_filtered_order_block: int = 0
+    mtf_alignment_rate: float = 0.0
+    order_block_proximity_rate: float = 0.0
+    confidence_threshold_used: float = 0.0
     # Periodic breakdowns
     monthly_performance: Dict[str, Any] = {}
     yearly_performance: Dict[str, Any] = {}
@@ -2353,6 +2373,10 @@ def _build_backtest_config_for_pair(
         sl_pips=sl,
         use_atr_for_sl=use_atr,
         atr_sl_multiplier=atr_mult,
+        # ── Phase 1 & 2 filter flags ─────────────────────────────────────
+        apply_confidence_filter=request.apply_confidence_filter,
+        apply_mtf_filter=request.apply_mtf_filter,
+        apply_order_block_filter=request.apply_order_block_filter,
     )
 
 
@@ -2380,12 +2404,21 @@ def _result_to_response(
         return_percent=round(results.return_percent, 2),
         max_consecutive_wins=results.max_consecutive_wins,
         max_consecutive_losses=results.max_consecutive_losses,
+        breakeven_activations=results.breakeven_activations,
         tp1_pips_used=config.tp1_pips,
         tp2_pips_used=config.tp2_pips,
         tp3_pips_used=config.tp3_pips,
         sl_pips_used=config.sl_pips,
         atr_sl_multiplier_used=config.atr_sl_multiplier,
         pip_value_used=pip_value,
+        # ── Phase 1 & 2 filter statistics ────────────────────────────────
+        signals_generated=results.signals_generated,
+        signals_filtered_confidence=results.signals_filtered_confidence,
+        signals_filtered_mtf=results.signals_filtered_mtf,
+        signals_filtered_order_block=results.signals_filtered_order_block,
+        mtf_alignment_rate=round(results.mtf_alignment_rate, 1),
+        order_block_proximity_rate=round(results.order_block_proximity_rate, 1),
+        confidence_threshold_used=results.confidence_threshold_used,
         monthly_performance=results.monthly_performance,
         yearly_performance=results.yearly_performance,
         result_id=result_id,
@@ -2404,6 +2437,10 @@ async def _run_single_pair_backtest(
     Execute a backtest for one pair, persist the result to MongoDB, and
     return a BacktestResponse.  Applies all active filters:
       - PAIR_PARAMETERS (TP/SL, pip value, ATR multiplier)
+      - Phase 1: pair-specific confidence thresholds (Gold 75%, Inst/JPY 70%, Std 65%)
+      - Phase 1: H4 + D1 multi-timeframe alignment check
+      - Phase 2: SMC order-block proximity filter
+      - Break-even stop: SL → entry at 50% of TP1 distance
       - ALLOWED_REGIMES / SKIP_REGIME awareness (noted in metadata)
       - MIN_CONFIDENCE_THRESHOLD (noted in metadata)
       - DRAWDOWN_PROTECTION settings (noted in metadata)
@@ -2427,7 +2464,9 @@ async def _run_single_pair_backtest(
     logger.info(
         f"[Backtest] Running {pair} | {start_dt.date()} → {end_dt.date()} | "
         f"TF={config.timeframe} | TP={config.tp1_pips}/{config.tp2_pips}/{config.tp3_pips} "
-        f"SL={config.sl_pips} ATR×{config.atr_sl_multiplier}"
+        f"SL={config.sl_pips} ATR×{config.atr_sl_multiplier} | "
+        f"Filters: conf={config.apply_confidence_filter} "
+        f"mtf={config.apply_mtf_filter} ob={config.apply_order_block_filter}"
     )
 
     results = await engine.run_backtest(config)
@@ -2448,6 +2487,18 @@ async def _run_single_pair_backtest(
             "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
             "drawdown_protection": DRAWDOWN_PROTECTION,
             "partial_close": {"tp1": 0.33, "tp2": 0.33, "tp3": 0.34},
+            # ── Phase 1 & 2 filter flags ──────────────────────────────────
+            "apply_confidence_filter": config.apply_confidence_filter,
+            "apply_mtf_filter": config.apply_mtf_filter,
+            "apply_order_block_filter": config.apply_order_block_filter,
+            "confidence_threshold_used": results.confidence_threshold_used,
+            # ── Phase 1 & 2 filter statistics ─────────────────────────────
+            "signals_generated": results.signals_generated,
+            "signals_filtered_confidence": results.signals_filtered_confidence,
+            "signals_filtered_mtf": results.signals_filtered_mtf,
+            "signals_filtered_order_block": results.signals_filtered_order_block,
+            "mtf_alignment_rate": results.mtf_alignment_rate,
+            "order_block_proximity_rate": results.order_block_proximity_rate,
         },
         "config": {
             "tp1_pips": config.tp1_pips,
@@ -2468,9 +2519,15 @@ async def _run_single_pair_backtest(
 
     response = _result_to_response(pair, results, config, result_id)
     logger.info(
-        f"[Backtest] {pair} done → {results.total_trades} trades | "
+        f"[Backtest] {pair} done → "
+        f"{results.signals_generated} signals → "
+        f"{results.signals_filtered_confidence} conf-filtered, "
+        f"{results.signals_filtered_mtf} MTF-filtered, "
+        f"{results.signals_filtered_order_block} OB-filtered → "
+        f"{results.total_trades} trades | "
         f"WR={results.win_rate:.1f}% | PF={results.profit_factor:.2f} | "
-        f"Pips={results.total_pips:.1f} | DD={results.max_drawdown_percent:.1f}%"
+        f"Pips={results.total_pips:.1f} | DD={results.max_drawdown_percent:.1f}% | "
+        f"BE={results.breakeven_activations}"
     )
     return response
 
@@ -2810,6 +2867,8 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
 
             s = doc.get("results", {}).get("summary", {})
             cfg = doc.get("config", {})
+            flt = doc.get("filters_applied", {})
+            fs = doc.get("results", {}).get("filter_stats", {})
             summary_rows.append({
                 "pair": pair,
                 "enabled": is_enabled,
@@ -2829,6 +2888,7 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
                 "return_percent": s.get("return_percent", 0),
                 "max_consecutive_wins": s.get("max_consecutive_wins", 0),
                 "max_consecutive_losses": s.get("max_consecutive_losses", 0),
+                "breakeven_activations": s.get("breakeven_activations", 0),
                 # Applied settings
                 "tp1_pips": cfg.get("tp1_pips"),
                 "tp2_pips": cfg.get("tp2_pips"),
@@ -2836,6 +2896,29 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
                 "sl_pips": cfg.get("sl_pips"),
                 "pip_value": cfg.get("pip_value"),
                 "atr_sl_multiplier": cfg.get("atr_sl_multiplier"),
+                # ── Phase 1 & 2 filter statistics ─────────────────────────
+                "filter_stats": {
+                    "signals_generated": fs.get("signals_generated",
+                        flt.get("signals_generated", 0)),
+                    "signals_filtered_confidence": fs.get("signals_filtered_confidence",
+                        flt.get("signals_filtered_confidence", 0)),
+                    "signals_filtered_mtf": fs.get("signals_filtered_mtf",
+                        flt.get("signals_filtered_mtf", 0)),
+                    "signals_filtered_order_block": fs.get("signals_filtered_order_block",
+                        flt.get("signals_filtered_order_block", 0)),
+                    "signals_accepted": s.get("total_trades", 0),
+                    "mtf_alignment_rate": fs.get("mtf_alignment_rate",
+                        flt.get("mtf_alignment_rate", 0)),
+                    "order_block_proximity_rate": fs.get("order_block_proximity_rate",
+                        flt.get("order_block_proximity_rate", 0)),
+                    "confidence_threshold_used": fs.get("confidence_threshold_used",
+                        flt.get("confidence_threshold_used", 0)),
+                    "filters_active": fs.get("filters_active", {
+                        "confidence": flt.get("apply_confidence_filter", False),
+                        "mtf": flt.get("apply_mtf_filter", False),
+                        "order_block": flt.get("apply_order_block_filter", False),
+                    }),
+                },
                 # Periodic performance
                 "monthly_performance": doc.get("results", {}).get("monthly_performance", {}),
                 "yearly_performance": doc.get("results", {}).get("yearly_performance", {}),
@@ -2853,6 +2936,23 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
         with_results = [r for r in summary_rows if r.get("has_results")]
         aggregate = {}
         if with_results:
+            total_signals = sum(
+                r.get("filter_stats", {}).get("signals_generated", 0)
+                for r in with_results
+            )
+            total_conf_filtered = sum(
+                r.get("filter_stats", {}).get("signals_filtered_confidence", 0)
+                for r in with_results
+            )
+            total_mtf_filtered = sum(
+                r.get("filter_stats", {}).get("signals_filtered_mtf", 0)
+                for r in with_results
+            )
+            total_ob_filtered = sum(
+                r.get("filter_stats", {}).get("signals_filtered_order_block", 0)
+                for r in with_results
+            )
+            total_accepted = sum(r.get("total_trades", 0) for r in with_results)
             aggregate = {
                 "pairs_with_results": len(with_results),
                 "pairs_without_results": len(summary_rows) - len(with_results),
@@ -2877,6 +2977,29 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
                 "best_pair_by_wr": max(
                     with_results, key=lambda r: r["win_rate"]
                 )["pair"],
+                # ── Phase 1 & 2 filter aggregate stats ────────────────────
+                "filter_aggregate": {
+                    "total_signals_generated": total_signals,
+                    "total_filtered_confidence": total_conf_filtered,
+                    "total_filtered_mtf": total_mtf_filtered,
+                    "total_filtered_order_block": total_ob_filtered,
+                    "total_signals_accepted": total_accepted,
+                    "overall_filter_rate_pct": round(
+                        (1 - total_accepted / total_signals) * 100, 1
+                    ) if total_signals > 0 else 0.0,
+                    "avg_mtf_alignment_rate": round(
+                        sum(
+                            r.get("filter_stats", {}).get("mtf_alignment_rate", 0)
+                            for r in with_results
+                        ) / len(with_results), 1
+                    ),
+                    "avg_ob_proximity_rate": round(
+                        sum(
+                            r.get("filter_stats", {}).get("order_block_proximity_rate", 0)
+                            for r in with_results
+                        ) / len(with_results), 1
+                    ),
+                },
             }
 
         return {
@@ -2887,6 +3010,16 @@ async def get_backtest_summary(current_user: dict = Depends(get_current_user)):
                 "min_confidence_threshold": MIN_CONFIDENCE_THRESHOLD,
                 "drawdown_protection": DRAWDOWN_PROTECTION,
                 "partial_close": {"tp1_pct": 33, "tp2_pct": 33, "tp3_pct": 34},
+                # Phase 1 & 2 filters (applied by default in all new backtests)
+                "phase1_confidence_thresholds": {
+                    "gold_pairs": "75% (XAUUSD, XAUEUR)",
+                    "institutional_pairs": "70% (EURGBP, EURCHF)",
+                    "jpy_crosses": "70% (USDJPY, EURJPY, GBPJPY, AUDJPY, CADJPY, CHFJPY)",
+                    "standard_forex": "65%",
+                },
+                "phase1_mtf_filter": "H4 + D1 alignment required",
+                "phase2_order_block_filter": "Entry must be within 2×ATR of valid SMC OB",
+                "break_even_stop": "SL → entry at 50% of TP1 distance",
             },
             "aggregate": aggregate,
             "pairs": summary_rows,
