@@ -1156,7 +1156,7 @@ def sanitize_html(text: str) -> str:
     return text
 
 async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", risk_mult: float = 1.0):
-    """Send signal to Telegram channel - PROFESSIONAL COPIER FORMAT"""
+    """Send signal to Telegram channel - MT5 COPIER COMPATIBLE FORMAT"""
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
@@ -1168,46 +1168,26 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
         # Sanitize analysis text to prevent HTML parsing errors
         safe_analysis = sanitize_html(signal.analysis)
         
-        # Determine signal emoji
         signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
-        regime_emoji = "📊"
-        if regime_name == "TREND_UP":
-            regime_emoji = "📈"
-        elif regime_name == "TREND_DOWN":
-            regime_emoji = "📉"
-        elif regime_name == "RANGE":
-            regime_emoji = "↔️"
-        elif regime_name == "HIGH_VOL":
-            regime_emoji = "⚡"
         
-        # Professional format optimized for copier systems
-        message = f"""
-{signal_emoji} <b>SIGNAL: {signal.pair}</b> {signal_emoji}
+        # MT5 Copier-compatible format
+        # First line: PAIR DIRECTION @ PRICE (universally parsed by copier EAs)
+        message = f"""{signal.pair} {signal.type} @ {signal.entry_price}
 
-<b>📊 Direction:</b> {signal.type}
-<b>💰 Entry Price:</b> {signal.entry_price}
+SL: {signal.sl_price}
+TP1: {signal.tp_levels[0]}
+TP2: {signal.tp_levels[1]}
+TP3: {signal.tp_levels[2]}
 
-<b>🎯 Take Profit Levels:</b>
-   TP1: {signal.tp_levels[0]}
-   TP2: {signal.tp_levels[1]}
-   TP3: {signal.tp_levels[2]}
+{signal_emoji} Confidence: {signal.confidence}%
+Risk/Reward: 1:{signal.risk_reward}
+Market Regime: {regime_name}
 
-<b>🛡 Stop Loss:</b> {signal.sl_price}
-
-<b>📈 Risk/Reward:</b> 1:{signal.risk_reward}
-<b>⚡ Confidence:</b> {signal.confidence}%
-<b>{regime_emoji} Market Regime:</b> {regime_name}
-<b>⚖️ Risk Factor:</b> {risk_mult:.1f}x
-
-<b>📝 Analysis:</b>
 {safe_analysis}
 
-<b>⏰ Time:</b> {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}
-
-<i>🤖 Powered by Grandcom ML Engine</i>
-        """
+Powered by Grandcom ML Engine"""
         
-        await bot.send_message(chat_id=channel_id, text=message, parse_mode="HTML")
+        await bot.send_message(chat_id=channel_id, text=message)
         logger.info(f"✅ Signal sent to Telegram {channel_id}: {signal.pair} {signal.type}")
     except Exception as e:
         logger.error(f"❌ Error sending to Telegram: {e}")
