@@ -907,7 +907,17 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             brace_match = re.search(r'\{.*\}', raw, re.DOTALL)
             if brace_match:
                 raw = brace_match.group(0)
-        ai_data = json.loads(raw)
+        
+        # Try parsing, fix common LLM JSON errors if needed
+        try:
+            ai_data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Fix trailing commas, missing commas, single quotes
+            fixed = re.sub(r',\s*}', '}', raw)  # trailing comma before }
+            fixed = re.sub(r',\s*]', ']', fixed)  # trailing comma before ]
+            fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)  # missing comma between lines
+            fixed = fixed.replace("'", '"')  # single quotes to double
+            ai_data = json.loads(fixed)
         
         # Validate and fix TP levels if needed
         entry = ai_data.get("entry_price", indicators['current_price'])
@@ -1170,9 +1180,42 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
         
         signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
         
-        # MT5 Copier-compatible format
-        # First line: PAIR DIRECTION @ PRICE (universally parsed by copier EAs)
-        message = f"""{signal.pair} {signal.type} @ {signal.entry_price}
+        # Gold pairs use pip-based TP/SL (Twelve Data prices differ from broker prices)
+        GOLD_PAIRS = {"XAUUSD", "XAUEUR"}
+        
+        if signal.pair in GOLD_PAIRS:
+            # Calculate pip distances (1 pip = 0.01 for 2-decimal gold on MT5)
+            point_size = 0.01
+            entry = signal.entry_price
+            
+            if signal.type == "BUY":
+                sl_pips = round(abs(entry - signal.sl_price) / point_size)
+                tp1_pips = round(abs(signal.tp_levels[0] - entry) / point_size)
+                tp2_pips = round(abs(signal.tp_levels[1] - entry) / point_size)
+                tp3_pips = round(abs(signal.tp_levels[2] - entry) / point_size)
+            else:
+                sl_pips = round(abs(signal.sl_price - entry) / point_size)
+                tp1_pips = round(abs(entry - signal.tp_levels[0]) / point_size)
+                tp2_pips = round(abs(entry - signal.tp_levels[1]) / point_size)
+                tp3_pips = round(abs(entry - signal.tp_levels[2]) / point_size)
+            
+            message = f"""{signal.pair} {signal.type}
+
+SL: {sl_pips} pips
+TP1: {tp1_pips} pips
+TP2: {tp2_pips} pips
+TP3: {tp3_pips} pips
+
+{signal_emoji} Confidence: {signal.confidence}%
+Risk/Reward: 1:{signal.risk_reward}
+Market Regime: {regime_name}
+
+{safe_analysis}
+
+Powered by Grandcom ML Engine"""
+        else:
+            # Forex pairs: absolute prices (broker prices match closely)
+            message = f"""{signal.pair} {signal.type} @ {signal.entry_price}
 
 SL: {signal.sl_price}
 TP1: {signal.tp_levels[0]}
