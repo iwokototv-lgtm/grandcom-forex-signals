@@ -623,25 +623,25 @@ PAIR_PARAMETERS = {
 }
 
 # ============ PROFITABILITY FILTERS ============
-# UPDATED: PR #2 - False Signal Reduction Phase 1
+# RESTORED to original working values
 
 # 1. REGIME FILTER - Aligned with user's strategy
 ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL"]
 SKIP_REGIME = []
 
-# 2. CONFIDENCE THRESHOLD - PR #2: Raised from 60% to 70%
-MIN_CONFIDENCE_THRESHOLD = 70  # PR #2: Raised from 60% to 70%
-MIN_REGIME_CONFIDENCE = 0.65   # Require higher regime confidence
-HIGH_CONFIDENCE_THRESHOLD = 75  # Premium threshold
+# 2. CONFIDENCE THRESHOLD - Restored to original
+MIN_CONFIDENCE_THRESHOLD = 60
+MIN_REGIME_CONFIDENCE = 0.55
+HIGH_CONFIDENCE_THRESHOLD = 70
 
-# 3. SIGNAL THROTTLE - PR #2: Increased from 30min to 45min
-SIGNAL_THROTTLE_MINUTES = 45  # Minimum time between signals per pair
+# 3. SIGNAL THROTTLE - Restored to original
+SIGNAL_THROTTLE_MINUTES = 30
 
-# 4. MULTI-TIMEFRAME CONFIRMATION - PR #2
-REQUIRE_MTF_CONFIRMATION = True  # Require multiple timeframe alignment
+# 4. MULTI-TIMEFRAME CONFIRMATION - Disabled (was blocking gold signals)
+REQUIRE_MTF_CONFIRMATION = False
 
-# 5. PRICE ACTION FILTER - PR #2
-USE_PRICE_ACTION_FILTER = True  # Check support/resistance levels
+# 5. PRICE ACTION FILTER - Disabled (was blocking gold signals)
+USE_PRICE_ACTION_FILTER = False
 
 # 3. SESSION FILTER - DISABLED (No session restrictions as per user request)
 # All pairs trade 24/7 - no time-based restrictions
