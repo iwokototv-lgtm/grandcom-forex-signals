@@ -894,9 +894,20 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             logger.error(f"Failed to get valid AI response for {symbol} after {max_retries} attempts")
             return None
         
-        # Parse AI response
+        # Parse AI response - strip markdown fences and extract JSON
         import json
-        ai_data = json.loads(ai_response)
+        import re
+        raw = ai_response.strip()
+        # Remove markdown code fences (```json ... ``` or ``` ... ```)
+        fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', raw, re.DOTALL)
+        if fence_match:
+            raw = fence_match.group(1).strip()
+        # Fallback: extract first { ... } block
+        if not raw.startswith('{'):
+            brace_match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if brace_match:
+                raw = brace_match.group(0)
+        ai_data = json.loads(raw)
         
         # Validate and fix TP levels if needed
         entry = ai_data.get("entry_price", indicators['current_price'])
