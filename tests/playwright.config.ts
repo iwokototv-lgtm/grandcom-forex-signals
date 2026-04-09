@@ -11,7 +11,7 @@ export default defineConfig({
     ['json', { outputFile: './test-results/results.json' }],
   ],
   use: {
-    baseURL: process.env.BASE_URL || 'https://grandcom-trading.preview.emergentagent.com',
+    baseURL: process.env.BASE_URL || 'https://gold-signal-debug.preview.emergentagent.com',
     screenshot: 'on',
     trace: 'on-first-retry',
     headless: true,

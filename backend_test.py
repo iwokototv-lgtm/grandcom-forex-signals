@@ -10,7 +10,7 @@ import sys
 from typing import Dict, Any
 
 # Configuration
-BASE_URL = "https://grandcom-trading.preview.emergentagent.com"
+BASE_URL = "https://gold-signal-debug.preview.emergentagent.com"
 ADMIN_EMAIL = "admin@forexsignals.com"
 ADMIN_PASSWORD = "Admin@2024!Forex"
 

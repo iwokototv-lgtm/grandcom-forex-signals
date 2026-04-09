@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const BASE_URL = 'https://grandcom-trading.preview.emergentagent.com';
+const BASE_URL = 'https://gold-signal-debug.preview.emergentagent.com';
 const ADMIN_EMAIL = 'admin@forexsignals.com';
 const ADMIN_PASSWORD = 'Admin@2024!Forex';
 

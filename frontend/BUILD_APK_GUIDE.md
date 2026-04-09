@@ -86,7 +86,7 @@ eas build -p android --profile preview
 ## Important Notes
 
 ### Backend URL
-The app connects to: `https://grandcom-trading.preview.emergentagent.com`
+The app connects to: `https://gold-signal-debug.preview.emergentagent.com`
 
 After deploying your backend to production, update `frontend/.env`:
 ```

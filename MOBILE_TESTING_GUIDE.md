@@ -6,7 +6,7 @@
 
 **Just open this link on your phone:**
 ```
-https://grandcom-trading.preview.emergentagent.com
+https://gold-signal-debug.preview.emergentagent.com
 ```
 
 ✅ Works on ANY smartphone (iPhone/Android)

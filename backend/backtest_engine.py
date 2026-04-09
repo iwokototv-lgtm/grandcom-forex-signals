@@ -44,6 +44,11 @@ class BacktestTrade:
     pip_value: float = 0.0001
     max_drawdown: float = 0.0
     max_profit: float = 0.0
+    # PR #1: Break-Even Stop Logic
+    tp1_hit: bool = False
+    be_stop_active: bool = False  # Break-even stop activated after TP1
+    be_exit: bool = False  # Exited at break-even
+    pips_saved_by_be: float = 0.0  # Pips saved by BE stop
 
 
 @dataclass
@@ -88,6 +93,9 @@ class BacktestResults:
     trades: List[BacktestTrade] = field(default_factory=list)
     monthly_performance: Dict[str, float] = field(default_factory=dict)
     yearly_performance: Dict[str, float] = field(default_factory=dict)
+    # PR #1: Break-Even Stop Tracking
+    breakeven_exits: int = 0
+    pips_saved_by_be: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {

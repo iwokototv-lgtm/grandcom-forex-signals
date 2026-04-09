@@ -74,7 +74,7 @@ Professional Forex & Gold (XAUUSD) signals mobile app with fully automatic signa
   - MongoDB: ✅ Online
 
 ### Emergent (Preview/Development)
-- **URL**: https://grandcom-trading.preview.emergentagent.com
+- **URL**: https://gold-signal-debug.preview.emergentagent.com
 - **Status**: ✅ Working
 
 ## Technical Stack

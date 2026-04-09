@@ -623,17 +623,25 @@ PAIR_PARAMETERS = {
 }
 
 # ============ PROFITABILITY FILTERS ============
-# UPDATED: Removed session restrictions, aligned with user's strategy
+# UPDATED: PR #2 - False Signal Reduction Phase 1
 
-# 1. REGIME FILTER - Aligned with user's strategy:
-# IF Uptrend: BUY only | IF Downtrend: SELL only | ELSE: Range Strategy
-ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL"]  # Allow ALL regimes
-SKIP_REGIME = []  # No regime restrictions - let strategy logic handle it
+# 1. REGIME FILTER - Aligned with user's strategy
+ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL"]
+SKIP_REGIME = []
 
-# 2. CONFIDENCE THRESHOLD
-MIN_CONFIDENCE_THRESHOLD = 60  # Lowered to allow more signals
-MIN_REGIME_CONFIDENCE = 0.55   # Lowered for more signals
-HIGH_CONFIDENCE_THRESHOLD = 70
+# 2. CONFIDENCE THRESHOLD - PR #2: Raised from 60% to 70%
+MIN_CONFIDENCE_THRESHOLD = 70  # PR #2: Raised from 60% to 70%
+MIN_REGIME_CONFIDENCE = 0.65   # Require higher regime confidence
+HIGH_CONFIDENCE_THRESHOLD = 75  # Premium threshold
+
+# 3. SIGNAL THROTTLE - PR #2: Increased from 30min to 45min
+SIGNAL_THROTTLE_MINUTES = 45  # Minimum time between signals per pair
+
+# 4. MULTI-TIMEFRAME CONFIRMATION - PR #2
+REQUIRE_MTF_CONFIRMATION = True  # Require multiple timeframe alignment
+
+# 5. PRICE ACTION FILTER - PR #2
+USE_PRICE_ACTION_FILTER = True  # Check support/resistance levels
 
 # 3. SESSION FILTER - DISABLED (No session restrictions as per user request)
 # All pairs trade 24/7 - no time-based restrictions

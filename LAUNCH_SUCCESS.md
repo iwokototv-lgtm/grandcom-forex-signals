@@ -9,7 +9,7 @@
 ## 🚀 YOUR COMPLETE LIVE SYSTEM:
 
 ### 📱 Mobile App (LIVE):
-**URL:** https://grandcom-trading.preview.emergentagent.com
+**URL:** https://gold-signal-debug.preview.emergentagent.com
 
 **Admin Login:**
 ```
