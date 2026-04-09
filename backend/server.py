@@ -2301,22 +2301,17 @@ async def admin_create_signal(
         # Send to Telegram if requested
         if signal.send_telegram:
             try:
-                message = f"""
-🎯 *MANUAL SIGNAL* 🎯
+                message = f"""{signal.pair} {signal.type} @ {signal.entry_price}
 
-📊 *{signal.pair}* - *{signal.type}*
-💰 Entry: {signal.entry_price}
+SL: {signal.sl}
+TP1: {signal.tp1}
+TP2: {signal.tp2}
+TP3: {signal.tp3}
 
-🎯 Take Profits:
-   TP1: {signal.tp1}
-   TP2: {signal.tp2}
-   TP3: {signal.tp3}
+Manual Signal - Created by Admin
+{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 
-🛡️ Stop Loss: {signal.sl}
-
-📌 *Created by Admin*
-⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
-"""
+Powered by Grandcom ML Engine"""
                 telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
                 telegram_channel = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
                 
@@ -2326,8 +2321,7 @@ async def admin_create_signal(
                             f"https://api.telegram.org/bot{telegram_token}/sendMessage",
                             json={
                                 "chat_id": telegram_channel,
-                                "text": message,
-                                "parse_mode": "Markdown"
+                                "text": message
                             }
                         )
                     logger.info(f"Manual signal sent to Telegram: {signal.pair} {signal.type}")
