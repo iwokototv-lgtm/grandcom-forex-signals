@@ -1174,14 +1174,16 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
         
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '@agbaakinlove')
+        gold_channel_id = os.environ.get('TELEGRAM_GOLD_CHANNEL_ID', '@grandcomgold')
         
         # Sanitize analysis text to prevent HTML parsing errors
         safe_analysis = sanitize_html(signal.analysis)
         
         signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
         
-        # Gold pairs use pip-based TP/SL (Twelve Data prices differ from broker prices)
+        # Gold pairs use pip-based TP/SL and go to separate gold channel
         GOLD_PAIRS = {"XAUUSD", "XAUEUR"}
+        target_channel = gold_channel_id if signal.pair in GOLD_PAIRS else channel_id
         
         if signal.pair in GOLD_PAIRS:
             # Calculate pip distances (1 pip = 0.01 for 2-decimal gold on MT5)
@@ -1230,8 +1232,8 @@ Market Regime: {regime_name}
 
 Powered by Grandcom ML Engine"""
         
-        await bot.send_message(chat_id=channel_id, text=message)
-        logger.info(f"✅ Signal sent to Telegram {channel_id}: {signal.pair} {signal.type}")
+        await bot.send_message(chat_id=target_channel, text=message)
+        logger.info(f"✅ Signal sent to Telegram {target_channel}: {signal.pair} {signal.type}")
     except Exception as e:
         logger.error(f"❌ Error sending to Telegram: {e}")
 
