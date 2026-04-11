@@ -21,7 +21,13 @@ from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
 # Import Emergent LLM integration
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# Import Emergent LLM integration (with fallback for Railway)
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    HAS_EMERGENT_LLM = True
+except ImportError:
+    HAS_EMERGENT_LLM = False
+    logger = logging.getLogger(__name__)
 
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
@@ -1133,14 +1139,27 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         ai_response = None
         for attempt in range(max_retries):
             try:
-                chat = LlmChat(
-                    api_key=EMERGENT_LLM_KEY,
-                    session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
-                    system_message=system_message
-                ).with_model("openai", "gpt-4o-mini")
-                
-                user_msg = UserMessage(text=prompt)
-                ai_response = await chat.send_message(user_msg)
+                if HAS_EMERGENT_LLM:
+                    chat = LlmChat(
+                        api_key=EMERGENT_LLM_KEY,
+                        session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
+                        system_message=system_message
+                    ).with_model("openai", "gpt-4o-mini")
+                    
+                    user_msg = UserMessage(text=prompt)
+                    ai_response = await chat.send_message(user_msg)
+                else:
+                    # Fallback: use litellm directly (for Railway deployment)
+                    import litellm
+                    response = await litellm.acompletion(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY),
+                    )
+                    ai_response = response.choices[0].message.content
                 
                 if ai_response and len(ai_response.strip()) > 10:
                     break
