@@ -13,3 +13,4 @@
 {"ts": "2026-04-11T10:14:16.561239", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Duplicate trade: XAUUSD BUY already open", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T10:14:30.034147", "symbol": "XAUEUR", "side": "BUY", "status": "REJECT", "reason": "Gold SL too large: 57.17 (max 50.0)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T10:17:41.387005", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "RR too low: 0.27 (min 1.5)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:18:50.011857", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "RR too low: 0.39 (min 1.5)", "rr": null, "symbol_type": null}
