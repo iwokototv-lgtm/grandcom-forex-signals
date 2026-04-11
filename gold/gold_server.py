@@ -20,7 +20,14 @@ from telegram import Bot
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from motor.motor_asyncio import AsyncIOMotorClient
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+# Railway-safe LLM import: emergentintegrations on Emergent pod, litellm fallback on Railway
+HAS_EMERGENT_LLM = False
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    HAS_EMERGENT_LLM = True
+except ImportError:
+    pass
 
 load_dotenv()
 
@@ -303,14 +310,25 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
         ai_response = None
         for attempt in range(3):
             try:
-                chat = LlmChat(
-                    api_key=OPENAI_API_KEY,
-                    session_id=f"gold_{symbol}_{datetime.now(timezone.utc).timestamp()}_{attempt}",
-                    system_message=system_message
-                ).with_model("openai", "gpt-4o-mini")
-                
-                user_msg = UserMessage(text=prompt)
-                ai_response = await chat.send_message(user_msg)
+                if HAS_EMERGENT_LLM:
+                    chat = LlmChat(
+                        api_key=OPENAI_API_KEY,
+                        session_id=f"gold_{symbol}_{datetime.now(timezone.utc).timestamp()}_{attempt}",
+                        system_message=system_message
+                    ).with_model("openai", "gpt-4o-mini")
+                    user_msg = UserMessage(text=prompt)
+                    ai_response = await chat.send_message(user_msg)
+                else:
+                    import litellm
+                    response = await litellm.acompletion(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        api_key=OPENAI_API_KEY,
+                    )
+                    ai_response = response.choices[0].message.content
                 if ai_response and len(ai_response.strip()) > 10:
                     break
             except Exception as e:
@@ -553,14 +571,133 @@ async def run_gold_signals():
         await asyncio.sleep(2)
     logger.info("🥇 Gold signal generation complete")
 
+# ============ OUTCOME TRACKER ============
+GOLD_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "XAUEUR": "XAU/EUR"}
+
+async def get_live_price(pair: str):
+    try:
+        api_symbol = GOLD_SYMBOL_MAP.get(pair, pair)
+        url = f"https://api.twelvedata.com/price?symbol={api_symbol}&apikey={TWELVE_DATA_API_KEY}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                if "price" in data:
+                    return float(data["price"])
+                logger.warning(f"No live price for {pair}: {data}")
+                return None
+    except Exception as e:
+        logger.error(f"Error fetching live price for {pair}: {e}")
+        return None
+
+def calculate_pips(pair: str, entry: float, exit_price: float, signal_type: str) -> float:
+    pip_value = 0.1  # Gold pip
+    diff = exit_price - entry
+    if signal_type == "SELL":
+        diff = -diff
+    return round(diff / pip_value, 1)
+
+async def check_signal_outcome(signal: dict, current_price: float):
+    signal_type = signal.get("type", "").upper()
+    entry = signal.get("entry_price", 0)
+    sl = signal.get("sl_price", 0)
+    tps = signal.get("tp_levels", [])
+    if not signal_type or not entry or not sl or not tps:
+        return None
+
+    pair = signal.get("pair", "XAUUSD")
+
+    if signal_type == "BUY":
+        if current_price <= sl:
+            return {"status": "CLOSED_SL", "result": "LOSS", "exit_price": current_price,
+                    "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": None}
+        for i in reversed(range(len(tps))):
+            if current_price >= tps[i]:
+                return {"status": f"CLOSED_TP{i+1}", "result": "WIN", "exit_price": current_price,
+                        "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": i+1}
+    elif signal_type == "SELL":
+        if current_price >= sl:
+            return {"status": "CLOSED_SL", "result": "LOSS", "exit_price": current_price,
+                    "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": None}
+        for i in reversed(range(len(tps))):
+            if current_price <= tps[i]:
+                return {"status": f"CLOSED_TP{i+1}", "result": "WIN", "exit_price": current_price,
+                        "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": i+1}
+    return None
+
+async def send_close_notification(signal: dict, outcome: dict):
+    try:
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        result_emoji = "✅" if outcome["result"] == "WIN" else "❌"
+        pips_emoji = "📈" if outcome["pips"] > 0 else "📉"
+        tp_info = f"\n<b>Target Hit:</b> TP{outcome['tp_hit']}" if outcome.get("tp_hit") else ""
+        message = (
+            f"{result_emoji} <b>TRADE CLOSED: {signal.get('pair', 'N/A')}</b> {result_emoji}\n\n"
+            f"<b>📊 Direction:</b> {signal.get('type', 'N/A')}\n"
+            f"<b>💰 Entry:</b> {signal.get('entry_price', 'N/A')}\n"
+            f"<b>🎯 Exit:</b> {outcome['exit_price']}\n"
+            f"<b>{pips_emoji} Pips:</b> {outcome['pips']:+.1f}\n"
+            f"<b>📋 Result:</b> {outcome['result']}{tp_info}\n\n"
+            f"<b>⏰ Closed:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"<i>🤖 Auto-tracked by Grandcom Gold ML Engine</i>"
+        )
+        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
+        logger.info(f"📩 Close notification sent for {signal.get('pair')}")
+    except Exception as e:
+        logger.error(f"Error sending close notification: {e}")
+
+async def check_all_gold_outcomes():
+    try:
+        from bson import ObjectId
+        active = await db.gold_signals.find({"status": "ACTIVE"}).to_list(length=100)
+        if not active:
+            return
+        logger.info(f"🔍 Checking {len(active)} active gold signals...")
+        checked, closed = 0, 0
+        signals_by_pair = {}
+        for s in active:
+            p = s.get("pair")
+            if p not in signals_by_pair:
+                signals_by_pair[p] = []
+            signals_by_pair[p].append(s)
+
+        for pair, signals in signals_by_pair.items():
+            price = await get_live_price(pair)
+            if price is None:
+                continue
+            for signal in signals:
+                checked += 1
+                outcome = await check_signal_outcome(signal, price)
+                if outcome:
+                    await db.gold_signals.update_one(
+                        {"_id": signal["_id"]},
+                        {"$set": {
+                            "status": outcome["status"],
+                            "result": outcome["result"],
+                            "exit_price": outcome["exit_price"],
+                            "pips": outcome["pips"],
+                            "closed_at": datetime.now(timezone.utc)
+                        }}
+                    )
+                    await send_close_notification(signal, outcome)
+                    closed += 1
+                    logger.info(f"📊 {pair} signal closed: {outcome['status']} | {outcome['pips']:+.1f} pips")
+            await asyncio.sleep(0.5)
+        logger.info(f"🔍 Outcome check: {checked} checked, {closed} closed")
+    except Exception as e:
+        logger.error(f"Error in gold outcome check: {e}")
+
 # ============ APP ============
 scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
+    scheduler.add_job(check_all_gold_outcomes, "interval", seconds=60, id="gold_outcome_tracker")
     scheduler.start()
     logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
+    logger.info("🔍 Gold Outcome Tracker started — checking every 60s")
     asyncio.create_task(run_gold_signals())
     yield
     scheduler.shutdown()

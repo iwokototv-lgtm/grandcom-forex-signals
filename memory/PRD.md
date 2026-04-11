@@ -40,6 +40,8 @@ Professional Forex & Gold (XAUUSD/XAUEUR) signals system with fully automatic si
 12. Stale ACTIVE signals cleaned from DB
 13. **Fixed BUY-only bias** — Added technical indicator scoring system (RSI zones, MACD crossovers, BB position, MA alignment) with balanced AI prompt. SELL signals now generated when bearish conditions exist. Strong tech scores (abs>=3) override AI direction.
 14. **Applied same balanced AI scoring to Forex server** — Both forex and gold servers now use identical technical scoring + balanced AI prompt. Regime enforcement preserved: TREND_UP=BUY only, TREND_DOWN=SELL only.
+15. **Added Gold Outcome Tracker** — Auto-tracks active gold signals every 60s, closes them when TP/SL is hit, sends close notifications to `@grandcomgold`. Branded as "Grandcom Gold ML Engine".
+16. **Fixed Railway deployment** — Gold server now has `try/except` fallback from emergentintegrations to litellm, ensuring it works on Railway.
 
 ## Deployment
 - **Emergent Preview**: Both servers running (forex on 8001, gold on 8002)
