@@ -20,7 +20,6 @@ import numpy as np
 from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
-# Import Emergent LLM integration
 # Import Emergent LLM integration (with fallback for Railway)
 try:
     from emergentintegrations.llm.chat import LlmChat, UserMessage
