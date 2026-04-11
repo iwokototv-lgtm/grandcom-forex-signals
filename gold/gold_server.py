@@ -20,7 +20,7 @@ from telegram import Bot
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from motor.motor_asyncio import AsyncIOMotorClient
-import litellm
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 load_dotenv()
 
@@ -146,15 +146,14 @@ async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
         ai_response = None
         for attempt in range(3):
             try:
-                response = await litellm.acompletion(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
+                chat = LlmChat(
                     api_key=OPENAI_API_KEY,
-                )
-                ai_response = response.choices[0].message.content
+                    session_id=f"gold_{symbol}_{datetime.now(timezone.utc).timestamp()}_{attempt}",
+                    system_message=system_message
+                ).with_model("openai", "gpt-4o-mini")
+                
+                user_msg = UserMessage(text=prompt)
+                ai_response = await chat.send_message(user_msg)
                 if ai_response and len(ai_response.strip()) > 10:
                     break
             except Exception as e:

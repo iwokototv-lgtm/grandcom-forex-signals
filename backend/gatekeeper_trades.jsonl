@@ -36,3 +36,13 @@
 {"ts": "2026-04-11T11:52:40.504990", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (13/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T12:11:22.893306", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (15/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T12:12:33.651903", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (15/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:31:55.467026", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:33:06.691478", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:48:20.619016", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:48:34.934783", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:49:17.110748", "symbol": "GBPJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:49:31.242666", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:50:13.209489", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:51:24.084931", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:51:37.610369", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T12:52:32.190232", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
