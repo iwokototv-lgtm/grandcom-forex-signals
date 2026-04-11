@@ -1,0 +1,13 @@
+{"ts": "2026-04-11T10:05:17.334534", "symbol": "XAUEUR", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (98/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:06:40.750177", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (98/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:07:21.509195", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (98/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:08:30.312819", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (98/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:09:22.203017", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Gold RR too low: 0.88 (min 1.8)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:09:35.566487", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Bad entry \u2014 3972.8 pips from EMA50 (max 50 for GOLD)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:09:49.068149", "symbol": "XAUEUR", "side": "BUY", "status": "REJECT", "reason": "High spread: 40.00 pips (max 30 for GOLD)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:12:01.169522", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Bad entry \u2014 3969.0 pips from EMA50 (max 50 for GOLD)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:12:10.458296", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Bad entry \u2014 3969.0 pips from EMA50 (max 50 for GOLD)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:12:24.264286", "symbol": "XAUEUR", "side": "BUY", "status": "REJECT", "reason": "Gold SL too large: 57.17 (max 50.0)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:13:50.220584", "symbol": "XAUUSD", "side": "BUY", "status": "EXECUTE", "reason": "", "rr": 3.33, "symbol_type": "GOLD"}
+{"ts": "2026-04-11T10:14:04.820201", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Duplicate trade: XAUUSD BUY already open", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:14:16.561239", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Duplicate trade: XAUUSD BUY already open", "rr": null, "symbol_type": null}

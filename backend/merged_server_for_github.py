@@ -21,7 +21,7 @@ from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
 # Import Emergent LLM integration
-from emergentintegrations.llm import LlmChat, UserMessage
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
@@ -442,7 +442,8 @@ class ExecutionGatekeeper:
 
             # ── 15. EMA-50 proximity ──────────────────────────
             # Skipped automatically when ema50 == entry (not provided by caller)
-            if ema50 != entry:
+            # Also skip for GOLD pairs — ATR swing strategy doesn't need EMA proximity
+            if ema50 != entry and self.get_symbol_type(symbol) != "GOLD":
                 if not self.is_valid_entry(entry, ema50, symbol):
                     distance = self.price_to_pips(entry - ema50, symbol)
                     return self.reject(
@@ -1394,15 +1395,20 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             logger.info(f"📊 {pair} [{strategy_type}] skipped — confidence {ai_confidence:.1f}% < {early_threshold}%")
             return None
 
-        # FILTER 3b: MULTI-TIMEFRAME CONFIRMATION
-        try:
+        # FILTER 3b: MULTI-TIMEFRAME CONFIRMATION (skip for gold — swing trades use ATR targets)
+        GOLD_PAIRS_MTF_SKIP = {"XAUUSD", "XAUEUR"}
+        if pair not in GOLD_PAIRS_MTF_SKIP:
+            try:
+                signal_direction = ai_analysis.get("signal", "NEUTRAL")
+                mtf_confirmed, mtf_reason = await check_higher_timeframe_alignment(pair, signal_direction)
+                if not mtf_confirmed:
+                    logger.info(f"🕐 {pair} skipped - MTF failed: {mtf_reason}")
+                    return None
+            except Exception as mtf_err:
+                logger.warning(f"⚠️ {pair} MTF check error (allowing): {mtf_err}")
+        else:
             signal_direction = ai_analysis.get("signal", "NEUTRAL")
-            mtf_confirmed, mtf_reason = await check_higher_timeframe_alignment(pair, signal_direction)
-            if not mtf_confirmed:
-                logger.info(f"🕐 {pair} skipped - MTF failed: {mtf_reason}")
-                return None
-        except Exception as mtf_err:
-            logger.warning(f"⚠️ {pair} MTF check error (allowing): {mtf_err}")
+            logger.info(f"🕐 {pair} MTF skipped (gold swing pair)")
 
         # FILTER 3c: CHOPPY MARKET DETECTION
         try:
@@ -1430,7 +1436,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_confidence= regime_info.get('confidence', 0.5)
             risk_multiplier  = regime_info.get('risk_multiplier', 1.0)
 
-            if regime_name in SKIP_REGIME:
+            if regime_name in SKIP_REGIME and pair not in {"XAUUSD", "XAUEUR"}:
                 logger.info(f"📉 {pair} skipped - {regime_name} regime")
                 return None
             if regime_confidence < MIN_REGIME_CONFIDENCE:
@@ -1464,11 +1470,11 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 )
                 return None
 
-            logger.info(f"✅ {pair} strategy={strategy} regime={regime_name} conf={ai_confidence:.1f}%")
+            logger.info(f"✅ {pair} strategy={active_strategy} regime={regime_name} conf={ai_confidence:.1f}%")
 
             # Adjust TP/SL targets per strategy for RANGE signals
             # Range/scalp uses tighter fixed pips, trend uses pair defaults
-            if strategy == "SCALP" and regime_name == "RANGE":
+            if active_strategy == "SCALP" and regime_name == "RANGE":
                 params_used = params.copy()
                 pip_val = params.get("pip_value", 0.0001)
                 # Tighter scalp targets: 3/6/9 pips TP, 8 pip SL
