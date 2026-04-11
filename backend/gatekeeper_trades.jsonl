@@ -26,3 +26,6 @@
 {"ts": "2026-04-11T10:43:49.319869", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Duplicate trade: XAUUSD BUY already open", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T10:43:59.037777", "symbol": "XAUUSD", "side": "BUY", "status": "REJECT", "reason": "Duplicate trade: XAUUSD BUY already open", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T10:44:12.688258", "symbol": "XAUEUR", "side": "BUY", "status": "REJECT", "reason": "High spread: 40.00 pips (max 30 for GOLD)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:49:33.981777", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (3/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:49:47.679236", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (3/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T10:50:44.120633", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (3/3)", "rr": null, "symbol_type": null}
