@@ -46,3 +46,129 @@
 {"ts": "2026-04-11T12:51:24.084931", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T12:51:37.610369", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-11T12:52:32.190232", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:07:46.400987", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:08:02.839048", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:08:29.809802", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:08:57.804821", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:09:40.103023", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:10:50.968852", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:11:04.990338", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:12:01.049091", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:27:15.243729", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:27:29.464936", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:27:57.308043", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:28:25.146345", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:29:08.029873", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:29:22.902897", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:30:18.983672", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:31:29.775571", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:46:43.637325", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:46:58.112148", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:47:54.090324", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:48:35.353840", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:48:49.133679", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:49:44.062891", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:49:59.660964", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T13:50:55.838760", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:06:10.326629", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:06:24.082834", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:07:21.152580", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:08:03.734268", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:09:12.801579", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:10:23.689105", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:25:38.684015", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:25:53.489261", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:26:21.081007", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:26:35.594558", "symbol": "GBPJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:26:49.965027", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:27:31.411707", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:28:40.158716", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T14:29:50.562788", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:25:41.116493", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:25:55.116056", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:26:54.055908", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:28:07.828258", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:43:21.873769", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:43:36.208005", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:44:32.839021", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:45:14.083372", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:45:27.908668", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:46:25.749052", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:46:39.294359", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T18:47:32.830633", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:02:48.029050", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:03:01.358586", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:03:42.661751", "symbol": "GBPJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:03:56.651062", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:04:40.130586", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:04:54.167706", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:05:55.640323", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:06:09.450980", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:07:08.123816", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:22:21.446952", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:22:34.810123", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:23:28.339102", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:24:08.849413", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:25:17.738621", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:25:32.127844", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T19:26:26.226242", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T20:47:23.815967", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T20:48:32.830952", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T20:48:51.419750", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T20:49:47.225702", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:05:01.570020", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:05:17.487991", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:05:44.002049", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:06:11.353005", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:06:51.779995", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:07:05.099397", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:07:32.022665", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:07:58.936172", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:08:12.467692", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:24:21.649963", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:24:35.179258", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:25:28.665014", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:26:08.492750", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:26:22.597638", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:26:50.414103", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:27:18.460691", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:27:31.638798", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:43:37.919530", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:43:51.401110", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:44:44.171130", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:45:24.350258", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:45:38.395804", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:46:04.794627", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:46:31.518461", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T21:46:45.043260", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 21 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:02:59.322461", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:03:13.496755", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:03:40.657594", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:03:54.584684", "symbol": "GBPJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:04:07.569906", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:04:47.214864", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:05:27.451229", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:05:54.476948", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:06:07.736101", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:34:37.573584", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:35:18.719848", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:35:46.243791", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:36:00.140810", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:36:54.849442", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:52:11.478355", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:52:24.674441", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:52:50.643126", "symbol": "EURJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:53:17.450175", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:53:58.093910", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:54:12.084322", "symbol": "AUDJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:54:40.062534", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:55:06.987525", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T22:56:13.674057", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 22 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:11:27.447131", "symbol": "EURUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:11:40.537761", "symbol": "GBPUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:12:33.608192", "symbol": "AUDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:13:14.907840", "symbol": "NZDUSD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:13:53.798945", "symbol": "CHFJPY", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:14:22.497985", "symbol": "GBPCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:14:37.315671", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-11T23:15:29.799978", "symbol": "EURCHF", "side": "BUY", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 23 UTC", "rr": null, "symbol_type": null}
