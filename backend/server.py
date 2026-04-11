@@ -712,7 +712,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
     """Fetch price data from Twelve Data API"""
     try:
         symbol_map = {
-            "XAUUSD": "XAU/USD", "XAUEUR": "XAU/EUR", "EURUSD": "EUR/USD",
+            "EURUSD": "EUR/USD",
             "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY", "EURJPY": "EUR/JPY",
             "GBPJPY": "GBP/JPY", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
             "USDCHF": "USD/CHF", "BTCUSD": "BTC/USD", "NZDUSD": "NZD/USD",
@@ -785,38 +785,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
 PAIR_PARAMETERS = {
-    # ── XAUUSD: Swing trading — ATR-based targets, 4H timeframe ──
-    "XAUUSD": {
-        "enabled":          True,
-        "strategy":         "SWING",       # swing — holds hours to days
-        "timeframe":        "4h",          # 4H candles for swing signals
-        "use_fixed_pips":   False,         # ATR-based — Gold moves vary too much for fixed
-        "atr_multiplier_sl":  1.5,         # SL = 1.5 × ATR(14) on 4H
-        "atr_multiplier_tp1": 2.0,         # TP1 = 2.0 × ATR  (~50-80 pips)
-        "atr_multiplier_tp2": 3.5,         # TP2 = 3.5 × ATR  (~100-140 pips)
-        "atr_multiplier_tp3": 5.0,         # TP3 = 5.0 × ATR  (~150-200 pips)
-        "min_rr":           1.8,           # stricter RR for swing Gold
-        "pip_value":        0.1,
-        "decimal_places":   2,
-        "typical_spread":   0.30,
-        "min_candles":      80,            # need more 4H candles for reliable ATR
-    },
-    # ── XAUEUR: Swing trading — ATR-based targets, 4H timeframe ──
-    "XAUEUR": {
-        "enabled":          True,
-        "strategy":         "SWING",
-        "timeframe":        "4h",
-        "use_fixed_pips":   False,
-        "atr_multiplier_sl":  1.5,
-        "atr_multiplier_tp1": 2.0,
-        "atr_multiplier_tp2": 3.5,
-        "atr_multiplier_tp3": 5.0,
-        "min_rr":           1.8,
-        "pip_value":        0.1,
-        "decimal_places":   2,
-        "typical_spread":   0.40,
-        "min_candles":      80,
-    },
     "BTCUSD": {
         "enabled": False,
         "use_fixed_pips": False,
@@ -1003,7 +971,7 @@ STRATEGY_MIN_CONFIDENCE = {
 MIN_CONFIDENCE_THRESHOLD  = 60   # Forex/JPY baseline (SWING strategy)
 MIN_REGIME_CONFIDENCE     = 0.50 # Regime detector minimum confidence
 HIGH_CONFIDENCE_THRESHOLD = 75
-GOLD_PAIRS                = ["XAUUSD", "XAUEUR"]
+GOLD_PAIRS                = []  # Gold handled by separate gold_server
 GOLD_CONFIDENCE_THRESHOLD = 60   # Gold swing — same as baseline
 SIGNAL_THROTTLE_MINUTES   = 120  # Swing: minimum 2h between signals per pair
 SESSION_FILTERS = {}
@@ -1893,7 +1861,7 @@ async def get_signal(signal_id: str, current_user: dict = Depends(get_current_us
 
 @api_router.post("/signals/generate")
 async def trigger_signal_generation(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    pairs = ["XAUUSD", "XAUEUR", "BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
+    pairs = ["BTCUSD", "EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "AUDUSD", "USDCAD", "USDCHF"]
     for pair in pairs:
         background_tasks.add_task(generate_signal_for_pair, pair)
     return {"message": "Signal generation triggered", "pairs": pairs}
@@ -2210,8 +2178,6 @@ async def get_performance_by_pair(current_user: dict = Depends(get_current_user)
 
 # ============ BACKTEST ENGINE ENDPOINTS ============
 BACKTEST_PAIR_METADATA = {
-    "XAUUSD": {"name":"Gold / US Dollar","type":"commodity"},
-    "XAUEUR": {"name":"Gold / Euro","type":"commodity"},
     "BTCUSD": {"name":"Bitcoin / US Dollar","type":"crypto"},
     "EURUSD": {"name":"Euro / US Dollar","type":"forex"},
     "GBPUSD": {"name":"British Pound / US Dollar","type":"forex"},
