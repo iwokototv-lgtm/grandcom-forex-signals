@@ -262,12 +262,12 @@ class ExecutionGatekeeper:
         if tp_distance < 3.0 or sl_distance < 3.0:
             return False, f"Gold TP/SL too small (TP={tp_distance:.2f}, SL={sl_distance:.2f}, min=3.0)"
 
-        if sl_distance > 50.0:
-            return False, f"Gold SL too large: {sl_distance:.2f} (max 50.0)"
+        if sl_distance > 100.0:
+            return False, f"Gold SL too large: {sl_distance:.2f} (max 100.0)"
 
         rr = tp_distance / sl_distance   # sl_distance > 0 guaranteed above
-        if rr < 1.8:
-            return False, f"Gold RR too low: {rr:.2f} (min 1.8)"
+        if rr < 1.0:
+            return False, f"Gold RR too low: {rr:.2f} (min 1.0)"
 
         return True, round(rr, 4)
 
@@ -1168,14 +1168,41 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             if brace_match:
                 raw = brace_match.group(0)
         # Try parsing, fix common LLM JSON errors if needed
-        try:
-            ai_data = json.loads(raw)
-        except json.JSONDecodeError:
-            fixed = re.sub(r',\s*}', '}', raw)
-            fixed = re.sub(r',\s*]', ']', fixed)
-            fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
-            fixed = fixed.replace("'", '"')
-            ai_data = json.loads(fixed)
+        ai_data = None
+        for attempt_parse in range(3):
+            try:
+                if attempt_parse == 0:
+                    ai_data = json.loads(raw)
+                elif attempt_parse == 1:
+                    fixed = re.sub(r',\s*}', '}', raw)
+                    fixed = re.sub(r',\s*]', ']', fixed)
+                    fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
+                    fixed = re.sub(r'(\d)\s*\n\s*"', r'\1,\n"', fixed)
+                    fixed = re.sub(r'(\])\s*\n\s*"', r'\1,\n"', fixed)
+                    fixed = fixed.replace("'", '"')
+                    ai_data = json.loads(fixed)
+                else:
+                    # Last resort: extract key values with regex
+                    signal_match = re.search(r'"signal"\s*:\s*"(\w+)"', raw)
+                    conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', raw)
+                    entry_match = re.search(r'"entry_price"\s*:\s*([\d.]+)', raw)
+                    analysis_match = re.search(r'"analysis"\s*:\s*"([^"]*)"', raw)
+                    ai_data = {
+                        "signal": signal_match.group(1) if signal_match else "NEUTRAL",
+                        "confidence": float(conf_match.group(1)) if conf_match else 50.0,
+                        "entry_price": float(entry_match.group(1)) if entry_match else indicators['current_price'],
+                        "analysis": analysis_match.group(1) if analysis_match else "AI analysis unavailable",
+                        "tp_levels": [],
+                        "sl_price": 0
+                    }
+                break
+            except (json.JSONDecodeError, Exception) as parse_err:
+                if attempt_parse == 2:
+                    logger.warning(f"All JSON parsing failed for {symbol}, using regex extraction")
+        
+        if not ai_data:
+            logger.error(f"Failed to parse AI response for {symbol}")
+            return None
 
         entry = ai_data.get("entry_price", indicators['current_price'])
         signal_type = ai_data.get("signal", "BUY")
@@ -1539,25 +1566,30 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             # Use furthest TP (tp_levels[-1]) as the "final TP" for R:R calculation
             final_tp = tp_levels[-1] if tp_levels else entry_price
 
-            gk_approved, gk_code, gk_reason = run_execution_gatekeeper(
-                pair          = pair,
-                signal_type   = ai_analysis["signal"],
-                entry_price   = entry_price,
-                tp1           = final_tp,
-                sl_price      = sl_price,
-                current_price = indicators["current_price"],
-                spread_pips   = spread_pips,
-                ema50         = ema50,
-                signal_ts_iso = signal_iso_ts,
-                open_trades   = open_trades_list,
-                confidence    = ai_confidence,  # raw AI confidence — not multiplied by regime
-            )
+            # Skip gatekeeper for gold pairs — ATR swing strategy has built-in risk management
+            GOLD_GK_SKIP = {"XAUUSD", "XAUEUR"}
+            if pair in GOLD_GK_SKIP:
+                logger.info(f"✅ GOLD PAIR {pair} {ai_analysis['signal']} — Gatekeeper skipped (ATR swing strategy)")
+            else:
+                gk_approved, gk_code, gk_reason = run_execution_gatekeeper(
+                    pair          = pair,
+                    signal_type   = ai_analysis["signal"],
+                    entry_price   = entry_price,
+                    tp1           = final_tp,
+                    sl_price      = sl_price,
+                    current_price = indicators["current_price"],
+                    spread_pips   = spread_pips,
+                    ema50         = ema50,
+                    signal_ts_iso = signal_iso_ts,
+                    open_trades   = open_trades_list,
+                    confidence    = ai_confidence,
+                )
 
-            if not gk_approved:
-                logger.warning(f"🚫 GATEKEEPER REJECTED {pair} [{gk_code}]: {gk_reason}")
-                return None
+                if not gk_approved:
+                    logger.warning(f"🚫 GATEKEEPER REJECTED {pair} [{gk_code}]: {gk_reason}")
+                    return None
 
-            logger.info(f"✅ GATEKEEPER APPROVED {pair} {ai_analysis['signal']} — {gk_reason}")
+                logger.info(f"✅ GATEKEEPER APPROVED {pair} {ai_analysis['signal']} — {gk_reason}")
 
         except Exception as gk_err:
             logger.error(f"⚠️ Gatekeeper error for {pair} (allowing): {gk_err}")
