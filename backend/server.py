@@ -748,7 +748,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calculate technical indicators"""
+    """Calculate technical indicators with directional scoring"""
     try:
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         macd = ta.trend.MACD(df["close"])
@@ -758,7 +758,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["ma_20"] = ta.trend.SMAIndicator(df["close"], window=20).sma_indicator()
         df["ma_50"] = ta.trend.SMAIndicator(df["close"], window=50).sma_indicator()
         df["ema_12"] = ta.trend.EMAIndicator(df["close"], window=12).ema_indicator()
-        df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()  # ← for gatekeeper
+        df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
         bollinger = ta.volatility.BollingerBands(df["close"])
         df["bb_upper"] = bollinger.bollinger_hband()
         df["bb_middle"] = bollinger.bollinger_mavg()
@@ -766,18 +766,101 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()
 
         latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        rsi_val = float(latest["rsi"])
+        macd_val = float(latest["macd"])
+        macd_sig = float(latest["macd_signal"])
+        prev_macd = float(prev["macd"])
+        prev_macd_sig = float(prev["macd_signal"])
+        close = float(latest["close"])
+        bb_up = float(latest["bb_upper"])
+        bb_low = float(latest["bb_lower"])
+        bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
+        ma20 = float(latest["ma_20"])
+        ma50 = float(latest["ma_50"])
+
+        # --- Technical direction scoring ---
+        score = 0
+
+        # RSI zones
+        if rsi_val > 75:
+            score -= 3
+        elif rsi_val > 70:
+            score -= 2
+        elif rsi_val > 65:
+            score -= 1
+        elif rsi_val < 25:
+            score += 3
+        elif rsi_val < 30:
+            score += 2
+        elif rsi_val < 35:
+            score += 1
+
+        # MACD crossover
+        macd_bullish_cross = prev_macd <= prev_macd_sig and macd_val > macd_sig
+        macd_bearish_cross = prev_macd >= prev_macd_sig and macd_val < macd_sig
+        if macd_bullish_cross:
+            score += 2
+        elif macd_bearish_cross:
+            score -= 2
+        elif macd_val > macd_sig:
+            score += 1
+        elif macd_val < macd_sig:
+            score -= 1
+
+        # Bollinger Band position
+        bb_position = (close - bb_low) / bb_range
+        if bb_position > 0.95:
+            score -= 2
+        elif bb_position > 0.80:
+            score -= 1
+        elif bb_position < 0.05:
+            score += 2
+        elif bb_position < 0.20:
+            score += 1
+
+        # Price vs MAs
+        if close < ma20 and close < ma50:
+            score -= 1
+        elif close > ma20 and close > ma50:
+            score += 1
+
+        if score >= 2:
+            tech_direction = "BUY"
+        elif score <= -2:
+            tech_direction = "SELL"
+        else:
+            tech_direction = "NEUTRAL"
+
+        # RSI zone label
+        if rsi_val > 70:
+            rsi_zone = "OVERBOUGHT"
+        elif rsi_val < 30:
+            rsi_zone = "OVERSOLD"
+        else:
+            rsi_zone = "NEUTRAL"
+
+        trend = "BULLISH" if close > ma50 else "BEARISH"
+
         return {
-            "current_price": float(latest["close"]),
-            "rsi": float(latest["rsi"]),
-            "macd": float(latest["macd"]),
-            "macd_signal": float(latest["macd_signal"]),
-            "ma_20": float(latest["ma_20"]),
-            "ma_50": float(latest["ma_50"]),
-            "ema_50": float(latest["ema_50"]),     # ← for gatekeeper
-            "bb_upper": float(latest["bb_upper"]),
-            "bb_lower": float(latest["bb_lower"]),
+            "current_price": close,
+            "rsi": rsi_val,
+            "rsi_zone": rsi_zone,
+            "macd": macd_val,
+            "macd_signal": macd_sig,
+            "macd_bullish_cross": macd_bullish_cross,
+            "macd_bearish_cross": macd_bearish_cross,
+            "ma_20": ma20,
+            "ma_50": ma50,
+            "ema_50": float(latest["ema_50"]),
+            "bb_upper": bb_up,
+            "bb_lower": bb_low,
+            "bb_position": round(bb_position, 2),
             "atr": float(latest["atr"]),
-            "trend": "BULLISH" if latest["close"] > latest["ma_50"] else "BEARISH"
+            "trend": trend,
+            "tech_direction": tech_direction,
+            "tech_score": score,
         }
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
@@ -1042,12 +1125,66 @@ def record_trade_result(pair: str, result: str, pips: float):
         daily_pair_performance[key]["loss_pips"] += abs(pips)
 
 async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate AI-powered trading signal with pair-specific optimization"""
+    """Generate AI-powered trading signal with balanced directional analysis"""
     try:
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
         use_fixed_pips = params.get('use_fixed_pips', False)
 
-        system_message = "You are an elite institutional forex and commodities trader. Provide precise, actionable trading signals with strict risk management."
+        system_message = (
+            "You are an elite institutional forex trader who trades BOTH directions. "
+            "You are equally comfortable going LONG (BUY) and SHORT (SELL). "
+            "Your edge comes from identifying reversals at overbought/oversold extremes, not just following trends. "
+            "When indicators show overbought conditions (RSI>70, price at upper Bollinger), you MUST recommend SELL. "
+            "When indicators show oversold conditions (RSI<30, price at lower Bollinger), you MUST recommend BUY. "
+            "Never be biased toward one direction."
+        )
+
+        # Build balanced indicator arguments
+        rsi_val = indicators['rsi']
+        rsi_zone = indicators.get('rsi_zone', 'NEUTRAL')
+        bb_pos = indicators.get('bb_position', 0.5)
+        tech_dir = indicators.get('tech_direction', 'NEUTRAL')
+        tech_score = indicators.get('tech_score', 0)
+
+        bearish_args = []
+        bullish_args = []
+
+        if rsi_val > 70:
+            bearish_args.append(f"RSI at {rsi_val:.1f} is OVERBOUGHT — signals pullback/reversal")
+        elif rsi_val > 60:
+            bearish_args.append(f"RSI at {rsi_val:.1f} approaching overbought")
+        if rsi_val < 30:
+            bullish_args.append(f"RSI at {rsi_val:.1f} is OVERSOLD — signals bounce/reversal")
+        elif rsi_val < 40:
+            bullish_args.append(f"RSI at {rsi_val:.1f} approaching oversold")
+
+        if indicators.get('macd_bearish_cross'):
+            bearish_args.append("MACD crossed BELOW signal — bearish momentum shift")
+        elif indicators['macd'] < indicators['macd_signal']:
+            bearish_args.append("MACD below signal line — bearish momentum")
+        if indicators.get('macd_bullish_cross'):
+            bullish_args.append("MACD crossed ABOVE signal — bullish momentum shift")
+        elif indicators['macd'] > indicators['macd_signal']:
+            bullish_args.append("MACD above signal line — bullish momentum")
+
+        if bb_pos > 0.90:
+            bearish_args.append(f"Price at {bb_pos*100:.0f}% BB range — near UPPER band, expect mean reversion DOWN")
+        elif bb_pos > 0.75:
+            bearish_args.append(f"Price at {bb_pos*100:.0f}% BB range — approaching upper resistance")
+        if bb_pos < 0.10:
+            bullish_args.append(f"Price at {bb_pos*100:.0f}% BB range — near LOWER band, expect mean reversion UP")
+        elif bb_pos < 0.25:
+            bullish_args.append(f"Price at {bb_pos*100:.0f}% BB range — approaching lower support")
+
+        bearish_text = "\n".join(f"  - {a}" for a in bearish_args) if bearish_args else "  - No strong bearish signals"
+        bullish_text = "\n".join(f"  - {a}" for a in bullish_args) if bullish_args else "  - No strong bullish signals"
+
+        if tech_dir == "SELL":
+            direction_hint = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: SELL (score: {tech_score}). You should output SELL unless extremely compelling reason not to."
+        elif tech_dir == "BUY":
+            direction_hint = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: BUY (score: {tech_score}). You should output BUY unless extremely compelling reason not to."
+        else:
+            direction_hint = f"Technical indicators are MIXED (score: {tech_score}). Weigh both arguments equally. Let the indicators decide."
 
         if use_fixed_pips:
             tp1_pips = params.get('fixed_tp1_pips', 5)
@@ -1056,51 +1193,70 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             pip_value = params['pip_value']
 
             prompt = f"""
-            Analyze {symbol} market data and provide a professional trading signal:
+Analyze {symbol} and provide a trading signal. Consider BOTH directions equally.
 
-            === MARKET DATA ===
-            Current Price: {indicators['current_price']}
-            RSI (14): {indicators['rsi']:.2f}
-            MACD: {indicators['macd']:.6f} (Signal: {indicators['macd_signal']:.6f})
-            MA 20: {indicators['ma_20']:.{params['decimal_places']}f}
-            MA 50: {indicators['ma_50']:.{params['decimal_places']}f}
-            Bollinger Upper: {indicators['bb_upper']:.{params['decimal_places']}f}
-            Bollinger Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
-            ATR (14): {indicators['atr']:.{params['decimal_places']}f}
-            Trend Bias: {indicators['trend']}
+=== MARKET DATA ===
+Current Price: {indicators['current_price']}
+RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
+MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
+BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
+ATR: {indicators['atr']:.{params['decimal_places']}f}
 
-            === FIXED PIP TARGETS ===
-            TP1: {tp1_pips} pips | TP2: {tp2_pips} pips | TP3: {tp3_pips} pips
-            SL: ATR × {params['atr_multiplier_sl']} | Pip Value: {pip_value}
+=== BEARISH ARGUMENTS (reasons to SELL) ===
+{bearish_text}
 
-            === REQUIREMENTS ===
-            1. BUY: TP above entry, SL below entry
-            2. SELL: TP below entry, SL above entry
-            3. Round all prices to {params['decimal_places']} decimal places
+=== BULLISH ARGUMENTS (reasons to BUY) ===
+{bullish_text}
 
-            === OUTPUT FORMAT (JSON ONLY) ===
-            {{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
-            RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
-            """
+=== {direction_hint} ===
+
+=== FIXED PIP TARGETS ===
+TP1: {tp1_pips} pips | TP2: {tp2_pips} pips | TP3: {tp3_pips} pips
+SL: ATR x {params['atr_multiplier_sl']} | Pip Value: {pip_value}
+
+=== RULES ===
+- If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
+- If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
+- Do NOT default to BUY just because the overall trend is up
+- BUY: TP above entry, SL below entry | SELL: TP below entry, SL above entry
+- Round all prices to {params['decimal_places']} decimal places
+
+=== OUTPUT FORMAT (JSON ONLY) ===
+{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+"""
         else:
             prompt = f"""
-            Analyze {symbol} market data and provide a professional trading signal:
+Analyze {symbol} and provide a trading signal. Consider BOTH directions equally.
 
-            === MARKET DATA ===
-            Current Price: {indicators['current_price']}
-            RSI: {indicators['rsi']:.2f} | MACD: {indicators['macd']:.6f}
-            MA50: {indicators['ma_50']:.{params['decimal_places']}f}
-            ATR: {indicators['atr']:.{params['decimal_places']}f}
-            Trend: {indicators['trend']}
+=== MARKET DATA ===
+Current Price: {indicators['current_price']}
+RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
+MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
+BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
+ATR: {indicators['atr']:.{params['decimal_places']}f}
 
-            === ATR MULTIPLIERS ===
-            SL: {params['atr_multiplier_sl']} | TP1: {params.get('atr_multiplier_tp1',1.0)} | TP2: {params.get('atr_multiplier_tp2',2.0)} | TP3: {params.get('atr_multiplier_tp3',3.0)}
-            Min R:R: {params['min_rr']}
+=== BEARISH ARGUMENTS (reasons to SELL) ===
+{bearish_text}
 
-            === OUTPUT FORMAT (JSON ONLY) ===
-            {{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
-            RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
-            """
+=== BULLISH ARGUMENTS (reasons to BUY) ===
+{bullish_text}
+
+=== {direction_hint} ===
+
+=== ATR MULTIPLIERS ===
+SL: {params['atr_multiplier_sl']} | TP1: {params.get('atr_multiplier_tp1',1.0)} | TP2: {params.get('atr_multiplier_tp2',2.0)} | TP3: {params.get('atr_multiplier_tp3',3.0)}
+Min R:R: {params['min_rr']}
+
+=== RULES ===
+- If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
+- If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
+- Do NOT default to BUY just because the overall trend is up
+
+=== OUTPUT FORMAT (JSON ONLY) ===
+{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+"""
 
         max_retries = 3
         ai_response = None

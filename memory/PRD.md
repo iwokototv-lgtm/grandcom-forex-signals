@@ -39,6 +39,7 @@ Professional Forex & Gold (XAUUSD/XAUEUR) signals system with fully automatic si
 11. Gold channel routing to `@grandcomgold`
 12. Stale ACTIVE signals cleaned from DB
 13. **Fixed BUY-only bias** — Added technical indicator scoring system (RSI zones, MACD crossovers, BB position, MA alignment) with balanced AI prompt. SELL signals now generated when bearish conditions exist. Strong tech scores (abs>=3) override AI direction.
+14. **Applied same balanced AI scoring to Forex server** — Both forex and gold servers now use identical technical scoring + balanced AI prompt. Regime enforcement preserved: TREND_UP=BUY only, TREND_DOWN=SELL only.
 
 ## Deployment
 - **Emergent Preview**: Both servers running (forex on 8001, gold on 8002)
