@@ -117,7 +117,7 @@ class ExecutionGatekeeper:
         self,
         min_rr:             float = float(os.getenv("GK_MIN_RR",           "1.5")),
         max_signal_age_sec: float = float(os.getenv("GK_MAX_SIGNAL_AGE",   "4")),
-        max_open_trades:    int   = int(  os.getenv("GK_MAX_OPEN_TRADES",  "3")),
+        max_open_trades:    int   = int(  os.getenv("GK_MAX_OPEN_TRADES",  "2")),  # Max 2 concurrent trades
         min_confidence:     float = float(os.getenv("GK_MIN_CONFIDENCE",   "70")),
     ):
         self.min_rr          = min_rr
@@ -793,129 +793,129 @@ PAIR_PARAMETERS = {
     },
     "EURUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00010
     },
     "GBPUSD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "USDJPY": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.010
     },
     "EURJPY": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "GBPJPY": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.5, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.020
     },
     "AUDUSD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "USDCAD": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
     "USDCHF": {
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "NZDUSD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
     "AUDJPY": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CADJPY": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CHFJPY": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "EURAUD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPCAD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "EURCAD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPAUD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.5, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "AUDNZD": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
+        "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00018
     },
     "EURGBP": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "EURCHF": {
         "enabled": True,
         "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
+        "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
 }
@@ -961,13 +961,14 @@ MIN_REGIME_CONFIDENCE     = 0.50 # Regime detector minimum confidence
 HIGH_CONFIDENCE_THRESHOLD = 75
 GOLD_PAIRS                = []  # Gold handled by gold_server.py → @grandcomgold
 GOLD_CONFIDENCE_THRESHOLD = 70   # Gold swing — same as baseline
-SIGNAL_THROTTLE_MINUTES   = 120  # Swing: minimum 2h between signals per pair
+SIGNAL_THROTTLE_MINUTES   = 240  # Minimum 4h between signals per pair (enforced)
+last_signal_time: dict = {}       # {pair: datetime} — tracks last signal sent
 SESSION_FILTERS = {}
 DRAWDOWN_PROTECTION = {
-    "enabled": True,
-    "max_daily_losses": 3,
-    "max_daily_loss_pips": 50,
-    "pause_duration_hours": 4,
+    "enabled":             True,
+    "max_daily_losses":    2,     # Stop after 2 losses in a day (was 3)
+    "max_daily_loss_pips": 30,    # Stop after 30 pips loss (was 50)
+    "pause_duration_hours": 8,    # Pause 8h after hitting limit (was 4)
 }
 daily_pair_performance = {}
 
@@ -1352,6 +1353,16 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             logger.warning(f"🛑 {pair} paused - {pause_reason}")
             return None
 
+        # FILTER 2b: PER-PAIR SIGNAL THROTTLE
+        # Prevents the same pair from firing multiple times in a short window
+        last_ts = last_signal_time.get(pair)
+        if last_ts:
+            elapsed_minutes = (datetime.utcnow() - last_ts).total_seconds() / 60
+            if elapsed_minutes < SIGNAL_THROTTLE_MINUTES:
+                remaining = int(SIGNAL_THROTTLE_MINUTES - elapsed_minutes)
+                logger.info(f"⏳ {pair} throttled — last signal {elapsed_minutes:.0f} min ago, wait {remaining} more min")
+                return None
+
         # ── Strategy-aware timeframe selection ───────────────────
         # Gold (SWING) → 4H candles  |  Forex → 1H  |  Scalp → 15min
         pair_strategy  = params.get("strategy", "SWING" if pair in GOLD_PAIRS else "SWING")
@@ -1589,6 +1600,9 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         signal_dict['risk_multiplier'] = risk_multiplier
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
+
+        # Record signal time for per-pair throttle
+        last_signal_time[pair] = datetime.utcnow()
 
         await send_signal_to_telegram(signal, regime_name, risk_multiplier)
 
