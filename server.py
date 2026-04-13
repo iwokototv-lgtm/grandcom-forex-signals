@@ -20,8 +20,12 @@ import numpy as np
 from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
-# Import Emergent LLM integration
-from emergentintegrations.llm import LlmChat, UserMessage
+# Import Emergent LLM integration (with litellm fallback for Railway)
+try:
+    from emergentintegrations.llm import LlmChat, UserMessage
+    HAS_EMERGENT_LLM = True
+except ImportError:
+    HAS_EMERGENT_LLM = False
 
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
@@ -275,6 +279,71 @@ class ExecutionGatekeeper:
             return False, f"Gold RR too low: {rr:.2f} (min 1.8)"
 
         return True, round(rr, 4)
+
+    # ================================================================
+    # ATR-BASED TP/SL CALCULATION
+    # ================================================================
+
+    def calculate_tp_sl(
+        self, entry: float, atr: float, side: str,
+        sl_mult: float = 1.5, tp_mult: float = 3.0
+    ) -> tuple[float, float]:
+        """
+        Calculate TP and SL from ATR multipliers.
+        Returns (sl_price, tp_price).
+        Used by the EA to verify signal levels are ATR-consistent.
+        """
+        if side == "BUY":
+            sl = round(entry - atr * sl_mult, 5)
+            tp = round(entry + atr * tp_mult, 5)
+        else:
+            sl = round(entry + atr * sl_mult, 5)
+            tp = round(entry - atr * tp_mult, 5)
+        return sl, tp
+
+    # ================================================================
+    # POSITION SIZING
+    # ================================================================
+
+    def position_size(
+        self, balance: float, entry: float, sl: float, symbol: str,
+        risk_pct: float = float(os.getenv("GK_RISK_PER_TRADE", "0.01"))
+    ) -> float:
+        """
+        Risk-based position sizing.
+        Returns lot size rounded to 2 decimal places.
+        risk_pct: fraction of balance to risk (default 1% via GK_RISK_PER_TRADE).
+        """
+        risk_amount = balance * risk_pct
+        pip_risk    = self.price_to_pips(entry - sl, symbol)
+        if pip_risk == 0:
+            return 0.0
+        return round(risk_amount / pip_risk, 2)
+
+    # ================================================================
+    # FULL RUN HELPER  (validate + position size in one call)
+    # ================================================================
+
+    def run(
+        self, signal: dict, open_trades: list = None, balance: float = 10000.0
+    ) -> tuple[bool, str, str, float | None]:
+        """
+        Convenience wrapper used by the MT5 EA or admin endpoints.
+        Returns (approved, code, reason, lot_size).
+        lot_size is None on rejection.
+        """
+        if open_trades is None:
+            open_trades = []
+        result = self.validate(signal, open_trades)
+        if result["status"] != "EXECUTE":
+            return False, "REJECTED", result.get("reason", ""), None
+        lot = self.position_size(
+            balance=balance,
+            entry=float(signal.get("entry", 0)),
+            sl=float(signal.get("sl", 0)),
+            symbol=str(signal.get("symbol", "")),
+        )
+        return True, "OK", result.get("reason", "Approved"), lot
 
     # ================================================================
     # REJECT HELPER
@@ -1095,13 +1164,26 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         ai_response = None
         for attempt in range(max_retries):
             try:
-                chat = LlmChat(
-                    api_key=EMERGENT_LLM_KEY,
-                    session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
-                    system_message=system_message
-                ).with_model("openai", "gpt-4o-mini")
-                user_msg = UserMessage(text=prompt)
-                ai_response = await chat.send_message(user_msg)
+                if HAS_EMERGENT_LLM:
+                    chat = LlmChat(
+                        api_key=EMERGENT_LLM_KEY,
+                        session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
+                        system_message=system_message
+                    ).with_model("openai", "gpt-4o-mini")
+                    user_msg = UserMessage(text=prompt)
+                    ai_response = await chat.send_message(user_msg)
+                else:
+                    # Fallback: litellm (Railway deployment without emergentintegrations)
+                    import litellm
+                    resp = await litellm.acompletion(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt},
+                        ],
+                        api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY),
+                    )
+                    ai_response = resp.choices[0].message.content
                 if ai_response and len(ai_response.strip()) > 10:
                     break
                 else:
@@ -2752,6 +2834,41 @@ async def admin_delete_user(user_id: str, admin_user: dict = Depends(require_adm
 @api_router.get("/admin/pair-config")
 async def get_pair_config(admin_user: dict = Depends(require_admin)):
     return {"success": True, "pairs": PAIR_PARAMETERS, "valid_pairs": list(PAIR_PARAMETERS.keys())}
+
+class PositionSizeRequest(BaseModel):
+    symbol:    str
+    entry:     float
+    sl:        float
+    balance:   float = 10000.0
+    risk_pct:  float = 0.01
+
+@api_router.post("/admin/position-size")
+async def calculate_position_size(req: PositionSizeRequest, admin_user: dict = Depends(require_admin)):
+    """
+    Calculate risk-based lot size for a given signal.
+    Used by the MT5 EA to determine position size before opening a trade.
+    """
+    try:
+        lot = _gatekeeper.position_size(
+            balance=req.balance,
+            entry=req.entry,
+            sl=req.sl,
+            symbol=req.symbol.upper(),
+            risk_pct=req.risk_pct,
+        )
+        pip_risk = _gatekeeper.price_to_pips(req.entry - req.sl, req.symbol)
+        risk_amount = req.balance * req.risk_pct
+        return {
+            "success":      True,
+            "symbol":       req.symbol.upper(),
+            "lot_size":     lot,
+            "pip_risk":     round(pip_risk, 2),
+            "risk_amount":  round(risk_amount, 2),
+            "risk_pct":     req.risk_pct * 100,
+            "balance":      req.balance,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @api_router.get("/admin/filters")
 async def get_profitability_filters(admin_user: dict = Depends(require_admin)):
