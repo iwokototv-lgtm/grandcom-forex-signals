@@ -20,8 +20,12 @@ import numpy as np
 from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
-# Import Emergent LLM integration
-from emergentintegrations.llm import LlmChat, UserMessage
+# Import Emergent LLM integration (with litellm fallback for Railway)
+try:
+    from emergentintegrations.llm import LlmChat, UserMessage
+    HAS_EMERGENT_LLM = True
+except ImportError:
+    HAS_EMERGENT_LLM = False
 
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
@@ -39,485 +43,18 @@ from subscription_service import (
 )
 
 # ============================================================
-# EXECUTION GATEKEEPER  (Safe Execution Mode v2)
-# Your exact class — symbol-aware pip multipliers, per-asset
-# slippage/spread/EMA thresholds, duplicate-trade detection.
+# EXECUTION GATEKEEPER — imported from core/gatekeeper.py
+# Single source of truth. All logic lives in core/gatekeeper.py
 # ============================================================
-import json as _json
-from datetime import timezone as _tz
-
-_gk_logger = logging.getLogger("execution_gatekeeper")
-_GK_LOG_FILE: str = os.getenv("GK_LOG_FILE", "gatekeeper_trades.jsonl")
-
-
-def _gk_log(symbol: str, side: str, result: dict) -> None:
-    """Write every gatekeeper decision to the log file and Python logger."""
-    approved = result.get("status") == "EXECUTE"
-    entry = {
-        "ts":       datetime.utcnow().isoformat(),
-        "symbol":   symbol,
-        "side":     side,
-        "status":   result.get("status"),
-        "reason":   result.get("reason", ""),
-        "rr":       result.get("rr"),
-        "symbol_type": result.get("symbol_type"),
-    }
-    _gk_logger.info(
-        "%s %s %s — %s",
-        result.get("status"), symbol, side,
-        result.get("reason", f"R:R={result.get('rr')}")
-    )
-    if _GK_LOG_FILE:
-        try:
-            with open(_GK_LOG_FILE, "a", encoding="utf-8") as fh:
-                fh.write(_json.dumps(entry) + "\n")
-        except OSError:
-            pass
-
-
-class ExecutionGatekeeper:
-    """
-    Production-grade, symbol-aware trade validator.
-
-    Checks (in order):
-        1.  Signal age          — per-asset tolerance (Gold 10s / JPY 6s / FX 4s)
-        2.  Future timestamp    — rejects clock-skewed / bad signals
-        3.  Session filter      — London 07-16 UTC + New York 12-21 UTC
-        4.  News filter         — placeholder (wire up ForexFactory API)
-        5.  Confidence          — min 65% (GK_MIN_CONFIDENCE)
-        6.  Max open trades     — hard cap (GK_MAX_OPEN_TRADES)
-        7.  Duplicate trade     — same symbol + same side already open
-        8.  Price sanity        — entry / sl / tp must all be > 0
-        9.  Direction structure — BUY: tp>entry>sl  |  SELL: tp<entry<sl
-        10. Risk / Reward       — Gold: min 1.8 via validate_gold_trade()
-                                  FX/JPY: min 1.5 (GK_MIN_RR)
-        11. Slippage (price)    — abs(entry - current_price) per-asset threshold
-        12. Slippage (pips)     — secondary pip-based check
-        13. Spread              — per-asset pip limit
-        14. EMA-50 proximity    — per-asset pip distance
-
-    Env-var overrides (all hot-reloadable via Railway):
-        GK_MIN_RR                (default 1.5)
-        GK_MAX_SIGNAL_AGE        (default 4s  — Forex base)
-        GK_MAX_SIGNAL_AGE_GOLD   (default 10s)
-        GK_MAX_SIGNAL_AGE_JPY    (default 6s)
-        GK_MAX_OPEN_TRADES       (default 3)
-        GK_MIN_CONFIDENCE        (default 65)
-        GK_PRICE_THRESHOLD_GOLD  (default 0.50)
-        GK_PRICE_THRESHOLD_JPY   (default 0.03)
-        GK_PRICE_THRESHOLD_FX    (default 0.0002)
-        GK_LOG_FILE              (default gatekeeper_trades.jsonl)
-    """
-
-    # ── Required signal keys — used for fast key-presence validation ──
-    REQUIRED_KEYS = ("symbol", "side", "entry", "sl", "tp",
-                     "current_price", "spread", "timestamp")
-
-    def __init__(
-        self,
-        min_rr:             float = float(os.getenv("GK_MIN_RR",           "1.5")),
-        max_signal_age_sec: float = float(os.getenv("GK_MAX_SIGNAL_AGE",   "4")),
-        max_open_trades:    int   = int(  os.getenv("GK_MAX_OPEN_TRADES",  "2")),  # Max 2 concurrent trades
-        min_confidence:     float = float(os.getenv("GK_MIN_CONFIDENCE",   "70")),
-    ):
-        self.min_rr          = min_rr
-        self.max_signal_age  = max_signal_age_sec
-        self.max_open_trades = max_open_trades
-        self.min_confidence  = min_confidence
-
-    # ================================================================
-    # SYMBOL HANDLING
-    # ================================================================
-
-    def get_symbol_type(self, symbol: str) -> str:
-        """Classify symbol into GOLD | JPY | FOREX."""
-        s = symbol.upper()
-        if "XAU" in s:
-            return "GOLD"
-        elif "JPY" in s:
-            return "JPY"
-        return "FOREX"
-
-    def get_pip_multiplier(self, symbol: str) -> float:
-        """
-        Pip multiplier:
-          FOREX : 10,000  (e.g. EURUSD  0.0001 = 1 pip)
-          JPY   :    100  (e.g. USDJPY  0.01   = 1 pip)
-          GOLD  :    100  (e.g. XAUUSD  0.01   = 1 pip — $0.01 move)
-        """
-        t = self.get_symbol_type(symbol)
-        return 100.0 if t in ("JPY", "GOLD") else 10_000.0
-
-    def get_thresholds(self, symbol: str) -> dict:
-        """
-        Per-asset thresholds.
-        slippage / spread / ema_distance : in pips
-        price_threshold                  : in raw price units
-          Gold  0.50  (~5 pips on XAUUSD)
-          JPY   0.03  (~3 pips on USDJPY)
-          FX    0.0002 (~2 pips on EURUSD)
-        """
-        t = self.get_symbol_type(symbol)
-        if t == "GOLD":
-            return {
-                "slippage":        10,
-                "spread":          30,
-                "ema_distance":    50,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_GOLD", "0.50")),
-            }
-        elif t == "JPY":
-            return {
-                "slippage":        3,
-                "spread":          3,
-                "ema_distance":    15,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_JPY",  "0.03")),
-            }
-        else:
-            return {
-                "slippage":        2,
-                "spread":          2,
-                "ema_distance":    10,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_FX",   "0.0002")),
-            }
-
-    # ================================================================
-    # CORE CALCULATIONS
-    # ================================================================
-
-    def price_to_pips(self, price_diff: float, symbol: str) -> float:
-        """Convert a raw price difference to pips (always positive)."""
-        return abs(price_diff) * self.get_pip_multiplier(symbol)
-
-    def calculate_rr(
-        self, entry: float, sl: float, tp: float, symbol: str
-    ) -> float:
-        """R:R using pip-based distances. Returns 0.0 if risk is zero."""
-        risk   = self.price_to_pips(entry - sl, symbol)
-        reward = self.price_to_pips(tp - entry, symbol)
-        return round(reward / risk, 4) if risk > 0 else 0.0
-
-    def is_valid_entry(self, entry: float, ema50: float, symbol: str) -> bool:
-        """Return True if entry is within EMA-50 proximity threshold."""
-        thresholds = self.get_thresholds(symbol)
-        distance   = self.price_to_pips(entry - ema50, symbol)
-        return distance <= thresholds["ema_distance"]
-
-    def is_duplicate_trade(self, signal: dict, open_trades: list) -> bool:
-        """Return True if the same symbol+side is already open.
-        Guards against non-dict entries in open_trades list."""
-        sym  = signal.get("symbol", "")
-        side = signal.get("side", "")
-        for trade in open_trades:
-            if not isinstance(trade, dict):
-                continue   # ← BUG FIX: skip malformed entries safely
-            if trade.get("symbol") == sym and trade.get("side") == side:
-                return True
-        return False
-
-    # ================================================================
-    # ADVANCED FILTERS
-    # ================================================================
-
-    def is_valid_session(self, current_time: datetime, symbol: str = "") -> bool:
-        """
-        Gold (XAU): trades 24/7 — always allowed.
-        Forex/JPY:  London 07-16 UTC or New York 12-21 UTC only.
-        """
-        if "XAU" in symbol.upper():
-            return True   # Gold trades around the clock
-        hour    = current_time.hour
-        london  = 7  <= hour < 16
-        newyork = 12 <= hour < 21
-        return london or newyork
-
-    def is_high_impact_news_near(self, current_time: datetime) -> bool:
-        """
-        Placeholder — wire up a ForexFactory / Investing.com API here.
-        Return True when high-impact news is within ±15 min of current_time.
-        """
-        return False
-
-    def is_confident_signal(self, confidence: float) -> bool:
-        return confidence >= self.min_confidence
-
-    # ================================================================
-    # GOLD-SPECIFIC VALIDATION  (XAUUSD / XAUEUR)
-    # ================================================================
-
-    def validate_gold_trade(
-        self, entry: float, sl: float, tp: float
-    ) -> tuple:
-        """
-        Dedicated Gold validator using RAW PRICE distances (not pips).
-        Called only after direction structure is confirmed.
-
-        Rules:
-          TP distance ≥ 3.0   — prevents noise trades
-          SL distance ≥ 3.0   — prevents hairline stops
-          SL distance ≤ 50.0  — caps maximum risk
-          R:R ≥ 1.8            — stricter than Forex default (1.5)
-
-        Returns:
-          (True,  rr: float)   on approval
-          (False, reason: str) on rejection
-        """
-        tp_distance = abs(tp - entry)
-        sl_distance = abs(entry - sl)
-
-        if tp_distance < 3.0 or sl_distance < 3.0:
-            return False, f"Gold TP/SL too small (TP={tp_distance:.2f}, SL={sl_distance:.2f}, min=3.0)"
-
-        if sl_distance > 50.0:
-            return False, f"Gold SL too large: {sl_distance:.2f} (max 50.0)"
-
-        rr = tp_distance / sl_distance   # sl_distance > 0 guaranteed above
-        if rr < 1.8:
-            return False, f"Gold RR too low: {rr:.2f} (min 1.8)"
-
-        return True, round(rr, 4)
-
-    # ================================================================
-    # REJECT HELPER
-    # ================================================================
-
-    def reject(self, reason: str) -> dict:
-        return {"status": "REJECT", "reason": reason}
-
-    # ================================================================
-    # MAIN VALIDATE()
-    # ================================================================
-
-    def validate(self, signal: dict, open_trades: list = None) -> dict:
-        """
-        Run all production checks against a signal dict.
-
-        Required signal keys:
-            symbol, side (BUY/SELL), entry, sl, tp,
-            current_price, spread (pips), timestamp (ISO-8601)
-
-        Optional:
-            ema50      (float, defaults to entry — skips EMA proximity check)
-            confidence (float 0-100, defaults to 0)
-
-        Returns:
-            {"status": "EXECUTE", "rr": float, "confidence": float, "symbol_type": str}
-            {"status": "REJECT",  "reason": str}
-        """
-        # ── Safe mutable default ──────────────────────────────
-        if open_trades is None:
-            open_trades = []
-
-        try:
-            # ── Required key presence check ───────────────────
-            # BUG FIX: explicit KeyError before float() conversion
-            # gives a clear rejection reason instead of a cryptic exception
-            for key in self.REQUIRED_KEYS:
-                if key not in signal:
-                    return self.reject(f"Missing required signal field: '{key}'")
-
-            symbol        = str(signal["symbol"]).upper()
-            side          = str(signal["side"]).upper()
-            entry         = float(signal["entry"])
-            sl            = float(signal["sl"])
-            tp            = float(signal["tp"])
-            current_price = float(signal["current_price"])
-            spread        = float(signal["spread"])
-            timestamp     = signal["timestamp"]
-            ema50         = float(signal.get("ema50", entry))
-            confidence    = float(signal.get("confidence", 0))
-
-            thresholds = self.get_thresholds(symbol)
-            _stype     = self.get_symbol_type(symbol)
-
-            # ── 1. Timestamp parse — always UTC ──────────────
-            signal_time = datetime.fromisoformat(timestamp).astimezone(_tz.utc)
-            now         = datetime.now(_tz.utc)
-            age         = (now - signal_time).total_seconds()
-
-            # ── 2. Future timestamp guard (BUG FIX) ──────────
-            # Negative age means signal is dated in the future —
-            # indicates clock skew or bad data. Hard reject.
-            if age < 0:
-                return self.reject(
-                    f"Signal timestamp is in the future by {abs(age):.2f}s — "
-                    f"possible clock skew or bad data"
-                )
-
-            # ── 3. Signal age — per-asset tolerance ──────────
-            if _stype == "GOLD":
-                _max_age = float(os.getenv("GK_MAX_SIGNAL_AGE_GOLD", "30"))  # Gold 4H signals need more time
-            elif _stype == "JPY":
-                _max_age = float(os.getenv("GK_MAX_SIGNAL_AGE_JPY", "6"))
-            else:
-                _max_age = self.max_signal_age
-            if age > _max_age:
-                return self.reject(
-                    f"Signal too old: {age:.2f}s (max {_max_age}s for {_stype})"
-                )
-
-            # ── 4. Session filter ─────────────────────────────
-            if not self.is_valid_session(signal_time, symbol):
-                return self.reject(
-                    f"Outside trading session (London 07-16 / NY 12-21 UTC) "
-                    f"— hour: {signal_time.hour} UTC"
-                )
-
-            # ── 5. News filter ────────────────────────────────
-            if self.is_high_impact_news_near(signal_time):
-                return self.reject("High-impact news nearby — trade blocked")
-
-            # ── 6. Confidence filter ──────────────────────────
-            if not self.is_confident_signal(confidence):
-                return self.reject(
-                    f"Low confidence: {confidence:.1f}% (min {self.min_confidence}%)"
-                )
-
-            # ── 7. Max open trades ────────────────────────────
-            if len(open_trades) >= self.max_open_trades:
-                return self.reject(
-                    f"Max open trades reached ({len(open_trades)}/{self.max_open_trades})"
-                )
-
-            # ── 8. Duplicate trade ────────────────────────────
-            if self.is_duplicate_trade(signal, open_trades):
-                return self.reject(f"Duplicate trade: {symbol} {side} already open")
-
-            # ── 9. Price sanity (BUG FIX) ────────────────────
-            # Guards against zero / negative prices from bad broker feeds.
-            # Must run before direction check to avoid misleading error messages.
-            for label, val in (("entry", entry), ("sl", sl), ("tp", tp),
-                               ("current_price", current_price)):
-                if val <= 0:
-                    return self.reject(
-                        f"Invalid price: {label}={val} — must be > 0"
-                    )
-
-            # ── 10. Direction structure ───────────────────────
-            if side == "BUY":
-                if not (tp > entry > sl):
-                    return self.reject(
-                        f"Invalid BUY structure: entry={entry}, TP={tp}, SL={sl}"
-                    )
-            elif side == "SELL":
-                if not (tp < entry < sl):
-                    return self.reject(
-                        f"Invalid SELL structure: entry={entry}, TP={tp}, SL={sl}"
-                    )
-            else:
-                return self.reject(f"Invalid side: {side!r} — expected BUY or SELL")
-
-            # ── 11. Risk / Reward ─────────────────────────────
-            # Gold: dedicated raw-price validator (stricter, min R:R 1.8)
-            # Forex / JPY: pip-based calculation (min R:R GK_MIN_RR)
-            if _stype == "GOLD":
-                gold_valid, gold_result = self.validate_gold_trade(entry, sl, tp)
-                if not gold_valid:
-                    return self.reject(gold_result)
-                rr = gold_result
-            else:
-                rr = self.calculate_rr(entry, sl, tp, symbol)
-                if rr < self.min_rr:
-                    return self.reject(f"RR too low: {rr:.2f} (min {self.min_rr})")
-
-            # ── 12. Slippage — price units (fast check) ───────
-            allowed_threshold = thresholds["price_threshold"]
-            price_distance    = abs(entry - current_price)
-            if price_distance > allowed_threshold:
-                return self.reject(
-                    f"Price moved too far: |entry - current| = {price_distance:.5f} "
-                    f"(max {allowed_threshold} for {_stype})"
-                )
-
-            # ── 13. Slippage — pips (secondary check) ─────────
-            slippage = self.price_to_pips(current_price - entry, symbol)
-            if slippage > thresholds["slippage"]:
-                return self.reject(
-                    f"High slippage: {slippage:.2f} pips "
-                    f"(max {thresholds['slippage']} for {_stype})"
-                )
-
-            # ── 14. Spread ────────────────────────────────────
-            if spread <= 0:
-                return self.reject("Invalid spread: must be > 0")
-            if spread > thresholds["spread"]:
-                return self.reject(
-                    f"High spread: {spread:.2f} pips "
-                    f"(max {thresholds['spread']} for {_stype})"
-                )
-
-            # ── 15. EMA-50 proximity ──────────────────────────
-            # Skipped automatically when ema50 == entry (not provided by caller)
-            if ema50 != entry:
-                if not self.is_valid_entry(entry, ema50, symbol):
-                    distance = self.price_to_pips(entry - ema50, symbol)
-                    return self.reject(
-                        f"Bad entry — {distance:.1f} pips from EMA50 "
-                        f"(max {thresholds['ema_distance']} for {_stype})"
-                    )
-
-            # ✅ All checks passed ─────────────────────────────
-            return {
-                "status":      "EXECUTE",
-                "rr":          round(rr, 2),
-                "confidence":  round(confidence, 1),
-                "symbol_type": _stype,
-            }
-
-        except (ValueError, TypeError) as e:
-            # Catches float() conversion failures on bad input data
-            return self.reject(f"Invalid signal data — {type(e).__name__}: {e}")
-        except Exception as e:
-            # Catches any unexpected errors — never crash the trading loop
-            return self.reject(f"Gatekeeper exception [{type(e).__name__}]: {e}")
-
-
-# Module-level singleton — re-use across requests
-_gatekeeper = ExecutionGatekeeper()
-
-
-def run_execution_gatekeeper(
-    pair:          str,
-    signal_type:   str,    # "BUY" or "SELL"
-    entry_price:   float,
-    tp1:           float,  # furthest TP level used as final TP
-    sl_price:      float,
-    current_price: float,
-    spread_pips:   float,  # spread already converted to pips
-    ema50:         float,
-    signal_ts_iso: str,    # ISO-8601 UTC timestamp string
-    open_trades:   list,   # list of {"symbol":…, "side":…} dicts
-    confidence:    float = 0.0,  # 0-100 — passed to confidence filter
-) -> tuple[bool, str, str]:
-    """
-    Thin wrapper around ExecutionGatekeeper.validate().
-    Returns (approved: bool, reason_code: str, reason: str).
-    """
-    signal = {
-        "symbol":        pair,
-        "side":          signal_type,
-        "entry":         entry_price,
-        "sl":            sl_price,
-        "tp":            tp1,
-        "current_price": current_price,
-        "spread":        spread_pips,
-        "timestamp":     signal_ts_iso,
-        "ema50":         ema50,
-        "confidence":    confidence,
-    }
-
-    result = _gatekeeper.validate(signal, open_trades)
-    _gk_log(pair, signal_type, result)
-
-    if result["status"] == "EXECUTE":
-        return (
-            True, "OK",
-            f"Approved — R:R={result['rr']} conf={result['confidence']}% ({result['symbol_type']})"
-        )
-    else:
-        return False, "REJECTED", result.get("reason", "Unknown rejection")
-
+from core.gatekeeper import (
+    ExecutionGatekeeper,
+    run_execution_gatekeeper,
+    _gatekeeper,
+    _gk_log,
+    _GK_LOG_FILE,
+)
 # ============================================================
-# END EXECUTION GATEKEEPER
+# END EXECUTION GATEKEEPER IMPORT
 # ============================================================
 
 
@@ -856,14 +393,14 @@ PAIR_PARAMETERS = {
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CADJPY": {
-        "enabled": True,
+        "enabled": False,  # Removed — insufficient liquidity outside Asian session
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
         "atr_multiplier_sl": 1.3, "min_rr": 1.8,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CHFJPY": {
-        "enabled": True,
+        "enabled": False,  # Removed — insufficient liquidity outside Asian session
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
         "atr_multiplier_sl": 1.3, "min_rr": 1.8,
@@ -898,7 +435,7 @@ PAIR_PARAMETERS = {
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "AUDNZD": {
-        "enabled": True,
+        "enabled": False,  # Removed — low liquidity, choppy, high consecutive losses
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
         "atr_multiplier_sl": 1.2, "min_rr": 1.8,
@@ -965,11 +502,15 @@ SIGNAL_THROTTLE_MINUTES   = 240  # Minimum 4h between signals per pair (enforced
 last_signal_time: dict = {}       # {pair: datetime} — tracks last signal sent
 SESSION_FILTERS = {}
 DRAWDOWN_PROTECTION = {
-    "enabled":             True,
-    "max_daily_losses":    2,     # Stop after 2 losses in a day (was 3)
-    "max_daily_loss_pips": 30,    # Stop after 30 pips loss (was 50)
-    "pause_duration_hours": 8,    # Pause 8h after hitting limit (was 4)
+    "enabled":              True,
+    "max_daily_losses":     2,    # Stop after 2 losses per pair per day
+    "max_daily_loss_pips":  20,   # Stop after 20 pips loss per pair (tightened)
+    "pause_duration_hours": 12,   # 12h pause after limit hit
 }
+
+# Minor pairs get stricter protection — 1 loss pauses for 24h
+MINOR_PAIR_MAX_DAILY_LOSSES = 1   # Only 1 loss allowed for minor/cross pairs
+MINOR_PAIR_PAUSE_HOURS      = 24  # Full day pause after 1 loss on minor pair
 daily_pair_performance = {}
 
 DEFAULT_PAIR_PARAMS = {
@@ -979,45 +520,73 @@ DEFAULT_PAIR_PARAMS = {
     "decimal_places": 5, "typical_spread": 0.00015
 }
 
+# ── Session-optimal pairs ──────────────────────────────────────────
+# Minor/cross pairs only trade during London-NY overlap (12-16 UTC)
+# where spread is tightest and volume is highest.
+# Major pairs trade full London (07-16) + NY (12-21).
+MINOR_PAIRS = {
+    "AUDNZD", "CADJPY", "CHFJPY", "EURAUD", "GBPCAD",
+    "EURCAD", "GBPAUD", "EURGBP", "EURCHF", "AUDJPY",
+    "NZDUSD", "AUDNZD", "GBPJPY", "EURJPY",
+}
+
 def is_session_optimal(pair: str) -> bool:
-    now = datetime.utcnow()
-    current_hour = now.hour
-    current_minute = now.minute
-    if pair not in SESSION_FILTERS:
-        return True
-    filter_config = SESSION_FILTERS[pair]
-    optimal_hours = filter_config.get("optimal_hours", list(range(24)))
-    block_before_close = filter_config.get("block_before_close", 15)
-    if current_hour not in optimal_hours:
-        return False
-    session_end_hours = [8, 16, 21]
-    for end_hour in session_end_hours:
-        if current_hour == end_hour - 1 and current_minute >= (60 - block_before_close):
-            logging.info(f"⏰ {pair} blocked - {block_before_close} mins before session close")
+    now  = datetime.utcnow()
+    hour = now.hour
+    minute = now.minute
+
+    # Minor/cross pairs — only London-NY overlap (12-16 UTC)
+    # Best liquidity, tightest spread, strongest directional moves
+    if pair.upper() in MINOR_PAIRS:
+        if not (12 <= hour < 16):
             return False
+        # Block last 15 min of window
+        if hour == 15 and minute >= 45:
+            return False
+        return True
+
+    # Major pairs — London (07-16) + NY (12-21)
+    london  = 7  <= hour < 16
+    newyork = 12 <= hour < 21
+    if not (london or newyork):
+        return False
+
+    # Block 15 min before session close
+    session_end_hours = [16, 21]
+    for end_hour in session_end_hours:
+        if hour == end_hour - 1 and minute >= 45:
+            return False
+
     return True
 
 def check_drawdown_protection(pair: str) -> tuple[bool, str]:
     global daily_pair_performance
     if not DRAWDOWN_PROTECTION["enabled"]:
         return True, ""
+
     today = datetime.utcnow().date().isoformat()
-    key = f"{pair}_{today}"
+    key   = f"{pair}_{today}"
     if key not in daily_pair_performance:
         daily_pair_performance[key] = {"losses": 0, "loss_pips": 0, "paused_until": None}
     perf = daily_pair_performance[key]
+
     if perf["paused_until"]:
         if datetime.utcnow() < perf["paused_until"]:
-            remaining = (perf["paused_until"] - datetime.utcnow()).seconds // 60
-            return False, f"Paused for {remaining} more minutes (drawdown protection)"
-        else:
-            perf["paused_until"] = None
-    if perf["losses"] >= DRAWDOWN_PROTECTION["max_daily_losses"]:
-        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
-        return False, f"Max daily losses ({perf['losses']}) reached"
+            remaining = int((perf["paused_until"] - datetime.utcnow()).total_seconds() / 60)
+            return False, f"Paused {remaining} min (drawdown protection)"
+        perf["paused_until"] = None
+
+    # Minor/cross pairs get stricter limits — 1 loss = 24h pause
+    is_minor  = pair.upper() in MINOR_PAIRS
+    max_loss  = MINOR_PAIR_MAX_DAILY_LOSSES if is_minor else DRAWDOWN_PROTECTION["max_daily_losses"]
+    pause_hrs = MINOR_PAIR_PAUSE_HOURS      if is_minor else DRAWDOWN_PROTECTION["pause_duration_hours"]
+
+    if perf["losses"] >= max_loss:
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=pause_hrs)
+        return False, f"Max losses ({perf['losses']}) hit for {pair} — paused {pause_hrs}h"
     if perf["loss_pips"] >= DRAWDOWN_PROTECTION["max_daily_loss_pips"]:
-        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
-        return False, f"Max daily loss pips ({perf['loss_pips']}) reached"
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=pause_hrs)
+        return False, f"Max loss pips ({perf['loss_pips']:.0f}) hit for {pair} — paused {pause_hrs}h"
     return True, ""
 
 def record_trade_result(pair: str, result: str, pips: float):
@@ -1095,13 +664,26 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         ai_response = None
         for attempt in range(max_retries):
             try:
-                chat = LlmChat(
-                    api_key=EMERGENT_LLM_KEY,
-                    session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
-                    system_message=system_message
-                ).with_model("openai", "gpt-4o-mini")
-                user_msg = UserMessage(text=prompt)
-                ai_response = await chat.send_message(user_msg)
+                if HAS_EMERGENT_LLM:
+                    chat = LlmChat(
+                        api_key=EMERGENT_LLM_KEY,
+                        session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
+                        system_message=system_message
+                    ).with_model("openai", "gpt-4o-mini")
+                    user_msg = UserMessage(text=prompt)
+                    ai_response = await chat.send_message(user_msg)
+                else:
+                    # Fallback: litellm (Railway deployment without emergentintegrations)
+                    import litellm
+                    resp = await litellm.acompletion(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt},
+                        ],
+                        api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY),
+                    )
+                    ai_response = resp.choices[0].message.content
                 if ai_response and len(ai_response.strip()) > 10:
                     break
                 else:
@@ -1363,6 +945,33 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 logger.info(f"⏳ {pair} throttled — last signal {elapsed_minutes:.0f} min ago, wait {remaining} more min")
                 return None
 
+        # FILTER 2c: CURRENCY CORRELATION PROTECTION
+        # Max 1 open trade per base or quote currency
+        # Prevents: AUDJPY BUY + AUDNZD SELL = double AUD exposure
+        # Prevents: AUDNZD SELL + AUDNZD SELL = 7x same direction
+        pair_upper = pair.upper()
+        base_currency  = pair_upper[:3]   # e.g. AUD from AUDNZD
+        quote_currency = pair_upper[3:6]  # e.g. NZD from AUDNZD
+
+        active_check = await db.signals.find(
+            {"status": "ACTIVE"}, {"pair": 1, "type": 1}
+        ).to_list(length=50)
+
+        for open_sig in active_check:
+            open_pair = open_sig.get("pair", "").upper()
+            if open_pair == pair_upper:
+                logger.info(f"🔒 {pair} BLOCKED — already have ACTIVE {open_pair} signal (exact duplicate)")
+                return None
+            # Check base/quote currency overlap
+            open_base  = open_pair[:3]
+            open_quote = open_pair[3:6]
+            if base_currency in (open_base, open_quote) or quote_currency in (open_base, open_quote):
+                logger.info(
+                    f"🔒 {pair} BLOCKED — currency correlation: "
+                    f"{base_currency}/{quote_currency} overlaps with open {open_pair}"
+                )
+                return None
+
         # ── Strategy-aware timeframe selection ───────────────────
         # Gold (SWING) → 4H candles  |  Forex → 1H  |  Scalp → 15min
         pair_strategy  = params.get("strategy", "SWING" if pair in GOLD_PAIRS else "SWING")
@@ -1596,8 +1205,9 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         )
 
         signal_dict = signal.dict(exclude={"id"})
-        signal_dict['regime']          = regime_name
-        signal_dict['risk_multiplier'] = risk_multiplier
+        signal_dict['regime']              = regime_name
+        signal_dict['risk_multiplier']     = risk_multiplier
+        signal_dict['breakeven_triggered'] = False   # set True when TP1 hit
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
 
@@ -1624,6 +1234,94 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 
 # ============ TELEGRAM BOT ============
 telegram_bot = None
+
+# ============ BREAKEVEN MONITOR ============
+async def check_breakeven_forex():
+    """
+    Runs every 5 minutes. For every ACTIVE forex signal:
+    - Fetches current live price from DB (current_price updated by outcome tracker)
+    - If price reached TP1 AND breakeven not yet triggered:
+        → Updates DB: breakeven_triggered=True, sl_price=entry_price
+        → Sends Telegram notification to move SL to entry
+    """
+    try:
+        active = await db.signals.find(
+            {"status": "ACTIVE", "breakeven_triggered": {"$ne": True}}
+        ).to_list(length=100)
+
+        if not active:
+            return
+
+        for sig in active:
+            pair        = sig.get("pair")
+            signal_type = sig.get("type")
+            entry_price = sig.get("entry_price", 0)
+            tp_levels   = sig.get("tp_levels", [])
+
+            if not pair or not tp_levels or not entry_price:
+                continue
+
+            tp1 = tp_levels[0]
+
+            # Fetch live price
+            df = await get_price_data(pair, interval="1h", outputsize=2)
+            if df is None or len(df) == 0:
+                continue
+
+            current_price = float(df.iloc[-1]["close"])
+
+            # Check TP1 hit
+            tp1_hit = (
+                (signal_type == "BUY"  and current_price >= tp1) or
+                (signal_type == "SELL" and current_price <= tp1)
+            )
+            if not tp1_hit:
+                continue
+
+            logger.info(
+                f"🎯 {pair} TP1 HIT @ {tp1}! Current={current_price} "
+                f"→ Moving SL to breakeven ({entry_price})"
+            )
+
+            # Update DB
+            await db.signals.update_one(
+                {"_id": sig["_id"]},
+                {"$set": {
+                    "breakeven_triggered": True,
+                    "sl_price":            entry_price,
+                    "breakeven_at":        datetime.utcnow(),
+                    "breakeven_price":     current_price,
+                }}
+            )
+
+            # Send Telegram notification
+            if TELEGRAM_BOT_TOKEN:
+                try:
+                    bot       = Bot(token=TELEGRAM_BOT_TOKEN)
+                    channel   = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+                    tp2       = tp_levels[1] if len(tp_levels) > 1 else "N/A"
+                    tp3       = tp_levels[2] if len(tp_levels) > 2 else "N/A"
+                    be_message = (
+                        f"🔔 BREAKEVEN — {pair} {signal_type}\n"
+                        f"\n"
+                        f"✅ TP1 hit @ {tp1}\n"
+                        f"📌 Move SL → {entry_price} (breakeven)\n"
+                        f"\n"
+                        f"Remaining targets:\n"
+                        f"TP2: {tp2}\n"
+                        f"TP3: {tp3}\n"
+                        f"\n"
+                        f"🛡 Trade is now risk-free\n"
+                        f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
+                        f"Grandcom Swing EA\n"
+                    )
+                    await bot.send_message(chat_id=channel, text=be_message)
+                    logger.info(f"✅ Breakeven alert sent for {pair} {signal_type}")
+                except Exception as tg_err:
+                    logger.error(f"Telegram breakeven send error: {tg_err}")
+
+    except Exception as e:
+        logger.error(f"Breakeven monitor error: {e}")
 
 def sanitize_html(text: str) -> str:
     if not text:
@@ -1820,6 +1518,29 @@ async def get_active_signals(current_user: dict = Depends(get_current_user)):
             "created_at": s.get("created_at").isoformat() if s.get("created_at") else None,
             "regime": s.get("regime","UNKNOWN")} for s in active_signals]
         return {"success": True, "count": len(signals_with_status), "signals": signals_with_status}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/signals/breakeven")
+async def get_breakeven_signals_forex(current_user: dict = Depends(get_current_user)):
+    """
+    MT5 EA polls this to get signals where TP1 was hit.
+    EA uses this to move SL to entry on the open trade.
+    """
+    try:
+        signals = await db.signals.find(
+            {"status": "ACTIVE", "breakeven_triggered": True},
+            {"pair":1,"type":1,"entry_price":1,"tp_levels":1,
+             "sl_price":1,"breakeven_price":1,"breakeven_at":1}
+        ).sort("breakeven_at", -1).limit(50).to_list(50)
+        result = [{"id": str(s["_id"]), "pair": s.get("pair"),
+                   "type": s.get("type"), "entry_price": s.get("entry_price"),
+                   "tp_levels": s.get("tp_levels",[]),
+                   "sl_price": s.get("sl_price"),
+                   "breakeven_price": s.get("breakeven_price"),
+                   "breakeven_at": s.get("breakeven_at","").isoformat() if s.get("breakeven_at") else None}
+                  for s in signals]
+        return {"success": True, "breakeven_signals": result, "count": len(result)}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2641,6 +2362,41 @@ async def admin_delete_user(user_id: str, admin_user: dict = Depends(require_adm
 async def get_pair_config(admin_user: dict = Depends(require_admin)):
     return {"success": True, "pairs": PAIR_PARAMETERS, "valid_pairs": list(PAIR_PARAMETERS.keys())}
 
+class PositionSizeRequest(BaseModel):
+    symbol:    str
+    entry:     float
+    sl:        float
+    balance:   float = 10000.0
+    risk_pct:  float = 0.01
+
+@api_router.post("/admin/position-size")
+async def calculate_position_size(req: PositionSizeRequest, admin_user: dict = Depends(require_admin)):
+    """
+    Calculate risk-based lot size for a given signal.
+    Used by the MT5 EA to determine position size before opening a trade.
+    """
+    try:
+        lot = _gatekeeper.position_size(
+            balance=req.balance,
+            entry=req.entry,
+            sl=req.sl,
+            symbol=req.symbol.upper(),
+            risk_pct=req.risk_pct,
+        )
+        pip_risk = _gatekeeper.price_to_pips(req.entry - req.sl, req.symbol)
+        risk_amount = req.balance * req.risk_pct
+        return {
+            "success":      True,
+            "symbol":       req.symbol.upper(),
+            "lot_size":     lot,
+            "pip_risk":     round(pip_risk, 2),
+            "risk_amount":  round(risk_amount, 2),
+            "risk_pct":     req.risk_pct * 100,
+            "balance":      req.balance,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 @api_router.get("/admin/filters")
 async def get_profitability_filters(admin_user: dict = Depends(require_admin)):
     return {"success": True, "filters": {
@@ -2858,6 +2614,14 @@ async def startup_event():
         f"session=London+NY | news filter=placeholder"
     )
     asyncio.create_task(auto_generate_signals())
+
+    # Breakeven monitor — runs every 5 minutes
+    async def _breakeven_loop():
+        while True:
+            await asyncio.sleep(300)   # 5 minutes
+            await check_breakeven_forex()
+    asyncio.create_task(_breakeven_loop())
+    logger.info("✅ Breakeven monitor started — checks every 5 min")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
