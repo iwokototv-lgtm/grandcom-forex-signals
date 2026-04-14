@@ -489,33 +489,37 @@ async def generate_gold_signal(pair: str):
 
         signal_type = ai_analysis.get("signal", "NEUTRAL")
 
-        # Technical override: if tech scoring strongly disagrees with AI, use tech direction
-        tech_dir = indicators.get("tech_direction", "NEUTRAL")
-        tech_score = indicators.get("tech_score", 0)
-
-        if signal_type != "NEUTRAL" and tech_dir != "NEUTRAL" and signal_type != tech_dir:
-            if abs(tech_score) >= 3:
-                logger.info(f"{pair} OVERRIDE: AI said {signal_type} but tech_score={tech_score} -> forcing {tech_dir}")
-                signal_type = tech_dir
-                ai_analysis["signal"] = tech_dir
-                # Recalculate TP/SL for new direction
-                entry = ai_analysis.get("entry_price", indicators["current_price"])
-                atr = indicators["atr"]
-                dp = params["decimal_places"]
-                if tech_dir == "SELL":
-                    ai_analysis["tp_levels"] = [
-                        round(entry - atr * params["atr_multiplier_tp1"], dp),
-                        round(entry - atr * params["atr_multiplier_tp2"], dp),
-                        round(entry - atr * params["atr_multiplier_tp3"], dp),
-                    ]
-                    ai_analysis["sl_price"] = round(entry + atr * params["atr_multiplier_sl"], dp)
-                else:
-                    ai_analysis["tp_levels"] = [
-                        round(entry + atr * params["atr_multiplier_tp1"], dp),
-                        round(entry + atr * params["atr_multiplier_tp2"], dp),
-                        round(entry + atr * params["atr_multiplier_tp3"], dp),
-                    ]
-                    ai_analysis["sl_price"] = round(entry - atr * params["atr_multiplier_sl"], dp)
+        # Technical override removed: this block was inverting signal directions.
+        # When AI returned BUY but tech_dir was SELL (or vice versa), the override
+        # forced the signal to tech_dir — effectively flipping correct AI signals.
+        # The AI prompt already incorporates tech_direction as a strong guide, so
+        # a post-hoc override is redundant and was causing the inversion bug.
+        # tech_dir = indicators.get("tech_direction", "NEUTRAL")
+        # tech_score = indicators.get("tech_score", 0)
+        #
+        # if signal_type != "NEUTRAL" and tech_dir != "NEUTRAL" and signal_type != tech_dir:
+        #     if abs(tech_score) >= 3:
+        #         logger.info(f"{pair} OVERRIDE: AI said {signal_type} but tech_score={tech_score} -> forcing {tech_dir}")
+        #         signal_type = tech_dir
+        #         ai_analysis["signal"] = tech_dir
+        #         # Recalculate TP/SL for new direction
+        #         entry = ai_analysis.get("entry_price", indicators["current_price"])
+        #         atr = indicators["atr"]
+        #         dp = params["decimal_places"]
+        #         if tech_dir == "SELL":
+        #             ai_analysis["tp_levels"] = [
+        #                 round(entry - atr * params["atr_multiplier_tp1"], dp),
+        #                 round(entry - atr * params["atr_multiplier_tp2"], dp),
+        #                 round(entry - atr * params["atr_multiplier_tp3"], dp),
+        #             ]
+        #             ai_analysis["sl_price"] = round(entry + atr * params["atr_multiplier_sl"], dp)
+        #         else:
+        #             ai_analysis["tp_levels"] = [
+        #                 round(entry + atr * params["atr_multiplier_tp1"], dp),
+        #                 round(entry + atr * params["atr_multiplier_tp2"], dp),
+        #                 round(entry + atr * params["atr_multiplier_tp3"], dp),
+        #             ]
+        #             ai_analysis["sl_price"] = round(entry - atr * params["atr_multiplier_sl"], dp)
 
         if signal_type == "NEUTRAL":
             logger.info(f"No trade signal for {pair} (NEUTRAL)")
