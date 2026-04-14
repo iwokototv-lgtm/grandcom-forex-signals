@@ -520,42 +520,87 @@ DEFAULT_PAIR_PARAMS = {
     "decimal_places": 5, "typical_spread": 0.00015
 }
 
-# ── Session-optimal pairs ──────────────────────────────────────────
-# Minor/cross pairs only trade during London-NY overlap (12-16 UTC)
-# where spread is tightest and volume is highest.
-# Major pairs trade full London (07-16) + NY (12-21).
+# ══════════════════════════════════════════════════════════════════
+# SESSION FILTERS — Aligned with Forex_Trading_Sessions-PAIRS.docx
+# ══════════════════════════════════════════════════════════════════
+#
+# Session windows (UTC):
+#   Asian session :  00:00 – 09:00 UTC  (Tokyo pairs)
+#   London session:  07:00 – 16:00 UTC  (EUR/GBP pairs)
+#   New York      :  12:00 – 21:00 UTC  (USD/CAD pairs)
+#   London→NY     :  12:00 – 16:00 UTC  (BEST overlap — tightest spread)
+#   Asian→London  :  07:00 – 09:00 UTC  (crossover for GBPJPY/EURJPY)
+#
+# Strategy: Each pair only generates signals during its optimal session.
+# This prevents: AUDNZD signals at 3am, CADJPY signals at NY open, etc.
+# ══════════════════════════════════════════════════════════════════
+
+# ── Minor/cross pairs (strict — 1 loss = 24h pause) ──────────────
 MINOR_PAIRS = {
     "AUDNZD", "CADJPY", "CHFJPY", "EURAUD", "GBPCAD",
     "EURCAD", "GBPAUD", "EURGBP", "EURCHF", "AUDJPY",
-    "NZDUSD", "AUDNZD", "GBPJPY", "EURJPY",
+}
+
+# ── Per-pair session windows (start_hour, end_hour) UTC ──────────
+# Based on document: Asian=00-09, London=07-16, NY=12-21
+# Swing strategy: only trade within the pair's natural session
+PAIR_SESSION_WINDOWS = {
+    # ── Best trend pairs (London + NY) — widest window ──
+    "EURUSD":  (7,  21),   # London + NY — best trend pair
+    "GBPUSD":  (7,  21),   # London + NY — best trend pair
+    "USDCHF":  (7,  21),   # London + NY
+    "USDCAD":  (12, 21),   # NY only (CAD = North American pair)
+
+    # ── USD/JPY trades all sessions ──
+    "USDJPY":  (0,  21),   # Asian + London + NY
+
+    # ── JPY crosses — Asian + London ──
+    "EURJPY":  (0,  16),   # Asian + London (key overlap pair)
+    "GBPJPY":  (0,  16),   # Asian + London (high volatility)
+    "AUDJPY":  (0,  9),    # Asian only (DISABLED — low liquidity outside Asian)
+    "CADJPY":  (0,  9),    # Asian only (DISABLED)
+    "CHFJPY":  (0,  9),    # Asian only (DISABLED)
+
+    # ── AUD/NZD pairs — Asian + NY crossover ──
+    "AUDUSD":  (0,  21),   # Asian + NY (clean mover per document)
+    "NZDUSD":  (0,  21),   # Asian + NY (clean mover per document)
+    "AUDNZD":  (0,  9),    # Asian only (DISABLED — purely Asian, too choppy)
+
+    # ── EUR/GBP cross pairs — London + NY overlap ──
+    "GBPCAD":  (12, 16),   # London→NY overlap only (cross pair)
+    "EURCAD":  (12, 16),   # London→NY overlap only (cross pair)
+    "EURAUD":  (7,  16),   # Asian→London crossover + London
+    "GBPAUD":  (7,  16),   # Asian→London crossover + London
+    "EURGBP":  (7,  16),   # London only
+    "EURCHF":  (7,  16),   # London only
 }
 
 def is_session_optimal(pair: str) -> bool:
-    now  = datetime.utcnow()
-    hour = now.hour
+    """
+    Returns True only when the pair is in its documented optimal session.
+    Blocks trading outside natural session windows to reduce false signals.
+    Aligns with Forex_Trading_Sessions-PAIRS.docx strategy.
+    """
+    now    = datetime.utcnow()
+    hour   = now.hour
     minute = now.minute
+    p      = pair.upper()
 
-    # Minor/cross pairs — only London-NY overlap (12-16 UTC)
-    # Best liquidity, tightest spread, strongest directional moves
-    if pair.upper() in MINOR_PAIRS:
-        if not (12 <= hour < 16):
-            return False
-        # Block last 15 min of window
-        if hour == 15 and minute >= 45:
-            return False
+    # Get session window for this pair
+    window = PAIR_SESSION_WINDOWS.get(p)
+    if window is None:
+        # Unknown pair — allow trading (conservative fallback)
         return True
 
-    # Major pairs — London (07-16) + NY (12-21)
-    london  = 7  <= hour < 16
-    newyork = 12 <= hour < 21
-    if not (london or newyork):
+    start_h, end_h = window
+
+    # Block outside session window
+    if not (start_h <= hour < end_h):
         return False
 
-    # Block 15 min before session close
-    session_end_hours = [16, 21]
-    for end_hour in session_end_hours:
-        if hour == end_hour - 1 and minute >= 45:
-            return False
+    # Block last 15 minutes before session close (spread widens)
+    if hour == end_h - 1 and minute >= 45:
+        return False
 
     return True
 
