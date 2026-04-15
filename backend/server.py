@@ -208,6 +208,7 @@ class Signal(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     closed_at: Optional[datetime] = None
     is_premium: bool = False
+    partial_profit_strategy: Optional[str] = None
 
 class SubscriptionUpdate(BaseModel):
     tier: str
@@ -331,65 +332,65 @@ PAIR_PARAMETERS = {
     "EURUSD": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00010
     },
     "GBPUSD": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "USDJPY": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.010
     },
     "EURJPY": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "GBPJPY": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.5, "min_rr": 1.5,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.020
     },
     "AUDUSD": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "USDCAD": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
     "USDCHF": {
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "NZDUSD": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.2, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
     "AUDJPY": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
         "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CADJPY": {
@@ -410,28 +411,28 @@ PAIR_PARAMETERS = {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPCAD": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.4, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "EURCAD": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 5, "fixed_tp2_pips": 10, "fixed_tp3_pips": 15, "fixed_sl_pips": 15,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.3, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPAUD": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.5, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "AUDNZD": {
@@ -445,17 +446,62 @@ PAIR_PARAMETERS = {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "EURCHF": {
         "enabled": True,
         "use_fixed_pips": True,
         "fixed_tp1_pips": 6, "fixed_tp2_pips": 12, "fixed_tp3_pips": 18, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.8,
+        "atr_multiplier_sl": 1.0, "min_rr": 1.6,
         "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
 }
+
+# ============ PARTIAL PROFIT CONFIGURATION ============
+# Defines position-closing percentages at each TP level per pair category.
+# FOREX: standard major/cross pairs — lock in 60% at TP1, reduce risk early.
+# JPY:   higher volatility pairs — take 65% at TP1 for faster profit capture.
+PARTIAL_PROFIT_CONFIG = {
+    "FOREX": {
+        "enabled": True,
+        "tp1_close_percent": 60,  # Close 60% at TP1
+        "tp2_close_percent": 25,  # Close 25% at TP2
+        "tp3_close_percent": 15,  # Close 15% at TP3
+    },
+    "JPY": {
+        "enabled": True,
+        "tp1_close_percent": 65,  # Close 65% at TP1
+        "tp2_close_percent": 20,  # Close 20% at TP2
+        "tp3_close_percent": 15,  # Close 15% at TP3
+    }
+}
+
+# JPY pairs that use the faster profit-taking profile
+JPY_PAIRS = {"USDJPY", "EURJPY", "GBPJPY", "AUDJPY"}
+
+
+def get_partial_profit_strategy(pair: str) -> str:
+    """
+    Returns a human-readable partial profit strategy string for a given pair.
+    JPY pairs use the faster 65/20/15 split; all other Forex pairs use 60/25/15.
+    """
+    pair_upper = pair.upper()
+    if pair_upper in JPY_PAIRS:
+        cfg = PARTIAL_PROFIT_CONFIG["JPY"]
+        return (
+            f"TP1 ({cfg['tp1_close_percent']}% close), "
+            f"TP2 ({cfg['tp2_close_percent']}% close) \u2192 Move SL to Entry, "
+            f"TP3 ({cfg['tp3_close_percent']}% close) \u2192 Risk-free"
+        )
+    else:
+        cfg = PARTIAL_PROFIT_CONFIG["FOREX"]
+        return (
+            f"TP1 ({cfg['tp1_close_percent']}% close), "
+            f"TP2 ({cfg['tp2_close_percent']}% close) \u2192 Move SL to Entry, "
+            f"TP3 ({cfg['tp3_close_percent']}% close) \u2192 Risk-free"
+        )
+
 
 # ============ PROFITABILITY FILTERS ============
 # ============================================================
@@ -1236,17 +1282,18 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         display_confidence = round(ai_confidence, 1)   # always show raw AI confidence
 
         signal = Signal(
-            pair         = pair,
-            type         = ai_analysis["signal"],
-            entry_price  = entry_price,
-            current_price= indicators["current_price"],
-            tp_levels    = tp_levels,
-            sl_price     = sl_price,
-            confidence   = display_confidence,          # raw AI % — shown in Telegram + MT5
-            analysis     = f"[{regime_name} | score={adjusted_score:.0f}] {ai_analysis['analysis']}",
-            timeframe    = pair_timeframe.upper(),
-            risk_reward  = risk_reward,
-            is_premium   = display_confidence >= effective_min  # premium = meets threshold
+            pair                    = pair,
+            type                    = ai_analysis["signal"],
+            entry_price             = entry_price,
+            current_price           = indicators["current_price"],
+            tp_levels               = tp_levels,
+            sl_price                = sl_price,
+            confidence              = display_confidence,          # raw AI % — shown in Telegram + MT5
+            analysis                = f"[{regime_name} | score={adjusted_score:.0f}] {ai_analysis['analysis']}",
+            timeframe               = pair_timeframe.upper(),
+            risk_reward             = risk_reward,
+            is_premium              = display_confidence >= effective_min,  # premium = meets threshold
+            partial_profit_strategy = get_partial_profit_strategy(pair)
         )
 
         signal_dict = signal.dict(exclude={"id"})
@@ -1500,7 +1547,14 @@ async def get_signals(limit: int = 50, current_user: dict = Depends(get_current_
     if current_user["subscription_tier"] == "FREE":
         query["is_premium"] = False
     signals = await db.signals.find(query).sort("created_at", -1).limit(limit).to_list(limit)
-    return [Signal(id=str(s["_id"]), **{k: v for k, v in s.items() if k != "_id"}) for s in signals]
+    result = []
+    for s in signals:
+        data = {k: v for k, v in s.items() if k != "_id"}
+        # Backfill partial_profit_strategy for signals stored before this field was added
+        if not data.get("partial_profit_strategy"):
+            data["partial_profit_strategy"] = get_partial_profit_strategy(data.get("pair", ""))
+        result.append(Signal(id=str(s["_id"]), **data))
+    return result
 
 @api_router.get("/signals/history")
 async def get_signals_history(limit: int = 50, pair: Optional[str] = None, result: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -1598,7 +1652,11 @@ async def get_signal(signal_id: str, current_user: dict = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Signal not found")
     if signal.get("is_premium") and current_user["subscription_tier"] == "FREE":
         raise HTTPException(status_code=403, detail="Premium subscription required")
-    return Signal(id=str(signal["_id"]), **{k: v for k, v in signal.items() if k != "_id"})
+    data = {k: v for k, v in signal.items() if k != "_id"}
+    # Backfill partial_profit_strategy for signals stored before this field was added
+    if not data.get("partial_profit_strategy"):
+        data["partial_profit_strategy"] = get_partial_profit_strategy(data.get("pair", ""))
+    return Signal(id=str(signal["_id"]), **data)
 
 @api_router.post("/signals/generate")
 async def trigger_signal_generation(background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
