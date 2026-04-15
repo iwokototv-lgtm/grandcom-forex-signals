@@ -52,7 +52,7 @@ GOLD_PAIRS = {
         "atr_multiplier_tp1": 2.0,
         "atr_multiplier_tp2": 3.5,
         "atr_multiplier_tp3": 5.0,
-        "min_rr": 1.8,
+        "min_rr": 2.0,
         "min_confidence": 60,
     },
     "XAUEUR": {
@@ -63,13 +63,20 @@ GOLD_PAIRS = {
         "atr_multiplier_tp1": 2.0,
         "atr_multiplier_tp2": 3.5,
         "atr_multiplier_tp3": 5.0,
-        "min_rr": 1.8,
+        "min_rr": 2.0,
         "min_confidence": 60,
     },
 }
 
 SIGNAL_INTERVAL_MINUTES = 2
 MIN_CONFIDENCE = 60
+
+PARTIAL_PROFIT_CONFIG = {
+    "enabled": True,
+    "tp1_close_percent": 50,  # Close 50% at TP1
+    "tp2_close_percent": 30,  # Close 30% at TP2
+    "tp3_close_percent": 20,  # Close 20% at TP3
+}
 
 # ============ DB ============
 client = AsyncIOMotorClient(MONGO_URL)
@@ -453,11 +460,25 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
             f"SL: {sl_price}\n"
         )
 
+        # Build partial profit block when enabled
+        partial_profit_block = ""
+        if PARTIAL_PROFIT_CONFIG.get("enabled") and len(tp_levels) >= 3:
+            tp1_pct = PARTIAL_PROFIT_CONFIG["tp1_close_percent"]
+            tp2_pct = PARTIAL_PROFIT_CONFIG["tp2_close_percent"]
+            tp3_pct = PARTIAL_PROFIT_CONFIG["tp3_close_percent"]
+            partial_profit_block = (
+                f"\n📊 <b>Partial Profit Strategy:</b>\n"
+                f"TP1 ({tp1_pct}% close): {tp_levels[0]}\n"
+                f"TP2 ({tp2_pct}% close): {tp_levels[1]} → Move SL to Entry\n"
+                f"TP3 ({tp3_pct}% close): {tp_levels[2]} → Risk-free\n"
+            )
+
         safe_analysis = sanitize_html(analysis)
         info_message = (
             f"<b>📊 R:R:</b> 1:{risk_reward}  "
             f"<b>⚡ AI Confidence:</b> {confidence}%\n"
-            f"<b>📝</b> {safe_analysis}\n"
+            f"<b>📝</b> {safe_analysis}"
+            f"{partial_profit_block}\n"
             f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
             f"| Grandcom Gold ML Engine</i>"
         )
