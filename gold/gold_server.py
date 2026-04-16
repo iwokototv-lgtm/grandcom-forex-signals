@@ -109,79 +109,42 @@ def calculate_indicators(df, params):
         atr_ind = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14)
         df["atr"] = atr_ind.average_true_range()
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
         dp = params["decimal_places"]
 
         rsi_val = float(latest["rsi"])
         macd_val = float(latest["macd"])
         macd_sig = float(latest["macd_signal"])
-        prev_macd = float(prev["macd"])
-        prev_macd_sig = float(prev["macd_signal"])
         close = float(latest["close"])
         bb_up = float(latest["bb_upper"])
         bb_low = float(latest["bb_lower"])
         bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
         ma20 = float(latest["ma_20"])
         ma50 = float(latest["ma_50"])
+        bb_position = (close - bb_low) / bb_range
 
-        # --- Technical direction scoring ---
-        # Score > 0 = bullish bias, Score < 0 = bearish bias
-        score = 0
-
-        # RSI: overbought (>70) = sell signal, oversold (<30) = buy signal
-        if rsi_val > 75:
-            score -= 3
-        elif rsi_val > 70:
-            score -= 2
-        elif rsi_val > 65:
-            score -= 1
-        elif rsi_val < 25:
-            score += 3
-        elif rsi_val < 30:
-            score += 2
-        elif rsi_val < 35:
-            score += 1
-
-        # MACD crossover detection
-        macd_bullish_cross = prev_macd <= prev_macd_sig and macd_val > macd_sig
-        macd_bearish_cross = prev_macd >= prev_macd_sig and macd_val < macd_sig
-        if macd_bullish_cross:
-            score += 2
-        elif macd_bearish_cross:
-            score -= 2
-        elif macd_val > macd_sig:
-            score += 1
-        elif macd_val < macd_sig:
-            score -= 1
-
-        # Bollinger Band position
-        bb_position = (close - bb_low) / bb_range  # 0=lower band, 1=upper band
-        if bb_position > 0.95:
-            score -= 2  # At/above upper band = overbought
-        elif bb_position > 0.80:
-            score -= 1
-        elif bb_position < 0.05:
-            score += 2  # At/below lower band = oversold
-        elif bb_position < 0.20:
-            score += 1
-
-        # Price vs MAs
-        if close < ma20 and close < ma50:
-            score -= 1  # Below both MAs = bearish
-        elif close > ma20 and close > ma50:
-            score += 1  # Above both MAs = bullish
-
-        # Determine technical direction
-        if score >= 2:
-            tech_direction = "BUY"
-        elif score <= -2:
-            tech_direction = "SELL"
+        # --- TREND-FOLLOWING DIRECTION ---
+        # Primary: price vs MA50 determines trend
+        # Override ONLY at extreme RSI levels
+        if close > ma50:
+            trend = "BULLISH"
+            # Default: follow the uptrend = BUY
+            if rsi_val > 75 and bb_position > 0.95:
+                # Extremely overbought — allow SELL counter-trend
+                signal_direction = "SELL"
+                logger.info(f"EXTREME OVERBOUGHT override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> SELL")
+            else:
+                signal_direction = "BUY"
         else:
-            tech_direction = "NEUTRAL"
+            trend = "BEARISH"
+            # Default: follow the downtrend = SELL
+            if rsi_val < 25 and bb_position < 0.05:
+                # Extremely oversold — allow BUY counter-trend
+                signal_direction = "BUY"
+                logger.info(f"EXTREME OVERSOLD override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> BUY")
+            else:
+                signal_direction = "SELL"
 
-        trend = "BULLISH" if close > ma50 else "BEARISH"
-
-        # RSI zone description
+        # RSI zone label
         if rsi_val > 70:
             rsi_zone = "OVERBOUGHT"
         elif rsi_val < 30:
@@ -189,7 +152,7 @@ def calculate_indicators(df, params):
         else:
             rsi_zone = "NEUTRAL"
 
-        logger.info(f"Technical scoring: score={score}, direction={tech_direction}, RSI={rsi_val:.1f}({rsi_zone}), MACD_cross={'BULL' if macd_bullish_cross else 'BEAR' if macd_bearish_cross else 'NONE'}, BB_pos={bb_position:.2f}")
+        logger.info(f"Trend: {trend} | Direction: {signal_direction} | RSI={rsi_val:.1f}({rsi_zone}) | BB_pos={bb_position:.2f} | Price={close} vs MA50={ma50:.2f}")
 
         return {
             "current_price": round(close, dp),
@@ -197,8 +160,6 @@ def calculate_indicators(df, params):
             "rsi_zone": rsi_zone,
             "macd": macd_val,
             "macd_signal": macd_sig,
-            "macd_bullish_cross": macd_bullish_cross,
-            "macd_bearish_cross": macd_bearish_cross,
             "ma_20": round(ma20, dp),
             "ma_50": round(ma50, dp),
             "bb_upper": round(bb_up, dp),
@@ -206,8 +167,7 @@ def calculate_indicators(df, params):
             "bb_position": round(bb_position, 2),
             "atr": round(float(latest["atr"]), dp),
             "trend": trend,
-            "tech_direction": tech_direction,
-            "tech_score": score,
+            "signal_direction": signal_direction,
         }
     except Exception as e:
         logger.error(f"Indicator calc error: {e}")
@@ -216,94 +176,42 @@ def calculate_indicators(df, params):
 # ============ AI ANALYSIS ============
 async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
     try:
+        # Direction is ALREADY decided by trend (calculate_indicators)
+        # AI only provides confidence, entry price, and analysis text
+        forced_direction = indicators['signal_direction']
+
         system_message = (
-            "You are an elite institutional gold trader who trades BOTH directions. "
-            "You are equally comfortable going LONG (BUY) and SHORT (SELL). "
-            "Your edge comes from identifying reversals at overbought/oversold extremes, not just following trends. "
-            "When indicators show overbought conditions (RSI>70, price at upper Bollinger), you MUST recommend SELL. "
-            "When indicators show oversold conditions (RSI<30, price at lower Bollinger), you MUST recommend BUY. "
-            "Never be biased toward one direction."
+            "You are an elite institutional gold trader. "
+            "You will be given a trading direction (BUY or SELL) based on trend analysis. "
+            "Your job is to assess confidence (0-100) and provide a brief analysis. "
+            "If the setup looks weak, set confidence below 60 to filter it out."
         )
 
-        # Build balanced indicator summary for the AI
-        rsi_val = indicators['rsi']
-        rsi_zone = indicators['rsi_zone']
-        bb_pos = indicators['bb_position']
-        tech_dir = indicators['tech_direction']
-        tech_score = indicators['tech_score']
-
-        # Create explicit bearish/bullish arguments
-        bearish_args = []
-        bullish_args = []
-
-        if rsi_val > 70:
-            bearish_args.append(f"RSI at {rsi_val:.1f} is OVERBOUGHT — historically signals pullback/reversal")
-        elif rsi_val > 60:
-            bearish_args.append(f"RSI at {rsi_val:.1f} is approaching overbought territory")
-        if rsi_val < 30:
-            bullish_args.append(f"RSI at {rsi_val:.1f} is OVERSOLD — historically signals bounce/reversal")
-        elif rsi_val < 40:
-            bullish_args.append(f"RSI at {rsi_val:.1f} is approaching oversold territory")
-
-        if indicators['macd_bearish_cross']:
-            bearish_args.append("MACD just crossed BELOW signal line — bearish momentum shift")
-        elif indicators['macd'] < indicators['macd_signal']:
-            bearish_args.append("MACD is below signal line — bearish momentum")
-        if indicators['macd_bullish_cross']:
-            bullish_args.append("MACD just crossed ABOVE signal line — bullish momentum shift")
-        elif indicators['macd'] > indicators['macd_signal']:
-            bullish_args.append("MACD is above signal line — bullish momentum")
-
-        if bb_pos > 0.90:
-            bearish_args.append(f"Price is at {bb_pos*100:.0f}% of Bollinger range — near UPPER band, expect mean reversion DOWN")
-        elif bb_pos > 0.75:
-            bearish_args.append(f"Price at {bb_pos*100:.0f}% of Bollinger range — approaching upper band resistance")
-        if bb_pos < 0.10:
-            bullish_args.append(f"Price is at {bb_pos*100:.0f}% of Bollinger range — near LOWER band, expect mean reversion UP")
-        elif bb_pos < 0.25:
-            bullish_args.append(f"Price at {bb_pos*100:.0f}% of Bollinger range — approaching lower band support")
-
-        bearish_text = "\n".join(f"  - {a}" for a in bearish_args) if bearish_args else "  - No strong bearish signals"
-        bullish_text = "\n".join(f"  - {a}" for a in bullish_args) if bullish_args else "  - No strong bullish signals"
-
-        # The tech_direction strongly guides the AI
-        direction_instruction = ""
-        if tech_dir == "SELL":
-            direction_instruction = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: SELL (score: {tech_score}). Multiple indicators confirm bearish conditions. You should output SELL unless you have an extremely compelling reason not to."
-        elif tech_dir == "BUY":
-            direction_instruction = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: BUY (score: {tech_score}). Multiple indicators confirm bullish conditions. You should output BUY unless you have an extremely compelling reason not to."
-        else:
-            direction_instruction = f"Technical indicators are MIXED (score: {tech_score}). Weigh both bearish and bullish arguments equally. Choose whichever direction has the strongest technical confluence. Do not default to either BUY or SELL — let the indicators decide."
-
         prompt = f"""
-Analyze {symbol} and provide a trading signal. Consider BOTH directions equally.
+Analyze {symbol} for a {forced_direction} trade setup.
 
 === MARKET DATA ===
 Current Price: {indicators['current_price']}
-RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
+Trend: {indicators['trend']} (Price vs MA50)
+RSI: {indicators['rsi']:.2f} ({indicators['rsi_zone']})
+MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
 MA20: {indicators['ma_20']} | MA50: {indicators['ma_50']}
-BB Upper: {indicators['bb_upper']} | BB Lower: {indicators['bb_lower']} | BB Position: {bb_pos*100:.0f}%
+BB Upper: {indicators['bb_upper']} | BB Lower: {indicators['bb_lower']}
 ATR: {indicators['atr']}
 
-=== BEARISH ARGUMENTS (reasons to SELL) ===
-{bearish_text}
-
-=== BULLISH ARGUMENTS (reasons to BUY) ===
-{bullish_text}
-
-=== {direction_instruction} ===
+=== DIRECTION: {forced_direction} (trend-following) ===
 
 === ATR MULTIPLIERS ===
 SL: {params['atr_multiplier_sl']} | TP1: {params['atr_multiplier_tp1']} | TP2: {params['atr_multiplier_tp2']} | TP3: {params['atr_multiplier_tp3']}
-Min R:R: {params['min_rr']}
 
 === RULES ===
-- If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
-- If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
-- Do NOT default to BUY just because the overall trend is up
+- Signal MUST be {forced_direction} (direction is decided by trend)
+- Set confidence 0-100 based on how strong the {forced_direction} setup looks
+- If the setup looks poor, set confidence below 60
+- {"BUY: TP above entry, SL below entry" if forced_direction == "BUY" else "SELL: TP below entry, SL above entry"}
 
 === OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
 RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
 """
 
@@ -487,49 +395,37 @@ async def generate_gold_signal(pair: str):
         if not ai_analysis:
             return
 
-        signal_type = ai_analysis.get("signal", "NEUTRAL")
-
-        # Technical override: if tech scoring strongly disagrees with AI, use tech direction
-        tech_dir = indicators.get("tech_direction", "NEUTRAL")
-        tech_score = indicators.get("tech_score", 0)
-
-        if signal_type != "NEUTRAL" and tech_dir != "NEUTRAL" and signal_type != tech_dir:
-            if abs(tech_score) >= 3:
-                logger.info(f"{pair} OVERRIDE: AI said {signal_type} but tech_score={tech_score} -> forcing {tech_dir}")
-                signal_type = tech_dir
-                ai_analysis["signal"] = tech_dir
-                # Recalculate TP/SL for new direction
-                entry = ai_analysis.get("entry_price", indicators["current_price"])
-                atr = indicators["atr"]
-                dp = params["decimal_places"]
-                if tech_dir == "SELL":
-                    ai_analysis["tp_levels"] = [
-                        round(entry - atr * params["atr_multiplier_tp1"], dp),
-                        round(entry - atr * params["atr_multiplier_tp2"], dp),
-                        round(entry - atr * params["atr_multiplier_tp3"], dp),
-                    ]
-                    ai_analysis["sl_price"] = round(entry + atr * params["atr_multiplier_sl"], dp)
-                else:
-                    ai_analysis["tp_levels"] = [
-                        round(entry + atr * params["atr_multiplier_tp1"], dp),
-                        round(entry + atr * params["atr_multiplier_tp2"], dp),
-                        round(entry + atr * params["atr_multiplier_tp3"], dp),
-                    ]
-                    ai_analysis["sl_price"] = round(entry - atr * params["atr_multiplier_sl"], dp)
-
-        if signal_type == "NEUTRAL":
-            logger.info(f"No trade signal for {pair} (NEUTRAL)")
-            return
+        # Direction is set by trend — AI just provides confidence
+        signal_type = indicators['signal_direction']
 
         confidence = float(ai_analysis.get("confidence", 0))
         if confidence < params["min_confidence"]:
             logger.info(f"{pair} skipped — confidence {confidence}% < {params['min_confidence']}%")
             return
 
-        entry_price = ai_analysis["entry_price"]
-        tp_levels = ai_analysis["tp_levels"]
-        sl_price = ai_analysis["sl_price"]
+        # Use AI entry price, but force correct TP/SL direction using ATR
+        entry_price = ai_analysis.get("entry_price", indicators["current_price"])
+        atr = indicators["atr"]
+        dp = params["decimal_places"]
+
+        if signal_type == "BUY":
+            tp_levels = [
+                round(entry_price + atr * params["atr_multiplier_tp1"], dp),
+                round(entry_price + atr * params["atr_multiplier_tp2"], dp),
+                round(entry_price + atr * params["atr_multiplier_tp3"], dp),
+            ]
+            sl_price = round(entry_price - atr * params["atr_multiplier_sl"], dp)
+        else:
+            tp_levels = [
+                round(entry_price - atr * params["atr_multiplier_tp1"], dp),
+                round(entry_price - atr * params["atr_multiplier_tp2"], dp),
+                round(entry_price - atr * params["atr_multiplier_tp3"], dp),
+            ]
+            sl_price = round(entry_price + atr * params["atr_multiplier_sl"], dp)
+
         risk_reward = ai_analysis.get("risk_reward", params["min_rr"])
+        if not isinstance(risk_reward, (int, float)):
+            risk_reward = params["min_rr"]
 
         # Store in DB
         signal_doc = {
