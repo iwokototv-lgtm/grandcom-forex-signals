@@ -748,7 +748,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calculate technical indicators with directional scoring"""
+    """Calculate technical indicators with trend-following direction"""
     try:
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         macd = ta.trend.MACD(df["close"])
@@ -766,72 +766,33 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()
 
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
 
         rsi_val = float(latest["rsi"])
         macd_val = float(latest["macd"])
         macd_sig = float(latest["macd_signal"])
-        prev_macd = float(prev["macd"])
-        prev_macd_sig = float(prev["macd_signal"])
         close = float(latest["close"])
         bb_up = float(latest["bb_upper"])
         bb_low = float(latest["bb_lower"])
         bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
         ma20 = float(latest["ma_20"])
         ma50 = float(latest["ma_50"])
-
-        # --- Technical direction scoring ---
-        score = 0
-
-        # RSI zones
-        if rsi_val > 75:
-            score -= 3
-        elif rsi_val > 70:
-            score -= 2
-        elif rsi_val > 65:
-            score -= 1
-        elif rsi_val < 25:
-            score += 3
-        elif rsi_val < 30:
-            score += 2
-        elif rsi_val < 35:
-            score += 1
-
-        # MACD crossover
-        macd_bullish_cross = prev_macd <= prev_macd_sig and macd_val > macd_sig
-        macd_bearish_cross = prev_macd >= prev_macd_sig and macd_val < macd_sig
-        if macd_bullish_cross:
-            score += 2
-        elif macd_bearish_cross:
-            score -= 2
-        elif macd_val > macd_sig:
-            score += 1
-        elif macd_val < macd_sig:
-            score -= 1
-
-        # Bollinger Band position
         bb_position = (close - bb_low) / bb_range
-        if bb_position > 0.95:
-            score -= 2
-        elif bb_position > 0.80:
-            score -= 1
-        elif bb_position < 0.05:
-            score += 2
-        elif bb_position < 0.20:
-            score += 1
 
-        # Price vs MAs
-        if close < ma20 and close < ma50:
-            score -= 1
-        elif close > ma20 and close > ma50:
-            score += 1
-
-        if score >= 2:
-            tech_direction = "BUY"
-        elif score <= -2:
-            tech_direction = "SELL"
+        # --- TREND-FOLLOWING DIRECTION ---
+        # Primary rule: price vs MA50 determines direction
+        # Override ONLY at extreme RSI levels
+        if close > ma50:
+            trend = "BULLISH"
+            if rsi_val > 75 and bb_position > 0.95:
+                signal_direction = "SELL"
+            else:
+                signal_direction = "BUY"
         else:
-            tech_direction = "NEUTRAL"
+            trend = "BEARISH"
+            if rsi_val < 25 and bb_position < 0.05:
+                signal_direction = "BUY"
+            else:
+                signal_direction = "SELL"
 
         # RSI zone label
         if rsi_val > 70:
@@ -841,16 +802,12 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         else:
             rsi_zone = "NEUTRAL"
 
-        trend = "BULLISH" if close > ma50 else "BEARISH"
-
         return {
             "current_price": close,
             "rsi": rsi_val,
             "rsi_zone": rsi_zone,
             "macd": macd_val,
             "macd_signal": macd_sig,
-            "macd_bullish_cross": macd_bullish_cross,
-            "macd_bearish_cross": macd_bearish_cross,
             "ma_20": ma20,
             "ma_50": ma50,
             "ema_50": float(latest["ema_50"]),
@@ -859,8 +816,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
             "bb_position": round(bb_position, 2),
             "atr": float(latest["atr"]),
             "trend": trend,
-            "tech_direction": tech_direction,
-            "tech_score": score,
+            "signal_direction": signal_direction,
         }
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
@@ -1125,66 +1081,20 @@ def record_trade_result(pair: str, result: str, pips: float):
         daily_pair_performance[key]["loss_pips"] += abs(pips)
 
 async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate AI-powered trading signal with balanced directional analysis"""
+    """Generate AI-powered trading signal — trend decides direction, AI provides confidence"""
     try:
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
         use_fixed_pips = params.get('use_fixed_pips', False)
 
+        # Direction is ALREADY decided by trend (calculate_technical_indicators)
+        forced_direction = indicators.get("signal_direction", "BUY")
+
         system_message = (
-            "You are an elite institutional forex trader who trades BOTH directions. "
-            "You are equally comfortable going LONG (BUY) and SHORT (SELL). "
-            "Your edge comes from identifying reversals at overbought/oversold extremes, not just following trends. "
-            "When indicators show overbought conditions (RSI>70, price at upper Bollinger), you MUST recommend SELL. "
-            "When indicators show oversold conditions (RSI<30, price at lower Bollinger), you MUST recommend BUY. "
-            "Never be biased toward one direction."
+            "You are an elite institutional forex trader. "
+            "You will be given a trading direction (BUY or SELL) based on trend analysis. "
+            "Your job is to assess confidence (0-100) and provide a brief analysis. "
+            "If the setup looks weak, set confidence below 60 to filter it out."
         )
-
-        # Build balanced indicator arguments
-        rsi_val = indicators['rsi']
-        rsi_zone = indicators.get('rsi_zone', 'NEUTRAL')
-        bb_pos = indicators.get('bb_position', 0.5)
-        tech_dir = indicators.get('tech_direction', 'NEUTRAL')
-        tech_score = indicators.get('tech_score', 0)
-
-        bearish_args = []
-        bullish_args = []
-
-        if rsi_val > 70:
-            bearish_args.append(f"RSI at {rsi_val:.1f} is OVERBOUGHT — signals pullback/reversal")
-        elif rsi_val > 60:
-            bearish_args.append(f"RSI at {rsi_val:.1f} approaching overbought")
-        if rsi_val < 30:
-            bullish_args.append(f"RSI at {rsi_val:.1f} is OVERSOLD — signals bounce/reversal")
-        elif rsi_val < 40:
-            bullish_args.append(f"RSI at {rsi_val:.1f} approaching oversold")
-
-        if indicators.get('macd_bearish_cross'):
-            bearish_args.append("MACD crossed BELOW signal — bearish momentum shift")
-        elif indicators['macd'] < indicators['macd_signal']:
-            bearish_args.append("MACD below signal line — bearish momentum")
-        if indicators.get('macd_bullish_cross'):
-            bullish_args.append("MACD crossed ABOVE signal — bullish momentum shift")
-        elif indicators['macd'] > indicators['macd_signal']:
-            bullish_args.append("MACD above signal line — bullish momentum")
-
-        if bb_pos > 0.90:
-            bearish_args.append(f"Price at {bb_pos*100:.0f}% BB range — near UPPER band, expect mean reversion DOWN")
-        elif bb_pos > 0.75:
-            bearish_args.append(f"Price at {bb_pos*100:.0f}% BB range — approaching upper resistance")
-        if bb_pos < 0.10:
-            bullish_args.append(f"Price at {bb_pos*100:.0f}% BB range — near LOWER band, expect mean reversion UP")
-        elif bb_pos < 0.25:
-            bullish_args.append(f"Price at {bb_pos*100:.0f}% BB range — approaching lower support")
-
-        bearish_text = "\n".join(f"  - {a}" for a in bearish_args) if bearish_args else "  - No strong bearish signals"
-        bullish_text = "\n".join(f"  - {a}" for a in bullish_args) if bullish_args else "  - No strong bullish signals"
-
-        if tech_dir == "SELL":
-            direction_hint = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: SELL (score: {tech_score}). You should output SELL unless extremely compelling reason not to."
-        elif tech_dir == "BUY":
-            direction_hint = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: BUY (score: {tech_score}). You should output BUY unless extremely compelling reason not to."
-        else:
-            direction_hint = f"Technical indicators are MIXED (score: {tech_score}). Weigh both arguments equally. Let the indicators decide."
 
         if use_fixed_pips:
             tp1_pips = params.get('fixed_tp1_pips', 5)
@@ -1193,68 +1103,58 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             pip_value = params['pip_value']
 
             prompt = f"""
-Analyze {symbol} and provide a trading signal. Consider BOTH directions equally.
+Analyze {symbol} for a {forced_direction} trade setup.
 
 === MARKET DATA ===
 Current Price: {indicators['current_price']}
-RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
+Trend: {indicators['trend']} (Price vs MA50)
+RSI: {indicators['rsi']:.2f} ({indicators.get('rsi_zone', 'NEUTRAL')})
+MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
 MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
-BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
+BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
 ATR: {indicators['atr']:.{params['decimal_places']}f}
 
-=== BEARISH ARGUMENTS (reasons to SELL) ===
-{bearish_text}
-
-=== BULLISH ARGUMENTS (reasons to BUY) ===
-{bullish_text}
-
-=== {direction_hint} ===
+=== DIRECTION: {forced_direction} (trend-following) ===
 
 === FIXED PIP TARGETS ===
 TP1: {tp1_pips} pips | TP2: {tp2_pips} pips | TP3: {tp3_pips} pips
 SL: ATR x {params['atr_multiplier_sl']} | Pip Value: {pip_value}
 
 === RULES ===
-- If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
-- If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
-- Do NOT default to BUY just because the overall trend is up
-- BUY: TP above entry, SL below entry | SELL: TP below entry, SL above entry
+- Signal MUST be {forced_direction}
+- Set confidence 0-100 based on setup strength; below 60 = no trade
+- {"BUY: TP above entry, SL below entry" if forced_direction == "BUY" else "SELL: TP below entry, SL above entry"}
 - Round all prices to {params['decimal_places']} decimal places
 
 === OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
 RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
 """
         else:
             prompt = f"""
-Analyze {symbol} and provide a trading signal. Consider BOTH directions equally.
+Analyze {symbol} for a {forced_direction} trade setup.
 
 === MARKET DATA ===
 Current Price: {indicators['current_price']}
-RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
+Trend: {indicators['trend']} (Price vs MA50)
+RSI: {indicators['rsi']:.2f} ({indicators.get('rsi_zone', 'NEUTRAL')})
+MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
 MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
-BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
+BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
 ATR: {indicators['atr']:.{params['decimal_places']}f}
 
-=== BEARISH ARGUMENTS (reasons to SELL) ===
-{bearish_text}
-
-=== BULLISH ARGUMENTS (reasons to BUY) ===
-{bullish_text}
-
-=== {direction_hint} ===
+=== DIRECTION: {forced_direction} (trend-following) ===
 
 === ATR MULTIPLIERS ===
 SL: {params['atr_multiplier_sl']} | TP1: {params.get('atr_multiplier_tp1',1.0)} | TP2: {params.get('atr_multiplier_tp2',2.0)} | TP3: {params.get('atr_multiplier_tp3',3.0)}
 Min R:R: {params['min_rr']}
 
 === RULES ===
-- If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
-- If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
-- Do NOT default to BUY just because the overall trend is up
+- Signal MUST be {forced_direction}
+- Set confidence 0-100 based on setup strength; below 60 = no trade
 
 === OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
 RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
 """
 
@@ -1347,7 +1247,9 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
             return None
 
         entry = ai_data.get("entry_price", indicators['current_price'])
-        signal_type = ai_data.get("signal", "BUY")
+        # Force signal to match trend direction — AI cannot override
+        signal_type = forced_direction
+        ai_data["signal"] = forced_direction
         tp_levels = ai_data.get("tp_levels", [])
 
         if use_fixed_pips and signal_type != "NEUTRAL":
