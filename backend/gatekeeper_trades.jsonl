@@ -176,3 +176,5 @@
 {"ts": "2026-04-13T16:25:21.019396", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-13T16:44:44.414372", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
 {"ts": "2026-04-13T17:04:16.798390", "symbol": "EURCAD", "side": "BUY", "status": "REJECT", "reason": "Max open trades reached (17/3)", "rr": null, "symbol_type": null}
+{"ts": "2026-04-16T00:59:25.417646", "symbol": "USDJPY", "side": "SELL", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 0 UTC", "rr": null, "symbol_type": null}
+{"ts": "2026-04-16T01:19:00.809362", "symbol": "USDJPY", "side": "SELL", "status": "REJECT", "reason": "Outside trading session (London 07-16 / NY 12-21 UTC) \u2014 hour: 1 UTC", "rr": null, "symbol_type": null}
