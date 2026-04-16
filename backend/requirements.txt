@@ -7,8 +7,7 @@ passlib==1.7.4
 bcrypt==4.0.1
 httpx==0.28.1
 python-multipart==0.0.9
-pydantic==2.7.0
-pydantic-core>=2.20.0
+pydantic>=2.8.0
 email-validator==2.2.0
 APScheduler==3.10.4
 litellm>=1.63.2
