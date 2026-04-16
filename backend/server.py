@@ -1058,6 +1058,41 @@ GOLD_PAIRS                = []  # Gold handled by separate gold_server
 GOLD_CONFIDENCE_THRESHOLD = 60   # Gold swing — same as baseline
 SIGNAL_THROTTLE_MINUTES   = 120  # Swing: minimum 2h between signals per pair
 SESSION_FILTERS = {}
+
+# ============================================================
+# SESSION-BASED PAIR FILTERING
+# Pairs are only traded during their relevant liquidity windows.
+# Overlapping sessions (e.g. London/NY) are handled automatically
+# by get_active_session() which deduplicates across sessions.
+# ============================================================
+FOREX_SESSIONS = {
+    "ASIAN": {
+        "utc_hours": (0, 8),   # 00:00-08:00 UTC (Tokyo session)
+        "pairs": ["USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", "CHFJPY",
+                  "AUDUSD", "NZDUSD", "AUDNZD", "EURAUD", "GBPAUD"]
+    },
+    "LONDON": {
+        "utc_hours": (8, 16),  # 08:00-16:00 UTC
+        "pairs": ["EURUSD", "GBPUSD", "EURGBP", "EURCHF", "GBPJPY", "EURJPY",
+                  "GBPAUD", "GBPCAD", "EURAUD", "EURCAD", "USDCHF", "USDJPY"]
+    },
+    "NEWYORK": {
+        "utc_hours": (13, 21),  # 13:00-21:00 UTC
+        "pairs": ["USDCAD", "USDCHF", "EURUSD", "GBPUSD", "USDJPY",
+                  "AUDUSD", "NZDUSD", "EURCAD", "GBPCAD"]
+    }
+}
+
+OVERLAPPING_PAIRS = {
+    "ASIAN_LONDON":   ["GBPJPY", "EURJPY", "AUDJPY", "EURAUD", "GBPAUD"],
+    "LONDON_NEWYORK": ["EURUSD", "GBPUSD", "USDCHF", "EURCAD", "GBPCAD"],
+    "ASIAN_NEWYORK":  ["USDJPY", "AUDUSD", "NZDUSD"]
+}
+
+# Minimum AI confidence required before a signal is sent to Telegram.
+# Signals below this threshold are logged and discarded.
+MIN_AI_CONFIDENCE = 70  # Only send signals with >70% AI confidence
+
 DRAWDOWN_PROTECTION = {
     "enabled": True,
     "max_daily_losses": 3,
@@ -1090,6 +1125,26 @@ def is_session_optimal(pair: str) -> bool:
             logging.info(f"⏰ {pair} blocked - {block_before_close} mins before session close")
             return False
     return True
+
+
+def get_active_session(current_utc_hour: int) -> list:
+    """Return deduplicated list of pairs that should trade in the current UTC session.
+
+    Checks all three sessions (ASIAN, LONDON, NEWYORK) against the current hour
+    and merges their pair lists, removing duplicates that appear in overlapping
+    windows (e.g. GBPJPY is active in both ASIAN and LONDON 08:00-16:00 UTC).
+    """
+    active_pairs = []
+    for session_name, session_config in FOREX_SESSIONS.items():
+        start, end = session_config["utc_hours"]
+        if start <= current_utc_hour < end:
+            active_pairs.extend(session_config["pairs"])
+            logger.info(
+                f"🕐 Session active: {session_name} "
+                f"({start:02d}:00-{end:02d}:00 UTC, hour={current_utc_hour})"
+            )
+    return list(set(active_pairs))  # deduplicate pairs shared across overlapping sessions
+
 
 def check_drawdown_protection(pair: str) -> tuple[bool, str]:
     global daily_pair_performance
@@ -1775,6 +1830,18 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             risk_reward  = risk_reward,
             is_premium   = display_confidence >= effective_min  # premium = meets threshold
         )
+
+        # ── MIN_AI_CONFIDENCE gate ────────────────────────────────────
+        # Only persist and broadcast signals that meet the global minimum
+        # AI confidence threshold (MIN_AI_CONFIDENCE = 70%).  Signals that
+        # pass all earlier filters but fall below this bar are discarded
+        # here to prevent low-quality alerts reaching subscribers.
+        if display_confidence < MIN_AI_CONFIDENCE:
+            logger.info(
+                f"🚫 {pair} skipped — AI confidence {display_confidence}% "
+                f"< MIN_AI_CONFIDENCE {MIN_AI_CONFIDENCE}%"
+            )
+            return None
 
         signal_dict = signal.dict(exclude={"id"})
         signal_dict['regime']          = regime_name
@@ -2990,13 +3057,40 @@ async def stripe_webhook(request: Request):
 
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
-    """Background task to auto-generate signals every 15 minutes"""
-    active_pairs = [pair for pair, config in PAIR_PARAMETERS.items() if config.get('enabled', True)]
-    logger.info(f"Active trading pairs: {active_pairs}")
+    """Background task to auto-generate signals every 15 minutes.
+
+    Each cycle:
+      1. Determines the current UTC hour.
+      2. Calls get_active_session() to resolve which pairs are in a
+         high-liquidity window (ASIAN / LONDON / NEWYORK).
+      3. Only generates signals for pairs that are both enabled in
+         PAIR_PARAMETERS AND active in the current session.
+      4. Pairs outside the active session are skipped with a log entry.
+    """
+    all_enabled_pairs = [pair for pair, config in PAIR_PARAMETERS.items() if config.get('enabled', True)]
+    logger.info(f"All enabled trading pairs: {all_enabled_pairs}")
     while True:
         try:
+            # ── Determine session-active pairs for this cycle ──────────
+            current_hour = datetime.now(_tz.utc).hour
+            session_pairs = get_active_session(current_hour)
+
+            if session_pairs:
+                logger.info(
+                    f"🕐 UTC hour={current_hour} — {len(session_pairs)} pairs active in session: "
+                    f"{sorted(session_pairs)}"
+                )
+            else:
+                logger.info(
+                    f"🌙 UTC hour={current_hour} — no active session. "
+                    f"Sleeping until next cycle."
+                )
+
             logger.info("Starting automatic signal generation...")
-            for pair in active_pairs:
+            for pair in all_enabled_pairs:
+                if pair not in session_pairs:
+                    logger.info(f"⏭️  {pair} skipped — outside active trading session (UTC hour={current_hour})")
+                    continue
                 await generate_signal_for_pair(pair)
                 await asyncio.sleep(10)
             logger.info("Signal generation completed")
