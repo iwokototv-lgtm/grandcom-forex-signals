@@ -63,6 +63,7 @@ GOLD_PAIRS = {
 
 SIGNAL_INTERVAL_MINUTES = 2
 MIN_CONFIDENCE = 60
+FIXED_LOT_SIZE = 0.1  # Fixed lot size for AGBAAKIN compatibility (avoids "Invalid Risk" rejection)
 
 # ============ DB ============
 client = AsyncIOMotorClient(MONGO_URL)
@@ -253,7 +254,7 @@ def sanitize_html(text: str) -> str:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING"):
+async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING", lot_size=FIXED_LOT_SIZE):
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
@@ -277,6 +278,7 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
             f"TP3: {tp_levels[2]}\n"
             f"\n"
             f"SL: {sl_price}\n"
+            f"Lot: {lot_size}\n"
         )
 
         safe_analysis = sanitize_html(analysis)
