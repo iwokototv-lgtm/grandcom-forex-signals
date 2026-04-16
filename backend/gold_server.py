@@ -63,7 +63,27 @@ GOLD_PAIRS = {
 
 SIGNAL_INTERVAL_MINUTES = 2
 MIN_CONFIDENCE = 60
-FIXED_LOT_SIZE = 0.1  # Fixed lot size for AGBAAKIN compatibility (avoids "Invalid Risk" rejection)
+DEFAULT_ACCOUNT_BALANCE = float(os.environ.get("ACCOUNT_BALANCE", 10000))
+
+
+def calculate_lot_size(entry_price: float, sl_price: float, account_balance: float = DEFAULT_ACCOUNT_BALANCE) -> float:
+    """
+    Calculate lot size based on 0.5% risk per trade (AGBAAKIN risk management).
+
+    Formula: Lot Size = (Account Balance × 0.005) / (SL Distance in pips × Pip Value)
+
+    For gold: 1 pip = 0.1 price units, pip value per lot = $0.10 (used in formula denominator).
+    """
+    try:
+        risk_pips = abs(entry_price - sl_price) / 0.1
+        if risk_pips == 0:
+            logger.warning("SL distance is zero — falling back to minimum lot size 0.01")
+            return 0.01
+        lot_size = (account_balance * 0.005) / (risk_pips * 0.1)
+        return round(lot_size, 2)
+    except Exception as e:
+        logger.error(f"Error calculating lot size: {e} — falling back to 0.01")
+        return 0.01
 
 # ============ DB ============
 client = AsyncIOMotorClient(MONGO_URL)
@@ -254,12 +274,16 @@ def sanitize_html(text: str) -> str:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING", lot_size=FIXED_LOT_SIZE):
+async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING"):
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
             return
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+        # Calculate lot size dynamically based on 0.5% risk per trade
+        lot_size = calculate_lot_size(entry_price, sl_price)
+        logger.info(f"Calculated lot size for {pair}: {lot_size} (entry={entry_price}, sl={sl_price}, balance={DEFAULT_ACCOUNT_BALANCE})")
 
         signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
         action = signal_type.capitalize()
