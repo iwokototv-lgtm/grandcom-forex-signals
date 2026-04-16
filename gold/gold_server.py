@@ -122,8 +122,27 @@ def calculate_indicators(df, params):
         ma50 = float(latest["ma_50"])
         bb_position = (close - bb_low) / bb_range
 
-        # --- TREND LABEL (reference only — AI decides signal direction) ---
-        trend = "BULLISH" if close > ma50 else "BEARISH"
+        # --- TREND-FOLLOWING DIRECTION ---
+        # Primary: price vs MA50 determines trend
+        # Override ONLY at extreme RSI levels
+        if close > ma50:
+            trend = "BULLISH"
+            # Default: follow the uptrend = BUY
+            if rsi_val > 75 and bb_position > 0.95:
+                # Extremely overbought — allow SELL counter-trend
+                signal_direction = "SELL"
+                logger.info(f"EXTREME OVERBOUGHT override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> SELL")
+            else:
+                signal_direction = "BUY"
+        else:
+            trend = "BEARISH"
+            # Default: follow the downtrend = SELL
+            if rsi_val < 25 and bb_position < 0.05:
+                # Extremely oversold — allow BUY counter-trend
+                signal_direction = "BUY"
+                logger.info(f"EXTREME OVERSOLD override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> BUY")
+            else:
+                signal_direction = "SELL"
 
         # RSI zone label
         if rsi_val > 70:
@@ -133,7 +152,7 @@ def calculate_indicators(df, params):
         else:
             rsi_zone = "NEUTRAL"
 
-        logger.info(f"Trend: {trend} | RSI={rsi_val:.1f}({rsi_zone}) | BB_pos={bb_position:.2f} | Price={close} vs MA50={ma50:.2f}")
+        logger.info(f"Trend: {trend} | Direction: {signal_direction} | RSI={rsi_val:.1f}({rsi_zone}) | BB_pos={bb_position:.2f} | Price={close} vs MA50={ma50:.2f}")
 
         return {
             "current_price": round(close, dp),
@@ -148,6 +167,7 @@ def calculate_indicators(df, params):
             "bb_position": round(bb_position, 2),
             "atr": round(float(latest["atr"]), dp),
             "trend": trend,
+            "signal_direction": signal_direction,
         }
     except Exception as e:
         logger.error(f"Indicator calc error: {e}")
@@ -156,45 +176,42 @@ def calculate_indicators(df, params):
 # ============ AI ANALYSIS ============
 async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
     try:
+        # Direction is ALREADY decided by trend (calculate_indicators)
+        # AI only provides confidence, entry price, and analysis text
+        forced_direction = indicators['signal_direction']
+
         system_message = (
-            "You are an elite institutional gold trader specialising in mean-reversion and "
-            "momentum setups. Analyse the provided technical indicators and independently decide "
-            "whether to BUY, SELL, or stay NEUTRAL. Do NOT blindly follow the trend — look for "
-            "overbought/oversold extremes, MACD divergence, and Bollinger Band positioning to "
-            "identify high-probability counter-trend and trend-continuation entries. "
-            "Set confidence below 60 if no clear setup exists."
+            "You are an elite institutional gold trader. "
+            "You will be given a trading direction (BUY or SELL) based on trend analysis. "
+            "Your job is to assess confidence (0-100) and provide a brief analysis. "
+            "If the setup looks weak, set confidence below 60 to filter it out."
         )
 
         prompt = f"""
-Analyse {symbol} and decide the best trade direction (BUY, SELL, or NEUTRAL).
+Analyze {symbol} for a {forced_direction} trade setup.
 
 === MARKET DATA ===
 Current Price: {indicators['current_price']}
-Trend (Price vs MA50): {indicators['trend']}
+Trend: {indicators['trend']} (Price vs MA50)
 RSI: {indicators['rsi']:.2f} ({indicators['rsi_zone']})
 MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
 MA20: {indicators['ma_20']} | MA50: {indicators['ma_50']}
-BB Upper: {indicators['bb_upper']} | BB Lower: {indicators['bb_lower']} | BB Position: {indicators['bb_position']:.2f} (0=lower band, 1=upper band)
+BB Upper: {indicators['bb_upper']} | BB Lower: {indicators['bb_lower']}
 ATR: {indicators['atr']}
 
-=== DECISION GUIDELINES ===
-- BUY when: RSI oversold (<30), price near lower Bollinger Band, MACD turning up, or strong bullish momentum
-- SELL when: RSI overbought (>70), price near upper Bollinger Band, MACD turning down, or strong bearish momentum
-- NEUTRAL when: no clear setup — set confidence below 60
-- Counter-trend trades are valid: oversold in a downtrend or overbought in an uptrend are often the best setups
-- Trend label is for reference only — you are NOT required to follow it
+=== DIRECTION: {forced_direction} (trend-following) ===
 
 === ATR MULTIPLIERS ===
 SL: {params['atr_multiplier_sl']} | TP1: {params['atr_multiplier_tp1']} | TP2: {params['atr_multiplier_tp2']} | TP3: {params['atr_multiplier_tp3']}
 
 === RULES ===
-- Choose signal direction independently based on the indicators above
-- BUY: TP above entry, SL below entry
-- SELL: TP below entry, SL above entry
-- Set confidence 0-100 reflecting setup quality; below 60 = no trade
+- Signal MUST be {forced_direction} (direction is decided by trend)
+- Set confidence 0-100 based on how strong the {forced_direction} setup looks
+- If the setup looks poor, set confidence below 60
+- {"BUY: TP above entry, SL below entry" if forced_direction == "BUY" else "SELL: TP below entry, SL above entry"}
 
 === OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"BUY|SELL|NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
+{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
 RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
 """
 
@@ -378,8 +395,8 @@ async def generate_gold_signal(pair: str):
         if not ai_analysis:
             return
 
-        # Direction is decided by the AI — use its signal directly
-        signal_type = ai_analysis.get("signal", "NEUTRAL")
+        # Direction is set by trend — AI just provides confidence
+        signal_type = indicators['signal_direction']
 
         confidence = float(ai_analysis.get("confidence", 0))
         if confidence < params["min_confidence"]:
