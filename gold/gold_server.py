@@ -323,7 +323,6 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
             return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
         signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
         action = signal_type.capitalize()
@@ -353,11 +352,12 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
             f"| Grandcom Gold ML Engine</i>"
         )
 
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
         logger.info(f"✅ Gold signal sent to {TELEGRAM_GOLD_CHANNEL_ID}: {pair} {signal_type}")
     except Exception as e:
-        logger.error(f"❌ Error sending gold signal to Telegram: {e}")
+        logger.error(f"❌ Error sending gold signal to Telegram: {e}", exc_info=True)
 
 # ============ SIGNAL GENERATION ============
 async def generate_gold_signal(pair: str):
@@ -507,7 +507,6 @@ async def send_close_notification(signal: dict, outcome: dict):
     try:
         if not TELEGRAM_BOT_TOKEN:
             return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         result_emoji = "✅" if outcome["result"] == "WIN" else "❌"
         pips_emoji = "📈" if outcome["pips"] > 0 else "📉"
         tp_info = f"\n<b>Target Hit:</b> TP{outcome['tp_hit']}" if outcome.get("tp_hit") else ""
@@ -521,10 +520,11 @@ async def send_close_notification(signal: dict, outcome: dict):
             f"<b>⏰ Closed:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
             f"<i>🤖 Auto-tracked by Grandcom Gold ML Engine</i>"
         )
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
         logger.info(f"📩 Close notification sent for {signal.get('pair')}")
     except Exception as e:
-        logger.error(f"Error sending close notification: {e}")
+        logger.error(f"Error sending close notification: {e}", exc_info=True)
 
 async def check_all_gold_outcomes():
     try:
