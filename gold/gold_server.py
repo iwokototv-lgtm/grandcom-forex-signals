@@ -49,9 +49,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 2.0,
-        "atr_multiplier_tp2": 3.5,
-        "atr_multiplier_tp3": 5.0,
+        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
+        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
+        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
         "min_rr": 1.8,
         "min_confidence": 60,
     },
@@ -60,9 +60,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 2.0,
-        "atr_multiplier_tp2": 3.5,
-        "atr_multiplier_tp3": 5.0,
+        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
+        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
+        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
         "min_rr": 1.8,
         "min_confidence": 60,
     },
