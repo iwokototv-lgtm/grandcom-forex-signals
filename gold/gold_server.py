@@ -123,22 +123,18 @@ def calculate_indicators(df, params):
         bb_position = (close - bb_low) / bb_range
 
         # --- TREND-FOLLOWING DIRECTION ---
-        # Primary: price vs MA50 determines trend
-        # Override ONLY at extreme RSI levels
+        # Primary rule: price vs MA50 determines direction
+        # Override ONLY at extreme RSI levels (very rare)
         if close > ma50:
             trend = "BULLISH"
-            # Default: follow the uptrend = BUY
             if rsi_val > 75 and bb_position > 0.95:
-                # Extremely overbought — allow SELL counter-trend
                 signal_direction = "SELL"
                 logger.info(f"EXTREME OVERBOUGHT override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> SELL")
             else:
                 signal_direction = "BUY"
         else:
             trend = "BEARISH"
-            # Default: follow the downtrend = SELL
             if rsi_val < 25 and bb_position < 0.05:
-                # Extremely oversold — allow BUY counter-trend
                 signal_direction = "BUY"
                 logger.info(f"EXTREME OVERSOLD override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> BUY")
             else:
@@ -178,7 +174,7 @@ async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
     try:
         # Direction is ALREADY decided by trend (calculate_indicators)
         # AI only provides confidence, entry price, and analysis text
-        forced_direction = indicators['signal_direction']
+        forced_direction = indicators["signal_direction"]
 
         system_message = (
             "You are an elite institutional gold trader. "
@@ -270,12 +266,11 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
                     fixed = fixed.replace("'", '"')
                     ai_data = json.loads(fixed)
                 else:
-                    signal_m = re.search(r'"signal"\s*:\s*"(\w+)"', raw)
                     conf_m = re.search(r'"confidence"\s*:\s*([\d.]+)', raw)
                     entry_m = re.search(r'"entry_price"\s*:\s*([\d.]+)', raw)
                     analysis_m = re.search(r'"analysis"\s*:\s*"([^"]*)"', raw)
                     ai_data = {
-                        "signal": signal_m.group(1) if signal_m else "NEUTRAL",
+                        "signal": forced_direction,
                         "confidence": float(conf_m.group(1)) if conf_m else 50.0,
                         "entry_price": float(entry_m.group(1)) if entry_m else indicators['current_price'],
                         "analysis": analysis_m.group(1) if analysis_m else "AI analysis unavailable",
@@ -289,40 +284,29 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
         if not ai_data:
             return None
 
-        # Fix TP levels using ATR if AI returned bad values
-        entry = ai_data.get("entry_price", indicators['current_price'])
-        signal_type = ai_data.get("signal", "NEUTRAL")
-        tp_levels = ai_data.get("tp_levels", [])
-        atr = indicators["atr"]
-        dp = params["decimal_places"]
+        # Force signal to match trend direction (AI cannot override)
+        ai_data["signal"] = forced_direction
 
-        if signal_type != "NEUTRAL" and (len(tp_levels) != 3 or len(set(tp_levels)) != 3):
-            if signal_type == "BUY":
-                tp_levels = [
-                    round(entry + atr * params["atr_multiplier_tp1"], dp),
-                    round(entry + atr * params["atr_multiplier_tp2"], dp),
-                    round(entry + atr * params["atr_multiplier_tp3"], dp),
-                ]
-            else:
-                tp_levels = [
-                    round(entry - atr * params["atr_multiplier_tp1"], dp),
-                    round(entry - atr * params["atr_multiplier_tp2"], dp),
-                    round(entry - atr * params["atr_multiplier_tp3"], dp),
-                ]
-            ai_data["tp_levels"] = tp_levels
+        # Confidence validation
+        confidence = ai_data.get("confidence", 50.0)
+        if not isinstance(confidence, (int, float)) or confidence < 0 or confidence > 100:
+            confidence = 50.0
+        ai_data["confidence"] = confidence
 
-        # Fix SL using ATR if needed
-        sl_price = ai_data.get("sl_price", 0)
-        if signal_type == "BUY" and (sl_price >= entry or sl_price == 0):
-            sl_price = round(entry - atr * params["atr_multiplier_sl"], dp)
-        elif signal_type == "SELL" and (sl_price <= entry or sl_price == 0):
-            sl_price = round(entry + atr * params["atr_multiplier_sl"], dp)
-        ai_data["sl_price"] = sl_price
-
+        # risk_reward validation
         risk_reward = ai_data.get("risk_reward", params["min_rr"])
-        if not isinstance(risk_reward, (int, float)):
+        if isinstance(risk_reward, str):
+            try:
+                if ":" in risk_reward:
+                    parts = risk_reward.split(":")
+                    risk_reward = float(parts[-1])
+                else:
+                    risk_reward = float(risk_reward)
+            except (ValueError, IndexError):
+                risk_reward = params["min_rr"]
+        if not isinstance(risk_reward, (int, float)) or risk_reward <= 0:
             risk_reward = params["min_rr"]
-        ai_data["risk_reward"] = risk_reward
+        ai_data["risk_reward"] = round(risk_reward, 1)
 
         return ai_data
     except Exception as e:
@@ -340,7 +324,6 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
             return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
         signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
         action = signal_type.capitalize()
@@ -370,11 +353,12 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
             f"| Grandcom Gold ML Engine</i>"
         )
 
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
         logger.info(f"✅ Gold signal sent to {TELEGRAM_GOLD_CHANNEL_ID}: {pair} {signal_type}")
     except Exception as e:
-        logger.error(f"❌ Error sending gold signal to Telegram: {e}")
+        logger.error(f"❌ Error sending gold signal to Telegram: {e}", exc_info=True)
 
 # ============ SIGNAL GENERATION ============
 async def generate_gold_signal(pair: str):
@@ -395,15 +379,15 @@ async def generate_gold_signal(pair: str):
         if not ai_analysis:
             return
 
-        # Direction is set by trend — AI just provides confidence
-        signal_type = indicators['signal_direction']
+        # Direction is set by trend — AI cannot override
+        signal_type = indicators["signal_direction"]
 
         confidence = float(ai_analysis.get("confidence", 0))
         if confidence < params["min_confidence"]:
             logger.info(f"{pair} skipped — confidence {confidence}% < {params['min_confidence']}%")
             return
 
-        # Use AI entry price, but force correct TP/SL direction using ATR
+        # Use AI entry price, force correct TP/SL using ATR (guarantees valid risk)
         entry_price = ai_analysis.get("entry_price", indicators["current_price"])
         atr = indicators["atr"]
         dp = params["decimal_places"]
@@ -423,9 +407,22 @@ async def generate_gold_signal(pair: str):
             ]
             sl_price = round(entry_price + atr * params["atr_multiplier_sl"], dp)
 
-        risk_reward = ai_analysis.get("risk_reward", params["min_rr"])
-        if not isinstance(risk_reward, (int, float)):
-            risk_reward = params["min_rr"]
+        # Calculate actual R:R from ATR-based levels
+        risk = abs(entry_price - sl_price)
+        reward = abs(tp_levels[0] - entry_price)
+        if risk > 0:
+            actual_rr = round(reward / risk, 1)
+        else:
+            actual_rr = params["min_rr"]
+        risk_reward = max(actual_rr, params["min_rr"])
+
+        # Validate: TP/SL must be on correct sides
+        if signal_type == "BUY" and (tp_levels[0] <= entry_price or sl_price >= entry_price):
+            logger.warning(f"{pair} BUY invalid structure — skipping")
+            return
+        if signal_type == "SELL" and (tp_levels[0] >= entry_price or sl_price <= entry_price):
+            logger.warning(f"{pair} SELL invalid structure — skipping")
+            return
 
         # Store in DB
         signal_doc = {
@@ -456,7 +453,7 @@ async def generate_gold_signal(pair: str):
             analysis=ai_analysis.get("analysis", ""),
         )
 
-        logger.info(f"✅ {pair} {signal_type} @ {entry_price} | TP: {tp_levels} | SL: {sl_price} | Conf: {confidence}%")
+        logger.info(f"✅ {pair} {signal_type} @ {entry_price} | TP: {tp_levels} | SL: {sl_price} | R:R: 1:{risk_reward} | Conf: {confidence}%")
     except Exception as e:
         logger.error(f"Error generating gold signal for {pair}: {e}")
 
@@ -524,7 +521,6 @@ async def send_close_notification(signal: dict, outcome: dict):
     try:
         if not TELEGRAM_BOT_TOKEN:
             return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         result_emoji = "✅" if outcome["result"] == "WIN" else "❌"
         pips_emoji = "📈" if outcome["pips"] > 0 else "📉"
         tp_info = f"\n<b>Target Hit:</b> TP{outcome['tp_hit']}" if outcome.get("tp_hit") else ""
@@ -538,10 +534,11 @@ async def send_close_notification(signal: dict, outcome: dict):
             f"<b>⏰ Closed:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
             f"<i>🤖 Auto-tracked by Grandcom Gold ML Engine</i>"
         )
-        await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
         logger.info(f"📩 Close notification sent for {signal.get('pair')}")
     except Exception as e:
-        logger.error(f"Error sending close notification: {e}")
+        logger.error(f"Error sending close notification: {e}", exc_info=True)
 
 async def check_all_gold_outcomes():
     try:
