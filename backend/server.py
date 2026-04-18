@@ -20,13 +20,12 @@ import numpy as np
 from pathlib import Path
 import time  # ← needed by gatekeeper latency check
 
-# Import Emergent LLM integration (with fallback for Railway)
+# Import Emergent LLM integration (with litellm fallback for Railway)
 try:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from emergentintegrations.llm import LlmChat, UserMessage
     HAS_EMERGENT_LLM = True
 except ImportError:
     HAS_EMERGENT_LLM = False
-    logger = logging.getLogger(__name__)
 
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
@@ -44,481 +43,18 @@ from subscription_service import (
 )
 
 # ============================================================
-# EXECUTION GATEKEEPER  (Safe Execution Mode v2)
-# Your exact class — symbol-aware pip multipliers, per-asset
-# slippage/spread/EMA thresholds, duplicate-trade detection.
+# EXECUTION GATEKEEPER — imported from core/gatekeeper.py
+# Single source of truth. All logic lives in core/gatekeeper.py
 # ============================================================
-import json as _json
-from datetime import timezone as _tz
-
-_gk_logger = logging.getLogger("execution_gatekeeper")
-_GK_LOG_FILE: str = os.getenv("GK_LOG_FILE", "gatekeeper_trades.jsonl")
-
-
-def _gk_log(symbol: str, side: str, result: dict) -> None:
-    """Write every gatekeeper decision to the log file and Python logger."""
-    approved = result.get("status") == "EXECUTE"
-    entry = {
-        "ts":       datetime.utcnow().isoformat(),
-        "symbol":   symbol,
-        "side":     side,
-        "status":   result.get("status"),
-        "reason":   result.get("reason", ""),
-        "rr":       result.get("rr"),
-        "symbol_type": result.get("symbol_type"),
-    }
-    _gk_logger.info(
-        "%s %s %s — %s",
-        result.get("status"), symbol, side,
-        result.get("reason", f"R:R={result.get('rr')}")
-    )
-    if _GK_LOG_FILE:
-        try:
-            with open(_GK_LOG_FILE, "a", encoding="utf-8") as fh:
-                fh.write(_json.dumps(entry) + "\n")
-        except OSError:
-            pass
-
-
-class ExecutionGatekeeper:
-    """
-    Production-grade, symbol-aware trade validator.
-
-    Checks (in order):
-        1.  Signal age          — per-asset tolerance (Gold 10s / JPY 6s / FX 4s)
-        2.  Future timestamp    — rejects clock-skewed / bad signals
-        3.  Session filter      — London 07-16 UTC + New York 12-21 UTC
-        4.  News filter         — placeholder (wire up ForexFactory API)
-        5.  Confidence          — min 65% (GK_MIN_CONFIDENCE)
-        6.  Max open trades     — hard cap (GK_MAX_OPEN_TRADES)
-        7.  Duplicate trade     — same symbol + same side already open
-        8.  Price sanity        — entry / sl / tp must all be > 0
-        9.  Direction structure — BUY: tp>entry>sl  |  SELL: tp<entry<sl
-        10. Risk / Reward       — Gold: min 1.8 via validate_gold_trade()
-                                  FX/JPY: min 1.5 (GK_MIN_RR)
-        11. Slippage (price)    — abs(entry - current_price) per-asset threshold
-        12. Slippage (pips)     — secondary pip-based check
-        13. Spread              — per-asset pip limit
-        14. EMA-50 proximity    — per-asset pip distance
-
-    Env-var overrides (all hot-reloadable via Railway):
-        GK_MIN_RR                (default 1.5)
-        GK_MAX_SIGNAL_AGE        (default 4s  — Forex base)
-        GK_MAX_SIGNAL_AGE_GOLD   (default 10s)
-        GK_MAX_SIGNAL_AGE_JPY    (default 6s)
-        GK_MAX_OPEN_TRADES       (default 3)
-        GK_MIN_CONFIDENCE        (default 65)
-        GK_PRICE_THRESHOLD_GOLD  (default 0.50)
-        GK_PRICE_THRESHOLD_JPY   (default 0.03)
-        GK_PRICE_THRESHOLD_FX    (default 0.0002)
-        GK_LOG_FILE              (default gatekeeper_trades.jsonl)
-    """
-
-    # ── Required signal keys — used for fast key-presence validation ──
-    REQUIRED_KEYS = ("symbol", "side", "entry", "sl", "tp",
-                     "current_price", "spread", "timestamp")
-
-    def __init__(
-        self,
-        min_rr:             float = float(os.getenv("GK_MIN_RR",           "1.5")),
-        max_signal_age_sec: float = float(os.getenv("GK_MAX_SIGNAL_AGE",   "4")),
-        max_open_trades:    int   = int(  os.getenv("GK_MAX_OPEN_TRADES",  "3")),
-        min_confidence:     float = float(os.getenv("GK_MIN_CONFIDENCE",   "60")),
-    ):
-        self.min_rr          = min_rr
-        self.max_signal_age  = max_signal_age_sec
-        self.max_open_trades = max_open_trades
-        self.min_confidence  = min_confidence
-
-    # ================================================================
-    # SYMBOL HANDLING
-    # ================================================================
-
-    def get_symbol_type(self, symbol: str) -> str:
-        """Classify symbol into GOLD | JPY | FOREX."""
-        s = symbol.upper()
-        if "XAU" in s:
-            return "GOLD"
-        elif "JPY" in s:
-            return "JPY"
-        return "FOREX"
-
-    def get_pip_multiplier(self, symbol: str) -> float:
-        """
-        Pip multiplier:
-          FOREX : 10,000  (e.g. EURUSD  0.0001 = 1 pip)
-          JPY   :    100  (e.g. USDJPY  0.01   = 1 pip)
-          GOLD  :    100  (e.g. XAUUSD  0.01   = 1 pip — $0.01 move)
-        """
-        t = self.get_symbol_type(symbol)
-        return 100.0 if t in ("JPY", "GOLD") else 10_000.0
-
-    def get_thresholds(self, symbol: str) -> dict:
-        """
-        Per-asset thresholds.
-        slippage / spread / ema_distance : in pips
-        price_threshold                  : in raw price units
-          Gold  0.50  (~5 pips on XAUUSD)
-          JPY   0.03  (~3 pips on USDJPY)
-          FX    0.0002 (~2 pips on EURUSD)
-        """
-        t = self.get_symbol_type(symbol)
-        if t == "GOLD":
-            return {
-                "slippage":        10,
-                "spread":          30,
-                "ema_distance":    50,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_GOLD", "0.50")),
-            }
-        elif t == "JPY":
-            return {
-                "slippage":        3,
-                "spread":          3,
-                "ema_distance":    15,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_JPY",  "0.03")),
-            }
-        else:
-            return {
-                "slippage":        2,
-                "spread":          2,
-                "ema_distance":    10,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_FX",   "0.0002")),
-            }
-
-    # ================================================================
-    # CORE CALCULATIONS
-    # ================================================================
-
-    def price_to_pips(self, price_diff: float, symbol: str) -> float:
-        """Convert a raw price difference to pips (always positive)."""
-        return abs(price_diff) * self.get_pip_multiplier(symbol)
-
-    def calculate_rr(
-        self, entry: float, sl: float, tp: float, symbol: str
-    ) -> float:
-        """R:R using pip-based distances. Returns 0.0 if risk is zero."""
-        risk   = self.price_to_pips(entry - sl, symbol)
-        reward = self.price_to_pips(tp - entry, symbol)
-        return round(reward / risk, 4) if risk > 0 else 0.0
-
-    def is_valid_entry(self, entry: float, ema50: float, symbol: str) -> bool:
-        """Return True if entry is within EMA-50 proximity threshold."""
-        thresholds = self.get_thresholds(symbol)
-        distance   = self.price_to_pips(entry - ema50, symbol)
-        return distance <= thresholds["ema_distance"]
-
-    def is_duplicate_trade(self, signal: dict, open_trades: list) -> bool:
-        """Return True if the same symbol+side is already open.
-        Guards against non-dict entries in open_trades list."""
-        sym  = signal.get("symbol", "")
-        side = signal.get("side", "")
-        for trade in open_trades:
-            if not isinstance(trade, dict):
-                continue   # ← BUG FIX: skip malformed entries safely
-            if trade.get("symbol") == sym and trade.get("side") == side:
-                return True
-        return False
-
-    # ================================================================
-    # ADVANCED FILTERS
-    # ================================================================
-
-    def is_valid_session(self, current_time: datetime) -> bool:
-        """Allow trading only during London (07-16 UTC) or NY (12-21 UTC)."""
-        hour    = current_time.hour
-        london  = 7  <= hour < 16
-        newyork = 12 <= hour < 21
-        return london or newyork
-
-    def is_high_impact_news_near(self, current_time: datetime) -> bool:
-        """
-        Placeholder — wire up a ForexFactory / Investing.com API here.
-        Return True when high-impact news is within ±15 min of current_time.
-        """
-        return False
-
-    def is_confident_signal(self, confidence: float) -> bool:
-        return confidence >= self.min_confidence
-
-    # ================================================================
-    # GOLD-SPECIFIC VALIDATION  (XAUUSD / XAUEUR)
-    # ================================================================
-
-    def validate_gold_trade(
-        self, entry: float, sl: float, tp: float
-    ) -> tuple:
-        """
-        Dedicated Gold validator using RAW PRICE distances (not pips).
-        Called only after direction structure is confirmed.
-
-        Rules:
-          TP distance ≥ 3.0   — prevents noise trades
-          SL distance ≥ 3.0   — prevents hairline stops
-          SL distance ≤ 50.0  — caps maximum risk
-          R:R ≥ 1.8            — stricter than Forex default (1.5)
-
-        Returns:
-          (True,  rr: float)   on approval
-          (False, reason: str) on rejection
-        """
-        tp_distance = abs(tp - entry)
-        sl_distance = abs(entry - sl)
-
-        if tp_distance < 3.0 or sl_distance < 3.0:
-            return False, f"Gold TP/SL too small (TP={tp_distance:.2f}, SL={sl_distance:.2f}, min=3.0)"
-
-        if sl_distance > 100.0:
-            return False, f"Gold SL too large: {sl_distance:.2f} (max 100.0)"
-
-        rr = tp_distance / sl_distance   # sl_distance > 0 guaranteed above
-        if rr < 1.0:
-            return False, f"Gold RR too low: {rr:.2f} (min 1.0)"
-
-        return True, round(rr, 4)
-
-    # ================================================================
-    # REJECT HELPER
-    # ================================================================
-
-    def reject(self, reason: str) -> dict:
-        return {"status": "REJECT", "reason": reason}
-
-    # ================================================================
-    # MAIN VALIDATE()
-    # ================================================================
-
-    def validate(self, signal: dict, open_trades: list = None) -> dict:
-        """
-        Run all production checks against a signal dict.
-
-        Required signal keys:
-            symbol, side (BUY/SELL), entry, sl, tp,
-            current_price, spread (pips), timestamp (ISO-8601)
-
-        Optional:
-            ema50      (float, defaults to entry — skips EMA proximity check)
-            confidence (float 0-100, defaults to 0)
-
-        Returns:
-            {"status": "EXECUTE", "rr": float, "confidence": float, "symbol_type": str}
-            {"status": "REJECT",  "reason": str}
-        """
-        # ── Safe mutable default ──────────────────────────────
-        if open_trades is None:
-            open_trades = []
-
-        try:
-            # ── Required key presence check ───────────────────
-            # BUG FIX: explicit KeyError before float() conversion
-            # gives a clear rejection reason instead of a cryptic exception
-            for key in self.REQUIRED_KEYS:
-                if key not in signal:
-                    return self.reject(f"Missing required signal field: '{key}'")
-
-            symbol        = str(signal["symbol"]).upper()
-            side          = str(signal["side"]).upper()
-            entry         = float(signal["entry"])
-            sl            = float(signal["sl"])
-            tp            = float(signal["tp"])
-            current_price = float(signal["current_price"])
-            spread        = float(signal["spread"])
-            timestamp     = signal["timestamp"]
-            ema50         = float(signal.get("ema50", entry))
-            confidence    = float(signal.get("confidence", 0))
-
-            thresholds = self.get_thresholds(symbol)
-            _stype     = self.get_symbol_type(symbol)
-
-            # ── 1. Timestamp parse — always UTC ──────────────
-            signal_time = datetime.fromisoformat(timestamp).astimezone(_tz.utc)
-            now         = datetime.now(_tz.utc)
-            age         = (now - signal_time).total_seconds()
-
-            # ── 2. Future timestamp guard (BUG FIX) ──────────
-            # Negative age means signal is dated in the future —
-            # indicates clock skew or bad data. Hard reject.
-            if age < 0:
-                return self.reject(
-                    f"Signal timestamp is in the future by {abs(age):.2f}s — "
-                    f"possible clock skew or bad data"
-                )
-
-            # ── 3. Signal age — per-asset tolerance ──────────
-            if _stype == "GOLD":
-                _max_age = float(os.getenv("GK_MAX_SIGNAL_AGE_GOLD", "10"))
-            elif _stype == "JPY":
-                _max_age = float(os.getenv("GK_MAX_SIGNAL_AGE_JPY", "6"))
-            else:
-                _max_age = self.max_signal_age
-            if age > _max_age:
-                return self.reject(
-                    f"Signal too old: {age:.2f}s (max {_max_age}s for {_stype})"
-                )
-
-            # ── 4. Session filter ─────────────────────────────
-            if not self.is_valid_session(signal_time):
-                return self.reject(
-                    f"Outside trading session (London 07-16 / NY 12-21 UTC) "
-                    f"— hour: {signal_time.hour} UTC"
-                )
-
-            # ── 5. News filter ────────────────────────────────
-            if self.is_high_impact_news_near(signal_time):
-                return self.reject("High-impact news nearby — trade blocked")
-
-            # ── 6. Confidence filter ──────────────────────────
-            if not self.is_confident_signal(confidence):
-                return self.reject(
-                    f"Low confidence: {confidence:.1f}% (min {self.min_confidence}%)"
-                )
-
-            # ── 7. Max open trades ────────────────────────────
-            if len(open_trades) >= self.max_open_trades:
-                return self.reject(
-                    f"Max open trades reached ({len(open_trades)}/{self.max_open_trades})"
-                )
-
-            # ── 8. Duplicate trade ────────────────────────────
-            if self.is_duplicate_trade(signal, open_trades):
-                return self.reject(f"Duplicate trade: {symbol} {side} already open")
-
-            # ── 9. Price sanity (BUG FIX) ────────────────────
-            # Guards against zero / negative prices from bad broker feeds.
-            # Must run before direction check to avoid misleading error messages.
-            for label, val in (("entry", entry), ("sl", sl), ("tp", tp),
-                               ("current_price", current_price)):
-                if val <= 0:
-                    return self.reject(
-                        f"Invalid price: {label}={val} — must be > 0"
-                    )
-
-            # ── 10. Direction structure ───────────────────────
-            if side == "BUY":
-                if not (tp > entry > sl):
-                    return self.reject(
-                        f"Invalid BUY structure: entry={entry}, TP={tp}, SL={sl}"
-                    )
-            elif side == "SELL":
-                if not (tp < entry < sl):
-                    return self.reject(
-                        f"Invalid SELL structure: entry={entry}, TP={tp}, SL={sl}"
-                    )
-            else:
-                return self.reject(f"Invalid side: {side!r} — expected BUY or SELL")
-
-            # ── 11. Risk / Reward ─────────────────────────────
-            # Gold: dedicated raw-price validator (stricter, min R:R 1.8)
-            # Forex / JPY: pip-based calculation (min R:R GK_MIN_RR)
-            if _stype == "GOLD":
-                gold_valid, gold_result = self.validate_gold_trade(entry, sl, tp)
-                if not gold_valid:
-                    return self.reject(gold_result)
-                rr = gold_result
-            else:
-                rr = self.calculate_rr(entry, sl, tp, symbol)
-                if rr < self.min_rr:
-                    return self.reject(f"RR too low: {rr:.2f} (min {self.min_rr})")
-
-            # ── 12. Slippage — price units (fast check) ───────
-            allowed_threshold = thresholds["price_threshold"]
-            price_distance    = abs(entry - current_price)
-            if price_distance > allowed_threshold:
-                return self.reject(
-                    f"Price moved too far: |entry - current| = {price_distance:.5f} "
-                    f"(max {allowed_threshold} for {_stype})"
-                )
-
-            # ── 13. Slippage — pips (secondary check) ─────────
-            slippage = self.price_to_pips(current_price - entry, symbol)
-            if slippage > thresholds["slippage"]:
-                return self.reject(
-                    f"High slippage: {slippage:.2f} pips "
-                    f"(max {thresholds['slippage']} for {_stype})"
-                )
-
-            # ── 14. Spread ────────────────────────────────────
-            if spread <= 0:
-                return self.reject("Invalid spread: must be > 0")
-            if spread > thresholds["spread"]:
-                return self.reject(
-                    f"High spread: {spread:.2f} pips "
-                    f"(max {thresholds['spread']} for {_stype})"
-                )
-
-            # ── 15. EMA-50 proximity ──────────────────────────
-            # Skipped automatically when ema50 == entry (not provided by caller)
-            # Also skip for GOLD pairs — ATR swing strategy doesn't need EMA proximity
-            if ema50 != entry and self.get_symbol_type(symbol) != "GOLD":
-                if not self.is_valid_entry(entry, ema50, symbol):
-                    distance = self.price_to_pips(entry - ema50, symbol)
-                    return self.reject(
-                        f"Bad entry — {distance:.1f} pips from EMA50 "
-                        f"(max {thresholds['ema_distance']} for {_stype})"
-                    )
-
-            # ✅ All checks passed ─────────────────────────────
-            return {
-                "status":      "EXECUTE",
-                "rr":          round(rr, 2),
-                "confidence":  round(confidence, 1),
-                "symbol_type": _stype,
-            }
-
-        except (ValueError, TypeError) as e:
-            # Catches float() conversion failures on bad input data
-            return self.reject(f"Invalid signal data — {type(e).__name__}: {e}")
-        except Exception as e:
-            # Catches any unexpected errors — never crash the trading loop
-            return self.reject(f"Gatekeeper exception [{type(e).__name__}]: {e}")
-
-
-# Module-level singleton — re-use across requests
-_gatekeeper = ExecutionGatekeeper()
-
-
-def run_execution_gatekeeper(
-    pair:          str,
-    signal_type:   str,    # "BUY" or "SELL"
-    entry_price:   float,
-    tp1:           float,  # furthest TP level used as final TP
-    sl_price:      float,
-    current_price: float,
-    spread_pips:   float,  # spread already converted to pips
-    ema50:         float,
-    signal_ts_iso: str,    # ISO-8601 UTC timestamp string
-    open_trades:   list,   # list of {"symbol":…, "side":…} dicts
-    confidence:    float = 0.0,  # 0-100 — passed to confidence filter
-) -> tuple[bool, str, str]:
-    """
-    Thin wrapper around ExecutionGatekeeper.validate().
-    Returns (approved: bool, reason_code: str, reason: str).
-    """
-    signal = {
-        "symbol":        pair,
-        "side":          signal_type,
-        "entry":         entry_price,
-        "sl":            sl_price,
-        "tp":            tp1,
-        "current_price": current_price,
-        "spread":        spread_pips,
-        "timestamp":     signal_ts_iso,
-        "ema50":         ema50,
-        "confidence":    confidence,
-    }
-
-    result = _gatekeeper.validate(signal, open_trades)
-    _gk_log(pair, signal_type, result)
-
-    if result["status"] == "EXECUTE":
-        return (
-            True, "OK",
-            f"Approved — R:R={result['rr']} conf={result['confidence']}% ({result['symbol_type']})"
-        )
-    else:
-        return False, "REJECTED", result.get("reason", "Unknown rejection")
-
+from core.gatekeeper import (
+    ExecutionGatekeeper,
+    run_execution_gatekeeper,
+    _gatekeeper,
+    _gk_log,
+    _GK_LOG_FILE,
+)
 # ============================================================
-# END EXECUTION GATEKEEPER
+# END EXECUTION GATEKEEPER IMPORT
 # ============================================================
 
 
@@ -748,7 +284,7 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calculate technical indicators with trend-following direction"""
+    """Calculate technical indicators"""
     try:
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         macd = ta.trend.MACD(df["close"])
@@ -758,7 +294,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["ma_20"] = ta.trend.SMAIndicator(df["close"], window=20).sma_indicator()
         df["ma_50"] = ta.trend.SMAIndicator(df["close"], window=50).sma_indicator()
         df["ema_12"] = ta.trend.EMAIndicator(df["close"], window=12).ema_indicator()
-        df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
+        df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()  # ← for gatekeeper
         bollinger = ta.volatility.BollingerBands(df["close"])
         df["bb_upper"] = bollinger.bollinger_hband()
         df["bb_middle"] = bollinger.bollinger_mavg()
@@ -766,57 +302,18 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()
 
         latest = df.iloc[-1]
-
-        rsi_val = float(latest["rsi"])
-        macd_val = float(latest["macd"])
-        macd_sig = float(latest["macd_signal"])
-        close = float(latest["close"])
-        bb_up = float(latest["bb_upper"])
-        bb_low = float(latest["bb_lower"])
-        bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
-        ma20 = float(latest["ma_20"])
-        ma50 = float(latest["ma_50"])
-        bb_position = (close - bb_low) / bb_range
-
-        # --- TREND-FOLLOWING DIRECTION ---
-        # Primary rule: price vs MA50 determines direction
-        # Override ONLY at extreme RSI levels
-        if close > ma50:
-            trend = "BULLISH"
-            if rsi_val > 75 and bb_position > 0.95:
-                signal_direction = "SELL"
-            else:
-                signal_direction = "BUY"
-        else:
-            trend = "BEARISH"
-            if rsi_val < 25 and bb_position < 0.05:
-                signal_direction = "BUY"
-            else:
-                signal_direction = "SELL"
-
-        # RSI zone label
-        if rsi_val > 70:
-            rsi_zone = "OVERBOUGHT"
-        elif rsi_val < 30:
-            rsi_zone = "OVERSOLD"
-        else:
-            rsi_zone = "NEUTRAL"
-
         return {
-            "current_price": close,
-            "rsi": rsi_val,
-            "rsi_zone": rsi_zone,
-            "macd": macd_val,
-            "macd_signal": macd_sig,
-            "ma_20": ma20,
-            "ma_50": ma50,
-            "ema_50": float(latest["ema_50"]),
-            "bb_upper": bb_up,
-            "bb_lower": bb_low,
-            "bb_position": round(bb_position, 2),
+            "current_price": float(latest["close"]),
+            "rsi": float(latest["rsi"]),
+            "macd": float(latest["macd"]),
+            "macd_signal": float(latest["macd_signal"]),
+            "ma_20": float(latest["ma_20"]),
+            "ma_50": float(latest["ma_50"]),
+            "ema_50": float(latest["ema_50"]),     # ← for gatekeeper
+            "bb_upper": float(latest["bb_upper"]),
+            "bb_lower": float(latest["bb_lower"]),
             "atr": float(latest["atr"]),
-            "trend": trend,
-            "signal_direction": signal_direction,
+            "trend": "BULLISH" if latest["close"] > latest["ma_50"] else "BEARISH"
         }
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
@@ -824,172 +321,184 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
 PAIR_PARAMETERS = {
+    # ══════════════════════════════════════════════════════════════════
+    # PAIR PARAMETERS — Full ATR-Multiplier Strategy (Forex + Gold unified)
+    # ──────────────────────────────────────────────────────────────────
+    # ATR multipliers (4H candle ATR):
+    #   SL  = 0.3 × ATR   → tight stop, room for TP1
+#   TP1 = 0.5 × ATR   → R:R = 1.67
+#   TP2 = 1.0 × ATR   → R:R = 3.33
+#   TP3 = 1.5 × ATR   → R:R = 5.00
+#
+#   All pairs: RR@TP1=1.67 | RR@TP2=3.33 | RR@TP3=5.00  ✅
+#   Consistent across all groups — ATR handles volatility scaling
+    # ══════════════════════════════════════════════════════════════════
     "BTCUSD": {
         "enabled": False,
         "use_fixed_pips": False,
-        "atr_multiplier_sl": 2.0, "atr_multiplier_tp1": 1.5,
-        "atr_multiplier_tp2": 3.0, "atr_multiplier_tp3": 4.5,
-        "min_rr": 2.0, "pip_value": 1.0, "decimal_places": 2, "typical_spread": 10.0
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 1.0, "decimal_places": 2, "typical_spread": 10.0
     },
+    # ── GROUP A: Standard Majors ──────────────────────────────────────
+    # Typical 4H ATR: 25-35 pips | SL×1.5 → RR@TP3=4.0
     "EURUSD": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00010
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00010
     },
     "GBPUSD": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "USDJPY": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.010
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.010
     },
+    "USDCAD": {
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
+    },
+    "USDCHF": {
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
+    },
+    # ── GROUP B: JPY Crosses (more volatile — wider SL) ───────────────
+    # Typical 4H ATR: 40-55 pips | SL×1.8 → RR@TP3=3.33
     "EURJPY": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "GBPJPY": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.020
-    },
-    "AUDUSD": {
-        "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
-    },
-    "USDCAD": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
-    },
-    "USDCHF": {
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
-    },
-    "NZDUSD": {
-        "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.020
     },
     "AUDJPY": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CADJPY": {
-        "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
+        "enabled": False,  # Disabled — insufficient liquidity outside Asian session
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
     "CHFJPY": {
-        "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
-        "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
+        "enabled": False,  # Disabled — insufficient liquidity outside Asian session
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.01, "decimal_places": 3, "typical_spread": 0.015
     },
+    # ── GROUP C: AUD/NZD Pairs (lower volatility — tighter SL) ────────
+    # Typical 4H ATR: 20-22 pips | SL×1.3 → RR@TP3=4.62
+    "AUDUSD": {
+        "enabled": True,
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
+    },
+    "NZDUSD": {
+        "enabled": True,
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
+    },
+    "AUDNZD": {
+        "enabled": False,  # Disabled — low liquidity, choppy, high consecutive losses
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00018
+    },
+    # ── GROUP D: Wide-Spread Crosses (volatile — wider SL) ────────────
+    # Typical 4H ATR: 40-55 pips | SL×1.8 → RR@TP3=3.33
     "EURAUD": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPCAD": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.4, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
     "EURCAD": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.3, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00020
     },
     "GBPAUD": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 4, "fixed_tp2_pips": 8, "fixed_tp3_pips": 12, "fixed_sl_pips": 12,
-        "atr_multiplier_sl": 1.5, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00025
     },
-    "AUDNZD": {
-        "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 3, "fixed_tp2_pips": 6, "fixed_tp3_pips": 9, "fixed_sl_pips": 10,
-        "atr_multiplier_sl": 1.2, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00018
-    },
+    # ── GROUP E: Tight Crosses (low volatility — tighter SL) ──────────
+    # Typical 4H ATR: 20 pips | SL×1.3 → RR@TP3=4.62
     "EURGBP": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00012
     },
     "EURCHF": {
         "enabled": True,
-        "use_fixed_pips": True,
-        "fixed_tp1_pips": 2, "fixed_tp2_pips": 4, "fixed_tp3_pips": 6, "fixed_sl_pips": 8,
-        "atr_multiplier_sl": 1.0, "min_rr": 1.5,
-        "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
+        "use_fixed_pips": False,
+        "atr_multiplier_sl":  0.3, "atr_multiplier_tp1": 0.5,
+        "atr_multiplier_tp2": 1.0, "atr_multiplier_tp3": 1.5,
+        "min_rr": 1.8, "pip_value": 0.0001, "decimal_places": 5, "typical_spread": 0.00015
     },
 }
+
 
 # ============ PROFITABILITY FILTERS ============
 # ============================================================
 # MULTI-STRATEGY REGIME CONFIG
 # ------------------------------------------------------------
-# TREND_UP   → BUY  signals only  (trend-following)
-# TREND_DOWN → SELL signals only  (trend-following)
-# RANGE      → BUY at support, SELL at resistance (mean reversion)
-# HIGH_VOL   → Both BUY and SELL allowed (breakout/momentum)
-# UNKNOWN    → Both allowed (fallback, no regime data)
-# ============================================================
+# UPTREND   → BUY  only  (swing trend-following)
+# DOWNTREND → SELL only  (swing trend-following)
+# RANGE     → DISABLED   (no trades in sideways markets)
+# HIGH_VOL  → Both BUY and SELL (breakout/momentum)
 # ══════════════════════════════════════════════════════════════
-# MULTI-STRATEGY REGIME CONFIG
-# ══════════════════════════════════════════════════════════════
-# TREND_UP   → BUY  only  (swing trend-following)
-# TREND_DOWN → SELL only  (swing trend-following)
-# RANGE      → DISABLED   (no trades in sideways markets)
-# HIGH_VOL   → Both BUY and SELL (breakout/momentum)
-# UNKNOWN    → Both allowed (fallback — no regime data yet)
-# ══════════════════════════════════════════════════════════════
-ALLOWED_REGIMES = ["TREND_UP", "TREND_DOWN", "HIGH_VOL"]
-SKIP_REGIME     = ["RANGE"]   # RANGE disabled — no mean-reversion
+ALLOWED_REGIMES = ["UPTREND", "DOWNTREND", "HIGH_VOL"]
+SKIP_REGIME     = ["RANGE", "UNKNOWN"]  # No RANGE, no UNKNOWN regime trades
 
 # ── Per-strategy type ─────────────────────────────────────────
 # Each regime maps to a strategy which controls timeframe,
 # confidence threshold, and TP/SL multipliers.
 REGIME_STRATEGY = {
-    "TREND_UP":   "SWING",      # BUY only,  wide ATR-based targets
-    "TREND_DOWN": "SWING",      # SELL only, wide ATR-based targets
-    "HIGH_VOL":   "BREAKOUT",   # Both directions, momentum targets
-    "UNKNOWN":    "SWING",      # Default safe fallback
+    "UPTREND":   "SWING",      # BUY only
+    "DOWNTREND": "SWING",      # SELL only
+    "HIGH_VOL":  "BREAKOUT",   # Both directions, momentum
 }
 
 # ── Per-strategy timeframes ────────────────────────────────────
@@ -1001,25 +510,30 @@ STRATEGY_TIMEFRAME = {
 
 # ── Per-strategy confidence minimums ─────────────────────────
 STRATEGY_MIN_CONFIDENCE = {
-    "SWING":    60,   # Swing needs conviction — large moves, longer holds
-    "BREAKOUT": 58,   # Breakout: medium confidence — momentum confirms
-    "SCALP":    50,   # Scalp: lower bar — small moves, in/out fast
+    "SWING":    70,   # Minimum 70% AI confidence for swing trades
+    "BREAKOUT": 70,   # Minimum 70% AI confidence for breakout trades
+    "SCALP":    70,   # Minimum 70% AI confidence across all strategies
 }
 
 # ── Global thresholds ─────────────────────────────────────────
-MIN_CONFIDENCE_THRESHOLD  = 60   # Forex/JPY baseline (SWING strategy)
+MIN_CONFIDENCE_THRESHOLD  = 70   # Minimum 70% AI confidence required
 MIN_REGIME_CONFIDENCE     = 0.50 # Regime detector minimum confidence
 HIGH_CONFIDENCE_THRESHOLD = 75
-GOLD_PAIRS                = []  # Gold handled by separate gold_server
-GOLD_CONFIDENCE_THRESHOLD = 60   # Gold swing — same as baseline
-SIGNAL_THROTTLE_MINUTES   = 120  # Swing: minimum 2h between signals per pair
+GOLD_PAIRS                = []  # Gold handled by gold_server.py → @grandcomgold
+GOLD_CONFIDENCE_THRESHOLD = 70   # Gold swing — same as baseline
+SIGNAL_THROTTLE_MINUTES   = 240  # Minimum 4h between signals per pair (enforced)
+last_signal_time: dict = {}       # {pair: datetime} — tracks last signal sent
 SESSION_FILTERS = {}
 DRAWDOWN_PROTECTION = {
-    "enabled": True,
-    "max_daily_losses": 3,
-    "max_daily_loss_pips": 50,
-    "pause_duration_hours": 4,
+    "enabled":              True,
+    "max_daily_losses":     2,    # Stop after 2 losses per pair per day
+    "max_daily_loss_pips":  20,   # Stop after 20 pips loss per pair (tightened)
+    "pause_duration_hours": 12,   # 12h pause after limit hit
 }
+
+# Minor pairs get stricter protection — 1 loss pauses for 24h
+MINOR_PAIR_MAX_DAILY_LOSSES = 1   # Only 1 loss allowed for minor/cross pairs
+MINOR_PAIR_PAUSE_HOURS      = 24  # Full day pause after 1 loss on minor pair
 daily_pair_performance = {}
 
 DEFAULT_PAIR_PARAMS = {
@@ -1029,45 +543,118 @@ DEFAULT_PAIR_PARAMS = {
     "decimal_places": 5, "typical_spread": 0.00015
 }
 
+# ══════════════════════════════════════════════════════════════════
+# SESSION FILTERS — Aligned with Forex_Trading_Sessions-PAIRS.docx
+# ══════════════════════════════════════════════════════════════════
+#
+# Session windows (UTC):
+#   Asian session :  00:00 – 09:00 UTC  (Tokyo pairs)
+#   London session:  07:00 – 16:00 UTC  (EUR/GBP pairs)
+#   New York      :  12:00 – 21:00 UTC  (USD/CAD pairs)
+#   London→NY     :  12:00 – 16:00 UTC  (BEST overlap — tightest spread)
+#   Asian→London  :  07:00 – 09:00 UTC  (crossover for GBPJPY/EURJPY)
+#
+# Strategy: Each pair only generates signals during its optimal session.
+# This prevents: AUDNZD signals at 3am, CADJPY signals at NY open, etc.
+# ══════════════════════════════════════════════════════════════════
+
+# ── Minor/cross pairs (strict — 1 loss = 24h pause) ──────────────
+MINOR_PAIRS = {
+    "AUDNZD", "CADJPY", "CHFJPY", "EURAUD", "GBPCAD",
+    "EURCAD", "GBPAUD", "EURGBP", "EURCHF", "AUDJPY",
+}
+
+# ── Per-pair session windows (start_hour, end_hour) UTC ──────────
+# Based on document: Asian=00-09, London=07-16, NY=12-21
+# Swing strategy: only trade within the pair's natural session
+PAIR_SESSION_WINDOWS = {
+    # ── Best trend pairs (London + NY) — widest window ──
+    "EURUSD":  (7,  21),   # London + NY — best trend pair
+    "GBPUSD":  (7,  21),   # London + NY — best trend pair
+    "USDCHF":  (7,  21),   # London + NY
+    "USDCAD":  (12, 21),   # NY only (CAD = North American pair)
+
+    # ── USD/JPY trades all sessions ──
+    "USDJPY":  (0,  21),   # Asian + London + NY
+
+    # ── JPY crosses — Asian + London ──
+    "EURJPY":  (0,  16),   # Asian + London (key overlap pair)
+    "GBPJPY":  (0,  16),   # Asian + London (high volatility)
+    "AUDJPY":  (0,  9),    # Asian only (DISABLED — low liquidity outside Asian)
+    "CADJPY":  (0,  9),    # Asian only (DISABLED)
+    "CHFJPY":  (0,  9),    # Asian only (DISABLED)
+
+    # ── AUD/NZD pairs — Asian + NY crossover ──
+    "AUDUSD":  (0,  21),   # Asian + NY (clean mover per document)
+    "NZDUSD":  (0,  21),   # Asian + NY (clean mover per document)
+    "AUDNZD":  (0,  9),    # Asian only (DISABLED — purely Asian, too choppy)
+
+    # ── EUR/GBP cross pairs — London + NY overlap ──
+    "GBPCAD":  (12, 16),   # London→NY overlap only (cross pair)
+    "EURCAD":  (12, 16),   # London→NY overlap only (cross pair)
+    "EURAUD":  (7,  16),   # Asian→London crossover + London
+    "GBPAUD":  (7,  16),   # Asian→London crossover + London
+    "EURGBP":  (7,  16),   # London only
+    "EURCHF":  (7,  16),   # London only
+}
+
 def is_session_optimal(pair: str) -> bool:
-    now = datetime.utcnow()
-    current_hour = now.hour
-    current_minute = now.minute
-    if pair not in SESSION_FILTERS:
+    """
+    Returns True only when the pair is in its documented optimal session.
+    Blocks trading outside natural session windows to reduce false signals.
+    Aligns with Forex_Trading_Sessions-PAIRS.docx strategy.
+    """
+    now    = datetime.utcnow()
+    hour   = now.hour
+    minute = now.minute
+    p      = pair.upper()
+
+    # Get session window for this pair
+    window = PAIR_SESSION_WINDOWS.get(p)
+    if window is None:
+        # Unknown pair — allow trading (conservative fallback)
         return True
-    filter_config = SESSION_FILTERS[pair]
-    optimal_hours = filter_config.get("optimal_hours", list(range(24)))
-    block_before_close = filter_config.get("block_before_close", 15)
-    if current_hour not in optimal_hours:
+
+    start_h, end_h = window
+
+    # Block outside session window
+    if not (start_h <= hour < end_h):
         return False
-    session_end_hours = [8, 16, 21]
-    for end_hour in session_end_hours:
-        if current_hour == end_hour - 1 and current_minute >= (60 - block_before_close):
-            logging.info(f"⏰ {pair} blocked - {block_before_close} mins before session close")
-            return False
+
+    # Block last 15 minutes before session close (spread widens)
+    if hour == end_h - 1 and minute >= 45:
+        return False
+
     return True
 
 def check_drawdown_protection(pair: str) -> tuple[bool, str]:
     global daily_pair_performance
     if not DRAWDOWN_PROTECTION["enabled"]:
         return True, ""
+
     today = datetime.utcnow().date().isoformat()
-    key = f"{pair}_{today}"
+    key   = f"{pair}_{today}"
     if key not in daily_pair_performance:
         daily_pair_performance[key] = {"losses": 0, "loss_pips": 0, "paused_until": None}
     perf = daily_pair_performance[key]
+
     if perf["paused_until"]:
         if datetime.utcnow() < perf["paused_until"]:
-            remaining = (perf["paused_until"] - datetime.utcnow()).seconds // 60
-            return False, f"Paused for {remaining} more minutes (drawdown protection)"
-        else:
-            perf["paused_until"] = None
-    if perf["losses"] >= DRAWDOWN_PROTECTION["max_daily_losses"]:
-        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
-        return False, f"Max daily losses ({perf['losses']}) reached"
+            remaining = int((perf["paused_until"] - datetime.utcnow()).total_seconds() / 60)
+            return False, f"Paused {remaining} min (drawdown protection)"
+        perf["paused_until"] = None
+
+    # Minor/cross pairs get stricter limits — 1 loss = 24h pause
+    is_minor  = pair.upper() in MINOR_PAIRS
+    max_loss  = MINOR_PAIR_MAX_DAILY_LOSSES if is_minor else DRAWDOWN_PROTECTION["max_daily_losses"]
+    pause_hrs = MINOR_PAIR_PAUSE_HOURS      if is_minor else DRAWDOWN_PROTECTION["pause_duration_hours"]
+
+    if perf["losses"] >= max_loss:
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=pause_hrs)
+        return False, f"Max losses ({perf['losses']}) hit for {pair} — paused {pause_hrs}h"
     if perf["loss_pips"] >= DRAWDOWN_PROTECTION["max_daily_loss_pips"]:
-        perf["paused_until"] = datetime.utcnow() + timedelta(hours=DRAWDOWN_PROTECTION["pause_duration_hours"])
-        return False, f"Max daily loss pips ({perf['loss_pips']}) reached"
+        perf["paused_until"] = datetime.utcnow() + timedelta(hours=pause_hrs)
+        return False, f"Max loss pips ({perf['loss_pips']:.0f}) hit for {pair} — paused {pause_hrs}h"
     return True, ""
 
 def record_trade_result(pair: str, result: str, pips: float):
@@ -1081,81 +668,52 @@ def record_trade_result(pair: str, result: str, pips: float):
         daily_pair_performance[key]["loss_pips"] += abs(pips)
 
 async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate AI-powered trading signal — trend decides direction, AI provides confidence"""
+    """Generate AI-powered trading signal using ATR-based swing targets for all pairs"""
     try:
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
-        use_fixed_pips = params.get('use_fixed_pips', False)
 
-        # Direction is ALREADY decided by trend (calculate_technical_indicators)
-        forced_direction = indicators.get("signal_direction", "BUY")
+        m_sl  = params.get('atr_multiplier_sl',  1.5)
+        m_tp1 = params.get('atr_multiplier_tp1', 2.5)
+        m_tp2 = params.get('atr_multiplier_tp2', 4.0)
+        m_tp3 = params.get('atr_multiplier_tp3', 6.0)
+        atr   = indicators.get('atr', 0)
+        dp    = params.get('decimal_places', 5)
 
         system_message = (
-            "You are an elite institutional forex trader. "
-            "You will be given a trading direction (BUY or SELL) based on trend analysis. "
-            "Your job is to assess confidence (0-100) and provide a brief analysis. "
-            "If the setup looks weak, set confidence below 60 to filter it out."
+            "You are an elite institutional forex and gold swing trader. "
+            "You use ATR-based targets — never fixed pips. "
+            "Your signals follow the trend regime strictly. "
+            "Respond with valid JSON only."
         )
 
-        if use_fixed_pips:
-            tp1_pips = params.get('fixed_tp1_pips', 5)
-            tp2_pips = params.get('fixed_tp2_pips', 10)
-            tp3_pips = params.get('fixed_tp3_pips', 15)
-            pip_value = params['pip_value']
+        prompt = f"""
+Analyze {symbol} and provide a professional swing trading signal.
 
-            prompt = f"""
-Analyze {symbol} for a {forced_direction} trade setup.
+=== MARKET DATA (4H) ===
+Current Price : {indicators['current_price']}
+RSI(14)       : {indicators['rsi']:.2f} | Trend: {indicators['trend']}
+MACD          : {indicators['macd']:.6f} | Signal: {indicators['macd_signal']:.6f}
+MA20          : {indicators['ma_20']:.{dp}f} | MA50: {indicators['ma_50']:.{dp}f}
+BB Upper      : {indicators['bb_upper']:.{dp}f} | BB Lower: {indicators['bb_lower']:.{dp}f}
+ATR(14)       : {atr:.{dp}f}
 
-=== MARKET DATA ===
-Current Price: {indicators['current_price']}
-Trend: {indicators['trend']} (Price vs MA50)
-RSI: {indicators['rsi']:.2f} ({indicators.get('rsi_zone', 'NEUTRAL')})
-MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
-MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
-BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
-ATR: {indicators['atr']:.{params['decimal_places']}f}
+=== ATR SWING TARGETS (apply from your entry price) ===
+SL  = {m_sl}  × ATR  ≈ {round(atr * m_sl,  dp)} from entry  (place opposite side of signal)
+TP1 = {m_tp1} × ATR  ≈ {round(atr * m_tp1, dp)} from entry  → R:R = {round(m_tp1/m_sl, 2)}
+TP2 = {m_tp2} × ATR  ≈ {round(atr * m_tp2, dp)} from entry  → R:R = {round(m_tp2/m_sl, 2)}
+TP3 = {m_tp3} × ATR  ≈ {round(atr * m_tp3, dp)} from entry  → R:R = {round(m_tp3/m_sl, 2)}
+Min R:R required: {params['min_rr']}
 
-=== DIRECTION: {forced_direction} (trend-following) ===
+=== SIGNAL RULES ===
+- BUY:  all TP levels ABOVE entry, SL BELOW entry
+- SELL: all TP levels BELOW entry, SL ABOVE entry
+- RSI > 70 + price near BB upper → SELL
+- RSI < 30 + price near BB lower → BUY
+- NEUTRAL if no clear setup
+- Round prices to {dp} decimal places
 
-=== FIXED PIP TARGETS ===
-TP1: {tp1_pips} pips | TP2: {tp2_pips} pips | TP3: {tp3_pips} pips
-SL: ATR x {params['atr_multiplier_sl']} | Pip Value: {pip_value}
-
-=== RULES ===
-- Signal MUST be {forced_direction}
-- Set confidence 0-100 based on setup strength; below 60 = no trade
-- {"BUY: TP above entry, SL below entry" if forced_direction == "BUY" else "SELL: TP below entry, SL above entry"}
-- Round all prices to {params['decimal_places']} decimal places
-
-=== OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
-RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
-"""
-        else:
-            prompt = f"""
-Analyze {symbol} for a {forced_direction} trade setup.
-
-=== MARKET DATA ===
-Current Price: {indicators['current_price']}
-Trend: {indicators['trend']} (Price vs MA50)
-RSI: {indicators['rsi']:.2f} ({indicators.get('rsi_zone', 'NEUTRAL')})
-MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
-MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
-BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f}
-ATR: {indicators['atr']:.{params['decimal_places']}f}
-
-=== DIRECTION: {forced_direction} (trend-following) ===
-
-=== ATR MULTIPLIERS ===
-SL: {params['atr_multiplier_sl']} | TP1: {params.get('atr_multiplier_tp1',1.0)} | TP2: {params.get('atr_multiplier_tp2',2.0)} | TP3: {params.get('atr_multiplier_tp3',3.0)}
-Min R:R: {params['min_rr']}
-
-=== RULES ===
-- Signal MUST be {forced_direction}
-- Set confidence 0-100 based on setup strength; below 60 = no trade
-
-=== OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
-RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+=== OUTPUT FORMAT (JSON ONLY — NO OTHER TEXT) ===
+{{"signal":"BUY"or"SELL"or"NEUTRAL","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<120 words","risk_reward":numeric}}
 """
 
         max_retries = 3
@@ -1168,22 +726,20 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
                         session_id=f"signal_{symbol}_{datetime.utcnow().timestamp()}_{attempt}",
                         system_message=system_message
                     ).with_model("openai", "gpt-4o-mini")
-                    
                     user_msg = UserMessage(text=prompt)
                     ai_response = await chat.send_message(user_msg)
                 else:
-                    # Fallback: use litellm directly (for Railway deployment)
+                    # Fallback: litellm (Railway deployment without emergentintegrations)
                     import litellm
-                    response = await litellm.acompletion(
+                    resp = await litellm.acompletion(
                         model="gpt-4o-mini",
                         messages=[
                             {"role": "system", "content": system_message},
-                            {"role": "user", "content": prompt}
+                            {"role": "user", "content": prompt},
                         ],
                         api_key=os.environ.get("OPENAI_API_KEY", EMERGENT_LLM_KEY),
                     )
-                    ai_response = response.choices[0].message.content
-                
+                    ai_response = resp.choices[0].message.content
                 if ai_response and len(ai_response.strip()) > 10:
                     break
                 else:
@@ -1200,92 +756,66 @@ RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
         import json
         import re
         raw = ai_response.strip()
-        # Remove markdown code fences (```json ... ``` or ``` ... ```)
+        # Remove markdown code fences
         fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', raw, re.DOTALL)
         if fence_match:
             raw = fence_match.group(1).strip()
-        # Fallback: extract first { ... } block
         if not raw.startswith('{'):
             brace_match = re.search(r'\{.*\}', raw, re.DOTALL)
             if brace_match:
                 raw = brace_match.group(0)
-        # Try parsing, fix common LLM JSON errors if needed
-        ai_data = None
-        for attempt_parse in range(3):
-            try:
-                if attempt_parse == 0:
-                    ai_data = json.loads(raw)
-                elif attempt_parse == 1:
-                    fixed = re.sub(r',\s*}', '}', raw)
-                    fixed = re.sub(r',\s*]', ']', fixed)
-                    fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
-                    fixed = re.sub(r'(\d)\s*\n\s*"', r'\1,\n"', fixed)
-                    fixed = re.sub(r'(\])\s*\n\s*"', r'\1,\n"', fixed)
-                    fixed = fixed.replace("'", '"')
-                    ai_data = json.loads(fixed)
-                else:
-                    # Last resort: extract key values with regex
-                    signal_match = re.search(r'"signal"\s*:\s*"(\w+)"', raw)
-                    conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', raw)
-                    entry_match = re.search(r'"entry_price"\s*:\s*([\d.]+)', raw)
-                    analysis_match = re.search(r'"analysis"\s*:\s*"([^"]*)"', raw)
-                    ai_data = {
-                        "signal": signal_match.group(1) if signal_match else "NEUTRAL",
-                        "confidence": float(conf_match.group(1)) if conf_match else 50.0,
-                        "entry_price": float(entry_match.group(1)) if entry_match else indicators['current_price'],
-                        "analysis": analysis_match.group(1) if analysis_match else "AI analysis unavailable",
-                        "tp_levels": [],
-                        "sl_price": 0
-                    }
-                break
-            except (json.JSONDecodeError, Exception) as parse_err:
-                if attempt_parse == 2:
-                    logger.warning(f"All JSON parsing failed for {symbol}, using regex extraction")
-        
-        if not ai_data:
-            logger.error(f"Failed to parse AI response for {symbol}")
-            return None
+        try:
+            ai_data = json.loads(raw)
+        except json.JSONDecodeError:
+            fixed = re.sub(r',\s*}', '}', raw)
+            fixed = re.sub(r',\s*]', ']', fixed)
+            fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
+            fixed = fixed.replace("'", '"')
+            ai_data = json.loads(fixed)
 
-        entry = ai_data.get("entry_price", indicators['current_price'])
-        # Force signal to match trend direction — AI cannot override
-        signal_type = forced_direction
-        ai_data["signal"] = forced_direction
-        tp_levels = ai_data.get("tp_levels", [])
+        entry       = ai_data.get("entry_price", indicators['current_price'])
+        signal_type = ai_data.get("signal", "BUY")
 
-        if use_fixed_pips and signal_type != "NEUTRAL":
-            tp1_pips = params.get('fixed_tp1_pips', 5)
-            tp2_pips = params.get('fixed_tp2_pips', 10)
-            tp3_pips = params.get('fixed_tp3_pips', 15)
-            pip_value = params['pip_value']
-            if signal_type == "BUY":
-                tp_levels = [
-                    round(entry + (tp1_pips * pip_value), params['decimal_places']),
-                    round(entry + (tp2_pips * pip_value), params['decimal_places']),
-                    round(entry + (tp3_pips * pip_value), params['decimal_places'])
-                ]
+        # ── UNIFIED ATR OVERRIDE — applies to ALL pairs (Forex + Gold) ──
+        # AI-returned TP/SL values are always replaced by ATR-derived targets.
+        # This ensures R:R is always correct regardless of what the AI returns,
+        # adapts to live volatility, and is consistent across every pair.
+        if signal_type != "NEUTRAL":
+            atr   = indicators.get('atr', 0)
+            m_sl  = params.get('atr_multiplier_sl',  1.5)
+            m_tp1 = params.get('atr_multiplier_tp1', 2.5)
+            m_tp2 = params.get('atr_multiplier_tp2', 4.0)
+            m_tp3 = params.get('atr_multiplier_tp3', 6.0)
+            dp    = params.get('decimal_places', 5)
+            if atr > 0:
+                if signal_type == "BUY":
+                    tp_levels = [
+                        round(entry + atr * m_tp1, dp),
+                        round(entry + atr * m_tp2, dp),
+                        round(entry + atr * m_tp3, dp),
+                    ]
+                    sl_price  = round(entry - atr * m_sl, dp)
+                else:  # SELL
+                    tp_levels = [
+                        round(entry - atr * m_tp1, dp),
+                        round(entry - atr * m_tp2, dp),
+                        round(entry - atr * m_tp3, dp),
+                    ]
+                    sl_price  = round(entry + atr * m_sl, dp)
+                ai_data["tp_levels"] = tp_levels
+                ai_data["sl_price"]  = sl_price
+                tp_dist = abs(tp_levels[2] - entry)
+                sl_dist = abs(entry - sl_price)
+                ai_data["risk_reward"] = round(tp_dist / sl_dist, 2) if sl_dist > 0 else params['min_rr']
+                logger.info(
+                    f"📐 {symbol} ATR-override: entry={entry} SL={sl_price} "
+                    f"TP1={tp_levels[0]} TP2={tp_levels[1]} TP3={tp_levels[2]} "
+                    f"ATR={atr:.5f} RR={ai_data['risk_reward']}"
+                )
             else:
-                tp_levels = [
-                    round(entry - (tp1_pips * pip_value), params['decimal_places']),
-                    round(entry - (tp2_pips * pip_value), params['decimal_places']),
-                    round(entry - (tp3_pips * pip_value), params['decimal_places'])
-                ]
-            ai_data["tp_levels"] = tp_levels
-
-        elif len(tp_levels) == 3 and len(set(tp_levels)) != 3:
-            atr = indicators['atr']
-            if signal_type == "BUY":
-                tp_levels = [
-                    round(entry + (atr * params.get('atr_multiplier_tp1', 1.0)), params['decimal_places']),
-                    round(entry + (atr * params.get('atr_multiplier_tp2', 2.0)), params['decimal_places']),
-                    round(entry + (atr * params.get('atr_multiplier_tp3', 3.0)), params['decimal_places'])
-                ]
-            else:
-                tp_levels = [
-                    round(entry - (atr * params.get('atr_multiplier_tp1', 1.0)), params['decimal_places']),
-                    round(entry - (atr * params.get('atr_multiplier_tp2', 2.0)), params['decimal_places']),
-                    round(entry - (atr * params.get('atr_multiplier_tp3', 3.0)), params['decimal_places'])
-                ]
-            ai_data["tp_levels"] = tp_levels
+                tp_levels = ai_data.get("tp_levels", [])
+        else:
+            tp_levels = []
 
         risk_reward = ai_data.get("risk_reward", params['min_rr'])
         if isinstance(risk_reward, str) and ":" in risk_reward:
@@ -1428,6 +958,43 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             logger.warning(f"🛑 {pair} paused - {pause_reason}")
             return None
 
+        # FILTER 2b: PER-PAIR SIGNAL THROTTLE
+        # Prevents the same pair from firing multiple times in a short window
+        last_ts = last_signal_time.get(pair)
+        if last_ts:
+            elapsed_minutes = (datetime.utcnow() - last_ts).total_seconds() / 60
+            if elapsed_minutes < SIGNAL_THROTTLE_MINUTES:
+                remaining = int(SIGNAL_THROTTLE_MINUTES - elapsed_minutes)
+                logger.info(f"⏳ {pair} throttled — last signal {elapsed_minutes:.0f} min ago, wait {remaining} more min")
+                return None
+
+        # FILTER 2c: CURRENCY CORRELATION PROTECTION
+        # Max 1 open trade per base or quote currency
+        # Prevents: AUDJPY BUY + AUDNZD SELL = double AUD exposure
+        # Prevents: AUDNZD SELL + AUDNZD SELL = 7x same direction
+        pair_upper = pair.upper()
+        base_currency  = pair_upper[:3]   # e.g. AUD from AUDNZD
+        quote_currency = pair_upper[3:6]  # e.g. NZD from AUDNZD
+
+        active_check = await db.signals.find(
+            {"status": "ACTIVE"}, {"pair": 1, "type": 1}
+        ).to_list(length=50)
+
+        for open_sig in active_check:
+            open_pair = open_sig.get("pair", "").upper()
+            if open_pair == pair_upper:
+                logger.info(f"🔒 {pair} BLOCKED — already have ACTIVE {open_pair} signal (exact duplicate)")
+                return None
+            # Check base/quote currency overlap
+            open_base  = open_pair[:3]
+            open_quote = open_pair[3:6]
+            if base_currency in (open_base, open_quote) or quote_currency in (open_base, open_quote):
+                logger.info(
+                    f"🔒 {pair} BLOCKED — currency correlation: "
+                    f"{base_currency}/{quote_currency} overlaps with open {open_pair}"
+                )
+                return None
+
         # ── Strategy-aware timeframe selection ───────────────────
         # Gold (SWING) → 4H candles  |  Forex → 1H  |  Scalp → 15min
         pair_strategy  = params.get("strategy", "SWING" if pair in GOLD_PAIRS else "SWING")
@@ -1455,6 +1022,22 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             logger.info(f"No trade signal for {pair} (NEUTRAL or None)")
             return None
 
+        # ── Gold sanity check: reject tiny TP/SL immediately ─────────
+        if pair in GOLD_PAIRS:
+            _tp_check = ai_analysis.get("tp_levels", [])
+            _sl_check = ai_analysis.get("sl_price", 0)
+            _en_check = ai_analysis.get("entry_price", 0)
+            if _tp_check and _en_check and _sl_check:
+                _tp_dist = abs(_tp_check[-1] - _en_check)  # use furthest TP
+                _sl_dist = abs(_en_check - _sl_check)
+                if _tp_dist < 3.0 or _sl_dist < 3.0:
+                    logger.warning(
+                        f"🚫 {pair} REJECTED — Gold TP/SL too small: "
+                        f"TP_dist={_tp_dist:.2f}, SL_dist={_sl_dist:.2f} (min 3.0). "
+                        f"ATR override will fix this on next cycle."
+                    )
+                    return None
+
         # FILTER 3: CONFIDENCE — early gate (catches truly bad signals)
         ai_confidence   = float(ai_analysis.get("confidence", 0))
         # Use strategy-specific threshold
@@ -1466,9 +1049,9 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             logger.info(f"📊 {pair} [{strategy_type}] skipped — confidence {ai_confidence:.1f}% < {early_threshold}%")
             return None
 
-        # FILTER 3b: MULTI-TIMEFRAME CONFIRMATION (skip for gold — swing trades use ATR targets)
-        GOLD_PAIRS_MTF_SKIP = {"XAUUSD", "XAUEUR"}
-        if pair not in GOLD_PAIRS_MTF_SKIP:
+        # FILTER 3b: MULTI-TIMEFRAME CONFIRMATION
+        # Gold uses 4H as primary — skip redundant MTF check (it IS the 4H data)
+        if pair not in GOLD_PAIRS:
             try:
                 signal_direction = ai_analysis.get("signal", "NEUTRAL")
                 mtf_confirmed, mtf_reason = await check_higher_timeframe_alignment(pair, signal_direction)
@@ -1478,8 +1061,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             except Exception as mtf_err:
                 logger.warning(f"⚠️ {pair} MTF check error (allowing): {mtf_err}")
         else:
-            signal_direction = ai_analysis.get("signal", "NEUTRAL")
-            logger.info(f"🕐 {pair} MTF skipped (gold swing pair)")
+            logger.info(f"🪙 {pair} MTF check skipped — already on 4H swing timeframe")
 
         # FILTER 3c: CHOPPY MARKET DETECTION
         try:
@@ -1507,7 +1089,7 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_confidence= regime_info.get('confidence', 0.5)
             risk_multiplier  = regime_info.get('risk_multiplier', 1.0)
 
-            if regime_name in SKIP_REGIME and pair not in {"XAUUSD", "XAUEUR"}:
+            if regime_name in SKIP_REGIME:
                 logger.info(f"📉 {pair} skipped - {regime_name} regime")
                 return None
             if regime_confidence < MIN_REGIME_CONFIDENCE:
@@ -1516,19 +1098,18 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 
             signal_type = ai_analysis["signal"]
 
-            # ── Regime enforcement (strategy-aware) ──────────────────
-            # TREND_UP   → SWING → BUY only
-            # TREND_DOWN → SWING → SELL only
-            # RANGE      → DISABLED (caught by SKIP_REGIME above)
-            # HIGH_VOL   → BREAKOUT → both BUY and SELL
-            # UNKNOWN    → SWING → both allowed (fallback)
+            # ── Regime enforcement ──────────────────────────────────
+            # UPTREND   → SWING → BUY only
+            # DOWNTREND → SWING → SELL only
+            # RANGE     → DISABLED (caught by SKIP_REGIME above)
+            # HIGH_VOL  → BREAKOUT → both BUY and SELL
             active_strategy   = REGIME_STRATEGY.get(regime_name, "SWING")
             strategy_min_conf = STRATEGY_MIN_CONFIDENCE.get(active_strategy, MIN_CONFIDENCE_THRESHOLD)
 
-            if regime_name == "TREND_UP" and signal_type != "BUY":
+            if regime_name == "UPTREND" and signal_type != "BUY":
                 logger.info(f"📈 {pair} [SWING] REJECTED — UPTREND=BUY only (got {signal_type})")
                 return None
-            elif regime_name == "TREND_DOWN" and signal_type != "SELL":
+            elif regime_name == "DOWNTREND" and signal_type != "SELL":
                 logger.info(f"📉 {pair} [SWING] REJECTED — DOWNTREND=SELL only (got {signal_type})")
                 return None
             # HIGH_VOL / UNKNOWN → both directions allowed
@@ -1542,33 +1123,6 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 return None
 
             logger.info(f"✅ {pair} strategy={active_strategy} regime={regime_name} conf={ai_confidence:.1f}%")
-
-            # Adjust TP/SL targets per strategy for RANGE signals
-            # Range/scalp uses tighter fixed pips, trend uses pair defaults
-            if active_strategy == "SCALP" and regime_name == "RANGE":
-                params_used = params.copy()
-                pip_val = params.get("pip_value", 0.0001)
-                # Tighter scalp targets: 3/6/9 pips TP, 8 pip SL
-                if signal_type == "BUY":
-                    ai_analysis["tp_levels"] = [
-                        round(ai_analysis["entry_price"] + 3 * pip_val,  params.get("decimal_places", 5)),
-                        round(ai_analysis["entry_price"] + 6 * pip_val,  params.get("decimal_places", 5)),
-                        round(ai_analysis["entry_price"] + 9 * pip_val,  params.get("decimal_places", 5)),
-                    ]
-                    ai_analysis["sl_price"] = round(
-                        ai_analysis["entry_price"] - 8 * pip_val, params.get("decimal_places", 5)
-                    )
-                else:
-                    ai_analysis["tp_levels"] = [
-                        round(ai_analysis["entry_price"] - 3 * pip_val,  params.get("decimal_places", 5)),
-                        round(ai_analysis["entry_price"] - 6 * pip_val,  params.get("decimal_places", 5)),
-                        round(ai_analysis["entry_price"] - 9 * pip_val,  params.get("decimal_places", 5)),
-                    ]
-                    ai_analysis["sl_price"] = round(
-                        ai_analysis["entry_price"] + 8 * pip_val, params.get("decimal_places", 5)
-                    )
-                logger.info(f"📐 {pair} SCALP targets applied: "
-                            f"TP={ai_analysis['tp_levels']} SL={ai_analysis['sl_price']}")
 
             if optimized.get('optimized'):
                 entry_price = optimized.get('entry_price', ai_analysis['entry_price'])
@@ -1610,30 +1164,25 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             # Use furthest TP (tp_levels[-1]) as the "final TP" for R:R calculation
             final_tp = tp_levels[-1] if tp_levels else entry_price
 
-            # Skip gatekeeper for gold pairs — ATR swing strategy has built-in risk management
-            GOLD_GK_SKIP = {"XAUUSD", "XAUEUR"}
-            if pair in GOLD_GK_SKIP:
-                logger.info(f"✅ GOLD PAIR {pair} {ai_analysis['signal']} — Gatekeeper skipped (ATR swing strategy)")
-            else:
-                gk_approved, gk_code, gk_reason = run_execution_gatekeeper(
-                    pair          = pair,
-                    signal_type   = ai_analysis["signal"],
-                    entry_price   = entry_price,
-                    tp1           = final_tp,
-                    sl_price      = sl_price,
-                    current_price = indicators["current_price"],
-                    spread_pips   = spread_pips,
-                    ema50         = ema50,
-                    signal_ts_iso = signal_iso_ts,
-                    open_trades   = open_trades_list,
-                    confidence    = ai_confidence,
-                )
+            gk_approved, gk_code, gk_reason = run_execution_gatekeeper(
+                pair          = pair,
+                signal_type   = ai_analysis["signal"],
+                entry_price   = entry_price,
+                tp1           = final_tp,
+                sl_price      = sl_price,
+                current_price = indicators["current_price"],
+                spread_pips   = spread_pips,
+                ema50         = ema50,
+                signal_ts_iso = signal_iso_ts,
+                open_trades   = open_trades_list,
+                confidence    = ai_confidence,  # raw AI confidence — not multiplied by regime
+            )
 
-                if not gk_approved:
-                    logger.warning(f"🚫 GATEKEEPER REJECTED {pair} [{gk_code}]: {gk_reason}")
-                    return None
+            if not gk_approved:
+                logger.warning(f"🚫 GATEKEEPER REJECTED {pair} [{gk_code}]: {gk_reason}")
+                return None
 
-                logger.info(f"✅ GATEKEEPER APPROVED {pair} {ai_analysis['signal']} — {gk_reason}")
+            logger.info(f"✅ GATEKEEPER APPROVED {pair} {ai_analysis['signal']} — {gk_reason}")
 
         except Exception as gk_err:
             logger.error(f"⚠️ Gatekeeper error for {pair} (allowing): {gk_err}")
@@ -1679,10 +1228,14 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         )
 
         signal_dict = signal.dict(exclude={"id"})
-        signal_dict['regime']          = regime_name
-        signal_dict['risk_multiplier'] = risk_multiplier
+        signal_dict['regime']              = regime_name
+        signal_dict['risk_multiplier']     = risk_multiplier
+        signal_dict['breakeven_triggered'] = False   # set True when TP1 hit
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
+
+        # Record signal time for per-pair throttle
+        last_signal_time[pair] = datetime.utcnow()
 
         await send_signal_to_telegram(signal, regime_name, risk_multiplier)
 
@@ -1705,6 +1258,94 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 # ============ TELEGRAM BOT ============
 telegram_bot = None
 
+# ============ BREAKEVEN MONITOR ============
+async def check_breakeven_forex():
+    """
+    Runs every 5 minutes. For every ACTIVE forex signal:
+    - Fetches current live price from DB (current_price updated by outcome tracker)
+    - If price reached TP1 AND breakeven not yet triggered:
+        → Updates DB: breakeven_triggered=True, sl_price=entry_price
+        → Sends Telegram notification to move SL to entry
+    """
+    try:
+        active = await db.signals.find(
+            {"status": "ACTIVE", "breakeven_triggered": {"$ne": True}}
+        ).to_list(length=100)
+
+        if not active:
+            return
+
+        for sig in active:
+            pair        = sig.get("pair")
+            signal_type = sig.get("type")
+            entry_price = sig.get("entry_price", 0)
+            tp_levels   = sig.get("tp_levels", [])
+
+            if not pair or not tp_levels or not entry_price:
+                continue
+
+            tp1 = tp_levels[0]
+
+            # Fetch live price
+            df = await get_price_data(pair, interval="1h", outputsize=2)
+            if df is None or len(df) == 0:
+                continue
+
+            current_price = float(df.iloc[-1]["close"])
+
+            # Check TP1 hit
+            tp1_hit = (
+                (signal_type == "BUY"  and current_price >= tp1) or
+                (signal_type == "SELL" and current_price <= tp1)
+            )
+            if not tp1_hit:
+                continue
+
+            logger.info(
+                f"🎯 {pair} TP1 HIT @ {tp1}! Current={current_price} "
+                f"→ Moving SL to breakeven ({entry_price})"
+            )
+
+            # Update DB
+            await db.signals.update_one(
+                {"_id": sig["_id"]},
+                {"$set": {
+                    "breakeven_triggered": True,
+                    "sl_price":            entry_price,
+                    "breakeven_at":        datetime.utcnow(),
+                    "breakeven_price":     current_price,
+                }}
+            )
+
+            # Send Telegram notification
+            if TELEGRAM_BOT_TOKEN:
+                try:
+                    bot       = Bot(token=TELEGRAM_BOT_TOKEN)
+                    channel   = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+                    tp2       = tp_levels[1] if len(tp_levels) > 1 else "N/A"
+                    tp3       = tp_levels[2] if len(tp_levels) > 2 else "N/A"
+                    be_message = (
+                        f"🔔 BREAKEVEN — {pair} {signal_type}\n"
+                        f"\n"
+                        f"✅ TP1 hit @ {tp1}\n"
+                        f"📌 Move SL → {entry_price} (breakeven)\n"
+                        f"\n"
+                        f"Remaining targets:\n"
+                        f"TP2: {tp2}\n"
+                        f"TP3: {tp3}\n"
+                        f"\n"
+                        f"🛡 Trade is now risk-free\n"
+                        f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
+                        f"Grandcom Swing EA\n"
+                    )
+                    await bot.send_message(chat_id=channel, text=be_message)
+                    logger.info(f"✅ Breakeven alert sent for {pair} {signal_type}")
+                except Exception as tg_err:
+                    logger.error(f"Telegram breakeven send error: {tg_err}")
+
+    except Exception as e:
+        logger.error(f"Breakeven monitor error: {e}")
+
 def sanitize_html(text: str) -> str:
     if not text:
         return ""
@@ -1712,38 +1353,52 @@ def sanitize_html(text: str) -> str:
     return text
 
 async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", risk_mult: float = 1.0):
+    """
+    Send ONE single plain-text message that works for both:
+    - TSCopier AI parser (reads symbol, direction, entry, TP, SL)
+    - Human subscribers (sees confidence, R:R, analysis)
+
+    No HTML. No second message. One message only.
+    TSCopier parses the top block; humans read the full thing.
+    """
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
             return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '@agbaakinlove')
-        gold_channel_id = os.environ.get('TELEGRAM_GOLD_CHANNEL_ID', '@grandcomgold')
 
-        # Gold pairs go to separate gold channel
-        GOLD_SIGNAL_PAIRS = {"XAUUSD", "XAUEUR"}
-        target_channel = gold_channel_id if signal.pair in GOLD_SIGNAL_PAIRS else channel_id
+        bot              = Bot(token=TELEGRAM_BOT_TOKEN)
+        forex_channel_id = os.environ.get('TELEGRAM_CHANNEL_ID', '@grandcomsignals')
+        # Forex server only — Gold signals handled by gold_server.py
+        # Forex server — all signals go to forex channel
+        target_channel = forex_channel_id
 
-        # ── TSCopier-compatible format ────────────────────────────────────
-        # Plain text, no HTML. TSCopier AI parses this reliably.
-        # Gold/XAUEUR: entry sent as a ±0.50 range so TSCopier uses
-        # market price when the exact entry is stale (fixes intermittent fails).
         signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
-        action = signal.type.capitalize()   # "Buy" / "Sell"
-        is_gold = "XAU" in signal.pair
+        action       = signal.type.capitalize()   # "Buy" / "Sell"
+        is_gold      = "XAU" in signal.pair
 
-        # For Gold, publish a small range around entry so TSCopier's
-        # "Smart Entry Mode" picks the live price within the zone.
+        # Gold: ±0.50 range so TSCopier Smart Entry picks live price
         if is_gold:
-            entry_range_lo = round(signal.entry_price - 0.50, 2)
-            entry_range_hi = round(signal.entry_price + 0.50, 2)
-            entry_line = f"{action} {entry_range_lo} - {entry_range_hi}"
+            entry_lo   = round(signal.entry_price - 0.50, 2)
+            entry_hi   = round(signal.entry_price + 0.50, 2)
+            entry_line = f"{action} {entry_lo} - {entry_hi}"
         else:
             entry_line = f"{action} {signal.entry_price}"
 
-        strategy_label = REGIME_STRATEGY.get(regime_name, "SCALP")
-        copier_message = (
-            f"{signal_emoji} #{signal.pair} [{strategy_label}]\n"
+        # Regime label
+        regime_emoji = {
+            "UPTREND":   "📈",
+            "DOWNTREND": "📉",
+            "HIGH_VOL":   "⚡",
+        }.get(regime_name, "📊")
+
+        strategy_label = REGIME_STRATEGY.get(regime_name, "SWING")
+
+        # ── Single unified message ────────────────────────────────────────
+        # Top section  → TSCopier reads this (symbol, direction, entry, TP, SL)
+        # Bottom section → human info (confidence, R:R, analysis, time)
+        # NO HTML tags — plain text only so TSCopier never gets confused
+        message = (
+            f"{signal_emoji} {signal.pair} {action.upper()}\n"
             f"\n"
             f"{entry_line}\n"
             f"\n"
@@ -1752,35 +1407,18 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
             f"TP3: {signal.tp_levels[2]}\n"
             f"\n"
             f"SL: {signal.sl_price}\n"
+            f"\n"
+            f"----------------------------\n"
+            f"{regime_emoji} Regime: {regime_name} | {strategy_label}\n"
+            f"R:R: 1:{signal.risk_reward} | Conf: {signal.confidence}%\n"
+            f"Time: {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"Grandcom Swing EA\n"
         )
 
-        # ── Info block (for human readers — sent as a second message) ─────
-        regime_emoji = {
-            "TREND_UP": "📈", "TREND_DOWN": "📉",
-            "RANGE": "↔️", "HIGH_VOL": "⚡"
-        }.get(regime_name, "📊")
-
-        safe_analysis = sanitize_html(signal.analysis)
-        info_message = (
-            f"<b>📊 R:R:</b> 1:{signal.risk_reward}  "
-            f"<b>⚡ AI Confidence:</b> {signal.confidence}%  "
-            f"{regime_emoji} <b>{regime_name}</b>\n"
-            f"<b>📝</b> {safe_analysis}\n"
-            f"<i>⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom ML + Safe Execution</i>"
-        )
-
-        # Send copier message first (plain text — no parse_mode)
         await bot.send_message(
             chat_id=target_channel,
-            text=copier_message
-        )
-
-        # Send info block second (HTML — for subscribers reading the channel)
-        await bot.send_message(
-            chat_id=target_channel,
-            text=info_message,
-            parse_mode="HTML"
+            text=message
+            # No parse_mode — pure plain text
         )
 
         logger.info(f"✅ Signal sent to Telegram {target_channel}: {signal.pair} {signal.type}")
@@ -1903,6 +1541,29 @@ async def get_active_signals(current_user: dict = Depends(get_current_user)):
             "created_at": s.get("created_at").isoformat() if s.get("created_at") else None,
             "regime": s.get("regime","UNKNOWN")} for s in active_signals]
         return {"success": True, "count": len(signals_with_status), "signals": signals_with_status}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@api_router.get("/signals/breakeven")
+async def get_breakeven_signals_forex(current_user: dict = Depends(get_current_user)):
+    """
+    MT5 EA polls this to get signals where TP1 was hit.
+    EA uses this to move SL to entry on the open trade.
+    """
+    try:
+        signals = await db.signals.find(
+            {"status": "ACTIVE", "breakeven_triggered": True},
+            {"pair":1,"type":1,"entry_price":1,"tp_levels":1,
+             "sl_price":1,"breakeven_price":1,"breakeven_at":1}
+        ).sort("breakeven_at", -1).limit(50).to_list(50)
+        result = [{"id": str(s["_id"]), "pair": s.get("pair"),
+                   "type": s.get("type"), "entry_price": s.get("entry_price"),
+                   "tp_levels": s.get("tp_levels",[]),
+                   "sl_price": s.get("sl_price"),
+                   "breakeven_price": s.get("breakeven_price"),
+                   "breakeven_at": s.get("breakeven_at","").isoformat() if s.get("breakeven_at") else None}
+                  for s in signals]
+        return {"success": True, "breakeven_signals": result, "count": len(result)}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2663,8 +2324,12 @@ async def admin_create_signal(signal: ManualSignalRequest, admin_user: dict = De
         if signal.send_telegram:
             try:
                 message = f"🎯 *MANUAL SIGNAL*\n\n📊 *{signal.pair}* - *{signal.type}*\n💰 Entry: {signal.entry_price}\n🎯 TP1: {signal.tp1} | TP2: {signal.tp2} | TP3: {signal.tp3}\n🛡️ SL: {signal.sl}\n\n✅ Gatekeeper Approved\n⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+                is_gold_pair = "XAU" in signal.pair
                 telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-                telegram_channel = os.environ.get("TELEGRAM_CHANNEL_ID","@grandcomsignals")
+                telegram_channel = os.environ.get(
+                    "TELEGRAM_GOLD_CHANNEL_ID" if is_gold_pair else "TELEGRAM_CHANNEL_ID",
+                    "@grandcomgold" if is_gold_pair else "@grandcomsignals"
+                )
                 if telegram_token:
                     import httpx
                     async with httpx.AsyncClient() as client:
@@ -2719,6 +2384,41 @@ async def admin_delete_user(user_id: str, admin_user: dict = Depends(require_adm
 @api_router.get("/admin/pair-config")
 async def get_pair_config(admin_user: dict = Depends(require_admin)):
     return {"success": True, "pairs": PAIR_PARAMETERS, "valid_pairs": list(PAIR_PARAMETERS.keys())}
+
+class PositionSizeRequest(BaseModel):
+    symbol:    str
+    entry:     float
+    sl:        float
+    balance:   float = 10000.0
+    risk_pct:  float = 0.01
+
+@api_router.post("/admin/position-size")
+async def calculate_position_size(req: PositionSizeRequest, admin_user: dict = Depends(require_admin)):
+    """
+    Calculate risk-based lot size for a given signal.
+    Used by the MT5 EA to determine position size before opening a trade.
+    """
+    try:
+        lot = _gatekeeper.position_size(
+            balance=req.balance,
+            entry=req.entry,
+            sl=req.sl,
+            symbol=req.symbol.upper(),
+            risk_pct=req.risk_pct,
+        )
+        pip_risk = _gatekeeper.price_to_pips(req.entry - req.sl, req.symbol)
+        risk_amount = req.balance * req.risk_pct
+        return {
+            "success":      True,
+            "symbol":       req.symbol.upper(),
+            "lot_size":     lot,
+            "pip_risk":     round(pip_risk, 2),
+            "risk_amount":  round(risk_amount, 2),
+            "risk_pct":     req.risk_pct * 100,
+            "balance":      req.balance,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @api_router.get("/admin/filters")
 async def get_profitability_filters(admin_user: dict = Depends(require_admin)):
@@ -2893,6 +2593,7 @@ async def stripe_webhook(request: Request):
 # ============ BACKGROUND TASKS ============
 async def auto_generate_signals():
     """Background task to auto-generate signals every 15 minutes"""
+    # Forex pairs only — Gold handled by gold_server.py
     active_pairs = [pair for pair, config in PAIR_PARAMETERS.items() if config.get('enabled', True)]
     logger.info(f"Active trading pairs: {active_pairs}")
     while True:
@@ -2917,7 +2618,7 @@ async def startup_event():
     logger.info("Starting Forex & Gold Signals API v2 + Safe Execution Mode...")
     tracker = init_outcome_tracker(db=db, twelve_data_api_key=TWELVE_DATA_API_KEY,
         telegram_bot_token=TELEGRAM_BOT_TOKEN,
-        telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID','@grandcomsignals'))
+        telegram_channel_id=os.environ.get('TELEGRAM_CHANNEL_ID','@grandcomsignals'))  # Forex channel
     tracker.start(interval_seconds=60)
     logger.info("Signal Outcome Tracker started")
     init_push_service(db)
@@ -2936,6 +2637,14 @@ async def startup_event():
         f"session=London+NY | news filter=placeholder"
     )
     asyncio.create_task(auto_generate_signals())
+
+    # Breakeven monitor — runs every 5 minutes
+    async def _breakeven_loop():
+        while True:
+            await asyncio.sleep(300)   # 5 minutes
+            await check_breakeven_forex()
+    asyncio.create_task(_breakeven_loop())
+    logger.info("✅ Breakeven monitor started — checks every 5 min")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
