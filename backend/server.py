@@ -87,19 +87,20 @@ class ExecutionGatekeeper:
     Checks (in order):
         1.  Signal age          — per-asset tolerance (Gold 10s / JPY 6s / FX 4s)
         2.  Future timestamp    — rejects clock-skewed / bad signals
-        3.  Session filter      — London 07-16 UTC + New York 12-21 UTC
+        3.  Session filter      — symbol-aware: JPY/AUD/NZD include Tokyo session
         4.  News filter         — placeholder (wire up ForexFactory API)
-        5.  Confidence          — min 65% (GK_MIN_CONFIDENCE)
-        6.  Max open trades     — hard cap (GK_MAX_OPEN_TRADES)
-        7.  Duplicate trade     — same symbol + same side already open
-        8.  Price sanity        — entry / sl / tp must all be > 0
-        9.  Direction structure — BUY: tp>entry>sl  |  SELL: tp<entry<sl
-        10. Risk / Reward       — Gold: min 1.8 via validate_gold_trade()
+        5.  Confidence          — min 60% (GK_MIN_CONFIDENCE)
+        6.  Consensus Gate      — ADX > 25 + StochRSI/Williams%R momentum alignment
+        7.  Max open trades     — hard cap (GK_MAX_OPEN_TRADES)
+        8.  Duplicate trade     — same symbol + same side already open
+        9.  Price sanity        — entry / sl / tp must all be > 0
+        10. Direction structure — BUY: tp>entry>sl  |  SELL: tp<entry<sl
+        11. Risk / Reward       — Gold: min 1.0 via validate_gold_trade()
                                   FX/JPY: min 1.5 (GK_MIN_RR)
-        11. Slippage (price)    — abs(entry - current_price) per-asset threshold
-        12. Slippage (pips)     — secondary pip-based check
-        13. Spread              — per-asset pip limit
-        14. EMA-50 proximity    — per-asset pip distance
+        12. Slippage (price)    — abs(entry - current_price) per-asset threshold
+        13. Slippage (pips)     — secondary pip-based check
+        14. Spread              — per-asset pip limit
+        15. EMA-50 side check   — trend-following: BUY must be above EMA, SELL below
 
     Env-var overrides (all hot-reloadable via Railway):
         GK_MIN_RR                (default 1.5)
@@ -107,8 +108,7 @@ class ExecutionGatekeeper:
         GK_MAX_SIGNAL_AGE_GOLD   (default 10s)
         GK_MAX_SIGNAL_AGE_JPY    (default 6s)
         GK_MAX_OPEN_TRADES       (default 3)
-        GK_MIN_CONFIDENCE        (default 65)
-        GK_PRICE_THRESHOLD_GOLD  (default 0.50)
+        GK_MIN_CONFIDENCE        (default 60)
         GK_PRICE_THRESHOLD_JPY   (default 0.03)
         GK_PRICE_THRESHOLD_FX    (default 0.0002)
         GK_LOG_FILE              (default gatekeeper_trades.jsonl)
@@ -145,43 +145,41 @@ class ExecutionGatekeeper:
 
     def get_pip_multiplier(self, symbol: str) -> float:
         """
-        Pip multiplier:
-          FOREX : 10,000  (e.g. EURUSD  0.0001 = 1 pip)
-          JPY   :    100  (e.g. USDJPY  0.01   = 1 pip)
-          GOLD  :    100  (e.g. XAUUSD  0.01   = 1 pip — $0.01 move)
+        Pip multiplier for different asset classes.
+        FOREX (4-decimal): 10,000  (e.g. EURUSD 0.0001 = 1 pip)
+        JPY (3-decimal):   100     (e.g. USDJPY 0.01 = 1 pip)
+        GOLD (2-decimal):  10      (e.g. XAUUSD 0.10 = 1 pip — $0.10 move)
         """
-        t = self.get_symbol_type(symbol)
-        return 100.0 if t in ("JPY", "GOLD") else 10_000.0
+        s = symbol.upper()
+        if "XAU" in s:
+            return 10.0  # GOLD: 1 pip = $0.10 movement
+        elif "JPY" in s:
+            return 100.0  # JPY: 1 pip = 0.01 movement
+        else:
+            return 10_000.0  # FOREX: 1 pip = 0.0001 movement
 
     def get_thresholds(self, symbol: str) -> dict:
-        """
-        Per-asset thresholds.
-        slippage / spread / ema_distance : in pips
-        price_threshold                  : in raw price units
-          Gold  0.50  (~5 pips on XAUUSD)
-          JPY   0.03  (~3 pips on USDJPY)
-          FX    0.0002 (~2 pips on EURUSD)
-        """
+        """Per-asset thresholds (in pips)."""
         t = self.get_symbol_type(symbol)
         if t == "GOLD":
             return {
-                "slippage":        10,
-                "spread":          30,
-                "ema_distance":    50,
-                "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_GOLD", "0.50")),
+                "slippage":        5,
+                "spread":          10,
+                "ema_distance":    30,
+                "price_threshold": 0.10,
             }
         elif t == "JPY":
             return {
                 "slippage":        3,
                 "spread":          3,
-                "ema_distance":    15,
+                "ema_distance":    30,
                 "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_JPY",  "0.03")),
             }
-        else:
+        else:  # FOREX
             return {
                 "slippage":        2,
                 "spread":          2,
-                "ema_distance":    10,
+                "ema_distance":    30,
                 "price_threshold": float(os.getenv("GK_PRICE_THRESHOLD_FX",   "0.0002")),
             }
 
@@ -202,10 +200,14 @@ class ExecutionGatekeeper:
         return round(reward / risk, 4) if risk > 0 else 0.0
 
     def is_valid_entry(self, entry: float, ema50: float, symbol: str) -> bool:
-        """Return True if entry is within EMA-50 proximity threshold."""
-        thresholds = self.get_thresholds(symbol)
-        distance   = self.price_to_pips(entry - ema50, symbol)
-        return distance <= thresholds["ema_distance"]
+        """
+        Trend-Following EMA Logic (not Mean Reversion).
+        Block trades on WRONG SIDE of EMA-50.
+        Allow trades far from EMA-50 (that's where trends are).
+        """
+        distance_pips = self.price_to_pips(entry - ema50, symbol)
+        max_distance = self.get_thresholds(symbol)["ema_distance"]
+        return distance_pips <= max_distance
 
     def is_duplicate_trade(self, signal: dict, open_trades: list) -> bool:
         """Return True if the same symbol+side is already open.
@@ -223,12 +225,25 @@ class ExecutionGatekeeper:
     # ADVANCED FILTERS
     # ================================================================
 
-    def is_valid_session(self, current_time: datetime) -> bool:
-        """Allow trading only during London (07-16 UTC) or NY (12-21 UTC)."""
-        hour    = current_time.hour
-        london  = 7  <= hour < 16
-        newyork = 12 <= hour < 21
-        return london or newyork
+    def is_valid_session(self, symbol: str, current_time: datetime) -> bool:
+        """
+        Symbol-Aware Session Filter.
+        JPY/AUD/NZD: Allow Tokyo (00:00-09:00 UTC)
+        EUR/GBP/Gold: Allow London/NY (08:00-21:00 UTC)
+        """
+        hour = current_time.hour
+        s = symbol.upper()
+
+        tokyo   = 0  <= hour < 9
+        london  = 8  <= hour < 16
+        newyork = 13 <= hour < 21
+
+        if "JPY" in s or "AUD" in s or "NZD" in s:
+            return tokyo or london or newyork
+        elif "XAU" in s or "EUR" in s or "GBP" in s:
+            return london or newyork
+        else:
+            return london or newyork
 
     def is_high_impact_news_near(self, current_time: datetime) -> bool:
         """
@@ -275,6 +290,42 @@ class ExecutionGatekeeper:
             return False, f"Gold RR too low: {rr:.2f} (min 1.0)"
 
         return True, round(rr, 4)
+
+    # ================================================================
+    # CONSENSUS GATE
+    # ================================================================
+
+    def validate_consensus_gate(
+        self,
+        signal_direction: str,
+        adx: float,
+        stoch_rsi: float,
+        williams_r: float,
+    ) -> tuple[bool, str]:
+        """Consensus Gate: Requires ADX > 25 + momentum alignment."""
+        # ADX check — must be > 25 (trending, not choppy)
+        if adx <= 25.0:
+            return False, f"ADX too low: {adx:.1f} (min 25.0 — market is choppy/flat)"
+
+        # Momentum alignment check
+        if signal_direction.upper() == "BUY":
+            stoch_ok = stoch_rsi < 30.0
+            williams_ok = williams_r < -80.0
+            if not (stoch_ok and williams_ok):
+                return False, (
+                    f"BUY consensus weak: StochRSI={stoch_rsi:.1f} (need <30), "
+                    f"Williams%R={williams_r:.1f} (need <-80)"
+                )
+        else:  # SELL
+            stoch_ok = stoch_rsi > 70.0
+            williams_ok = williams_r > -20.0
+            if not (stoch_ok and williams_ok):
+                return False, (
+                    f"SELL consensus weak: StochRSI={stoch_rsi:.1f} (need >70), "
+                    f"Williams%R={williams_r:.1f} (need >-20)"
+                )
+
+        return True, ""
 
     # ================================================================
     # REJECT HELPER
@@ -355,11 +406,10 @@ class ExecutionGatekeeper:
                     f"Signal too old: {age:.2f}s (max {_max_age}s for {_stype})"
                 )
 
-            # ── 4. Session filter ─────────────────────────────
-            if not self.is_valid_session(signal_time):
+            # ── 4. Session filter (SYMBOL-AWARE) ──────────────────────
+            if not self.is_valid_session(symbol, signal_time):
                 return self.reject(
-                    f"Outside trading session (London 07-16 / NY 12-21 UTC) "
-                    f"— hour: {signal_time.hour} UTC"
+                    f"Outside optimal session for {symbol} (hour: {signal_time.hour} UTC)"
                 )
 
             # ── 5. News filter ────────────────────────────────
@@ -371,6 +421,20 @@ class ExecutionGatekeeper:
                 return self.reject(
                     f"Low confidence: {confidence:.1f}% (min {self.min_confidence}%)"
                 )
+
+            # ── CONSENSUS GATE (NEW) ──────────────────────────────────
+            adx       = float(signal.get("adx",       0.0))
+            stoch_rsi = float(signal.get("stoch_rsi", 50.0))
+            williams_r = float(signal.get("williams_r", -50.0))
+
+            consensus_ok, consensus_reason = self.validate_consensus_gate(
+                signal_direction=side,
+                adx=adx,
+                stoch_rsi=stoch_rsi,
+                williams_r=williams_r,
+            )
+            if not consensus_ok:
+                return self.reject(f"Consensus Gate failed: {consensus_reason}")
 
             # ── 7. Max open trades ────────────────────────────
             if len(open_trades) >= self.max_open_trades:
@@ -445,15 +509,24 @@ class ExecutionGatekeeper:
                     f"(max {thresholds['spread']} for {_stype})"
                 )
 
-            # ── 15. EMA-50 proximity ──────────────────────────
+            # ── 15. EMA-50 SIDE CHECK (TREND FOLLOWING) ───────────────────
             # Skipped automatically when ema50 == entry (not provided by caller)
             # Also skip for GOLD pairs — ATR swing strategy doesn't need EMA proximity
             if ema50 != entry and self.get_symbol_type(symbol) != "GOLD":
-                if not self.is_valid_entry(entry, ema50, symbol):
-                    distance = self.price_to_pips(entry - ema50, symbol)
+                if side == "BUY" and entry < ema50:
                     return self.reject(
-                        f"Bad entry — {distance:.1f} pips from EMA50 "
-                        f"(max {thresholds['ema_distance']} for {_stype})"
+                        f"BUY on wrong side of EMA-50: entry={entry:.5f} < EMA={ema50:.5f}"
+                    )
+                if side == "SELL" and entry > ema50:
+                    return self.reject(
+                        f"SELL on wrong side of EMA-50: entry={entry:.5f} > EMA={ema50:.5f}"
+                    )
+
+                distance = self.price_to_pips(entry - ema50, symbol)
+                max_dist = self.get_thresholds(symbol)["ema_distance"]
+                if distance > max_dist:
+                    return self.reject(
+                        f"Entry too far from EMA-50: {distance:.1f} pips (max {max_dist})"
                     )
 
             # ✅ All checks passed ─────────────────────────────
