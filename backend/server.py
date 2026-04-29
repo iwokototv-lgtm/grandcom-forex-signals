@@ -748,8 +748,9 @@ async def get_price_data(symbol: str, interval: str = "15min", outputsize: int =
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calculate technical indicators with directional scoring"""
+    """Calculate technical indicators with directional scoring — extended multi-indicator suite"""
     try:
+        # ── Core indicators (existing) ────────────────────────────────
         df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
         macd = ta.trend.MACD(df["close"])
         df["macd"] = macd.macd()
@@ -765,6 +766,33 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         df["bb_lower"] = bollinger.bollinger_lband()
         df["atr"] = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"]).average_true_range()
 
+        # ── NEW: Advanced momentum indicators ─────────────────────────
+        # ADX(14) — trend strength
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        df["adx"] = adx_ind.adx()
+        df["adx_pos"] = adx_ind.adx_pos()   # +DI
+        df["adx_neg"] = adx_ind.adx_neg()   # -DI
+
+        # Stochastic(9,6) — fast momentum
+        stoch_ind = ta.momentum.StochasticOscillator(
+            df["high"], df["low"], df["close"], window=9, smooth_window=6
+        )
+        df["stoch_k"] = stoch_ind.stoch()
+        df["stoch_d"] = stoch_ind.stoch_signal()
+
+        # StochRSI(14) — stochastic applied to RSI
+        stochrsi_ind = ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3)
+        df["stochrsi_k"] = stochrsi_ind.stochrsi_k()
+        df["stochrsi_d"] = stochrsi_ind.stochrsi_d()
+
+        # CCI(14) — Commodity Channel Index
+        cci_ind = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=14)
+        df["cci"] = cci_ind.cci()
+
+        # Williams%R(14) — overbought/oversold
+        williams_ind = ta.momentum.WilliamsRIndicator(df["high"], df["low"], df["close"], lbp=14)
+        df["williams_r"] = williams_ind.williams_r()
+
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
@@ -779,6 +807,17 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
         ma20 = float(latest["ma_20"])
         ma50 = float(latest["ma_50"])
+
+        # New indicator values
+        adx_val      = float(latest["adx"])      if not np.isnan(latest["adx"])      else 20.0
+        adx_pos_val  = float(latest["adx_pos"])  if not np.isnan(latest["adx_pos"])  else 20.0
+        adx_neg_val  = float(latest["adx_neg"])  if not np.isnan(latest["adx_neg"])  else 20.0
+        stoch_k_val  = float(latest["stoch_k"])  if not np.isnan(latest["stoch_k"])  else 50.0
+        stoch_d_val  = float(latest["stoch_d"])  if not np.isnan(latest["stoch_d"])  else 50.0
+        stochrsi_k   = float(latest["stochrsi_k"]) if not np.isnan(latest["stochrsi_k"]) else 0.5
+        stochrsi_d   = float(latest["stochrsi_d"]) if not np.isnan(latest["stochrsi_d"]) else 0.5
+        cci_val      = float(latest["cci"])       if not np.isnan(latest["cci"])       else 0.0
+        williams_val = float(latest["williams_r"]) if not np.isnan(latest["williams_r"]) else -50.0
 
         # --- Technical direction scoring ---
         score = 0
@@ -826,6 +865,25 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         elif close > ma20 and close > ma50:
             score += 1
 
+        # ADX trend strength contribution
+        if adx_val > 25:
+            if adx_pos_val > adx_neg_val:
+                score += 1   # strong bullish trend
+            else:
+                score -= 1   # strong bearish trend
+
+        # Stochastic momentum
+        if stoch_k_val < 20 and stoch_d_val < 20:
+            score += 1   # oversold
+        elif stoch_k_val > 80 and stoch_d_val > 80:
+            score -= 1   # overbought
+
+        # Williams%R
+        if williams_val < -80:
+            score += 1   # oversold
+        elif williams_val > -20:
+            score -= 1   # overbought
+
         if score >= 2:
             tech_direction = "BUY"
         elif score <= -2:
@@ -861,10 +919,575 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
             "trend": trend,
             "tech_direction": tech_direction,
             "tech_score": score,
+            # ── New indicators ────────────────────────────────────────
+            "adx": round(adx_val, 2),
+            "adx_pos": round(adx_pos_val, 2),
+            "adx_neg": round(adx_neg_val, 2),
+            "stoch_k": round(stoch_k_val, 2),
+            "stoch_d": round(stoch_d_val, 2),
+            "stochrsi_k": round(stochrsi_k * 100, 2),   # convert 0-1 → 0-100
+            "stochrsi_d": round(stochrsi_d * 100, 2),
+            "cci": round(cci_val, 2),
+            "williams_r": round(williams_val, 2),
         }
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
         return None
+
+
+# ============================================================
+# MULTI-INDICATOR HELPER FUNCTIONS
+# ============================================================
+
+def calculate_alignment_score(indicators: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Calculate alignment score between Williams%R and StochRSI (team vote).
+    Both indicators must agree on direction to boost confidence.
+
+    Returns:
+        alignment_score   : 0-100 (% of agreement)
+        confidence_boost  : 0-20 (extra % added to weighted confidence)
+        williams_signal   : OVERSOLD | OVERBOUGHT | NEUTRAL
+        stochrsi_signal   : OVERSOLD | OVERBOUGHT | NEUTRAL
+        agree             : bool
+    """
+    try:
+        williams_val = indicators.get("williams_r", -50.0)
+        stochrsi_k   = indicators.get("stochrsi_k", 50.0)   # already 0-100
+
+        # Williams%R: < -80 = oversold (bullish), > -20 = overbought (bearish)
+        if williams_val < -80:
+            williams_signal = "OVERSOLD"
+        elif williams_val > -20:
+            williams_signal = "OVERBOUGHT"
+        else:
+            williams_signal = "NEUTRAL"
+
+        # StochRSI: < 20 = oversold (bullish), > 80 = overbought (bearish)
+        if stochrsi_k < 20:
+            stochrsi_signal = "OVERSOLD"
+        elif stochrsi_k > 80:
+            stochrsi_signal = "OVERBOUGHT"
+        else:
+            stochrsi_signal = "NEUTRAL"
+
+        # Agreement logic
+        agree = (
+            (williams_signal == "OVERSOLD"   and stochrsi_signal == "OVERSOLD") or
+            (williams_signal == "OVERBOUGHT" and stochrsi_signal == "OVERBOUGHT")
+        )
+
+        if agree and williams_signal != "NEUTRAL":
+            alignment_score   = 85.0
+            confidence_boost  = 20.0
+        elif williams_signal == stochrsi_signal == "NEUTRAL":
+            alignment_score   = 50.0
+            confidence_boost  = 0.0
+        elif williams_signal != "NEUTRAL" or stochrsi_signal != "NEUTRAL":
+            # One extreme, one neutral — partial agreement
+            alignment_score   = 60.0
+            confidence_boost  = 8.0
+        else:
+            # Disagree (one oversold, one overbought)
+            alignment_score   = 20.0
+            confidence_boost  = 0.0
+
+        return {
+            "alignment_score":  round(alignment_score, 1),
+            "confidence_boost": round(confidence_boost, 1),
+            "williams_signal":  williams_signal,
+            "stochrsi_signal":  stochrsi_signal,
+            "agree":            agree,
+        }
+    except Exception as e:
+        logger.warning(f"calculate_alignment_score error: {e}")
+        return {"alignment_score": 50.0, "confidence_boost": 0.0,
+                "williams_signal": "NEUTRAL", "stochrsi_signal": "NEUTRAL", "agree": False}
+
+
+async def check_h4_trend(pair: str) -> Dict[str, Any]:
+    """
+    Fetch H4 data and determine trend via MA50.
+    Used to block signals that conflict with the higher-timeframe trend.
+
+    Returns:
+        h4_trend       : BULLISH | BEARISH | NEUTRAL
+        signal_allowed : True if no H4 conflict
+        reason         : human-readable explanation
+    """
+    try:
+        h4_df = await get_price_data(pair, interval="4h", outputsize=60)
+        if h4_df is None or len(h4_df) < 20:
+            return {"h4_trend": "NEUTRAL", "signal_allowed": True, "reason": "H4 data unavailable (allowing)"}
+
+        h4_df = h4_df.copy()
+        h4_df["ma_50"] = ta.trend.SMAIndicator(h4_df["close"], window=min(50, len(h4_df))).sma_indicator()
+        h4_df["ema_20"] = ta.trend.EMAIndicator(h4_df["close"], window=min(20, len(h4_df))).ema_indicator()
+
+        latest = h4_df.iloc[-1]
+        close  = float(latest["close"])
+        ma50   = float(latest["ma_50"])  if not np.isnan(latest["ma_50"])  else close
+        ema20  = float(latest["ema_20"]) if not np.isnan(latest["ema_20"]) else close
+
+        if close > ma50 and ema20 > ma50:
+            h4_trend = "BULLISH"
+        elif close < ma50 and ema20 < ma50:
+            h4_trend = "BEARISH"
+        else:
+            h4_trend = "NEUTRAL"
+
+        logger.info(f"📊 {pair} H4 trend: {h4_trend} (close={close:.5f}, MA50={ma50:.5f})")
+        return {"h4_trend": h4_trend, "signal_allowed": True, "reason": f"H4={h4_trend}"}
+    except Exception as e:
+        logger.warning(f"check_h4_trend error for {pair}: {e}")
+        return {"h4_trend": "NEUTRAL", "signal_allowed": True, "reason": f"H4 check error (allowing): {e}"}
+
+
+async def check_dxy_correlation(pair: str, signal_direction: str) -> Dict[str, Any]:
+    """
+    Fetch DXY H1 data and check correlation impact on USD pairs.
+    - USD pairs: strong DXY uptrend → block BUY on non-USD base pairs
+    - JPY pairs: check JPY strength separately
+
+    Returns:
+        dxy_trend    : BULLISH | BEARISH | NEUTRAL
+        buy_allowed  : bool
+        sell_allowed : bool
+        reason       : explanation
+    """
+    try:
+        pair_upper = pair.upper()
+        is_usd_base  = pair_upper.startswith("USD")   # e.g. USDJPY, USDCAD
+        is_usd_quote = pair_upper.endswith("USD")     # e.g. EURUSD, GBPUSD
+        is_jpy_pair  = "JPY" in pair_upper
+
+        # Only apply DXY check for USD-involved pairs
+        if not (is_usd_base or is_usd_quote):
+            return {"dxy_trend": "NEUTRAL", "buy_allowed": True, "sell_allowed": True,
+                    "reason": "Non-USD pair — DXY check skipped"}
+
+        dxy_df = await get_price_data("USDX", interval="1h", outputsize=50)
+        # TwelveData uses "DXY" or "USDX" — try fallback symbol map
+        if dxy_df is None:
+            # Approximate DXY via EURUSD inverse (EUR/USD is ~57% of DXY)
+            eurusd_df = await get_price_data("EURUSD", interval="1h", outputsize=50)
+            if eurusd_df is None:
+                return {"dxy_trend": "NEUTRAL", "buy_allowed": True, "sell_allowed": True,
+                        "reason": "DXY data unavailable (allowing)"}
+            eurusd_df = eurusd_df.copy()
+            eurusd_df["ma_20"] = ta.trend.SMAIndicator(eurusd_df["close"], window=20).sma_indicator()
+            latest = eurusd_df.iloc[-1]
+            close  = float(latest["close"])
+            ma20   = float(latest["ma_20"]) if not np.isnan(latest["ma_20"]) else close
+            # Inverse: if EUR/USD falling → DXY rising
+            dxy_trend = "BEARISH" if close > ma20 else "BULLISH"
+        else:
+            dxy_df = dxy_df.copy()
+            dxy_df["ma_20"] = ta.trend.SMAIndicator(dxy_df["close"], window=20).sma_indicator()
+            latest = dxy_df.iloc[-1]
+            close  = float(latest["close"])
+            ma20   = float(latest["ma_20"]) if not np.isnan(latest["ma_20"]) else close
+            dxy_trend = "BULLISH" if close > ma20 else "BEARISH"
+
+        buy_allowed  = True
+        sell_allowed = True
+        reason       = f"DXY={dxy_trend}"
+
+        if dxy_trend == "BULLISH":
+            if is_usd_quote:
+                # e.g. EURUSD — strong DXY means USD strong → SELL EUR/USD
+                buy_allowed = False
+                reason = f"DXY BULLISH — USD strong, BUY blocked for {pair} (USD quote)"
+            elif is_usd_base:
+                # e.g. USDJPY — strong DXY means USD strong → BUY USD/JPY
+                sell_allowed = False
+                reason = f"DXY BULLISH — USD strong, SELL blocked for {pair} (USD base)"
+        elif dxy_trend == "BEARISH":
+            if is_usd_quote:
+                sell_allowed = False
+                reason = f"DXY BEARISH — USD weak, SELL blocked for {pair} (USD quote)"
+            elif is_usd_base:
+                buy_allowed = False
+                reason = f"DXY BEARISH — USD weak, BUY blocked for {pair} (USD base)"
+
+        logger.info(f"💱 {pair} DXY check: {reason}")
+        return {"dxy_trend": dxy_trend, "buy_allowed": buy_allowed,
+                "sell_allowed": sell_allowed, "reason": reason}
+    except Exception as e:
+        logger.warning(f"check_dxy_correlation error for {pair}: {e}")
+        return {"dxy_trend": "NEUTRAL", "buy_allowed": True, "sell_allowed": True,
+                "reason": f"DXY check error (allowing): {e}"}
+
+
+async def check_news_impact(pair: str) -> Dict[str, Any]:
+    """
+    Check TwelveData news endpoint for high-impact events within ±60 minutes.
+    Blocks signals during high-volatility news windows.
+
+    Returns:
+        news_nearby    : bool
+        signal_allowed : bool
+        reason         : explanation
+        news_items     : list of nearby news titles
+    """
+    try:
+        if not TWELVE_DATA_API_KEY or TWELVE_DATA_API_KEY == "demo":
+            return {"news_nearby": False, "signal_allowed": True,
+                    "reason": "News check skipped (no API key)", "news_items": []}
+
+        # Map pair to currency symbols for news filtering
+        pair_upper = pair.upper()
+        currencies = []
+        # Extract base and quote currencies
+        known_currencies = ["EUR", "GBP", "USD", "JPY", "AUD", "CAD", "CHF", "NZD"]
+        for cur in known_currencies:
+            if cur in pair_upper:
+                currencies.append(cur)
+
+        url = f"https://api.twelvedata.com/news?apikey={TWELVE_DATA_API_KEY}&outputsize=20"
+        now_utc = datetime.now(_tz.utc)
+        window_start = now_utc - timedelta(minutes=60)
+        window_end   = now_utc + timedelta(minutes=60)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return {"news_nearby": False, "signal_allowed": True,
+                            "reason": f"News API returned {resp.status} (allowing)", "news_items": []}
+                data = await resp.json()
+
+        news_items = data.get("data", []) if isinstance(data, dict) else []
+        high_impact_nearby = []
+
+        for item in news_items:
+            try:
+                pub_date_str = item.get("datetime", item.get("published_at", ""))
+                if not pub_date_str:
+                    continue
+                # Parse various date formats
+                try:
+                    pub_dt = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=_tz.utc)
+
+                if window_start <= pub_dt <= window_end:
+                    title = item.get("title", "").upper()
+                    # Check if news is relevant to our pair's currencies
+                    is_relevant = any(cur in title for cur in currencies)
+                    # Check for high-impact keywords
+                    high_impact_keywords = [
+                        "NFP", "NON-FARM", "FOMC", "INTEREST RATE", "CPI", "INFLATION",
+                        "GDP", "UNEMPLOYMENT", "CENTRAL BANK", "FED", "ECB", "BOJ", "BOE",
+                        "RATE DECISION", "MONETARY POLICY", "EMERGENCY", "CRISIS"
+                    ]
+                    is_high_impact = any(kw in title for kw in high_impact_keywords)
+
+                    if is_relevant and is_high_impact:
+                        high_impact_nearby.append(item.get("title", "Unknown news"))
+            except Exception:
+                continue
+
+        if high_impact_nearby:
+            logger.warning(f"📰 {pair} HIGH IMPACT NEWS nearby: {high_impact_nearby[:2]}")
+            return {
+                "news_nearby":    True,
+                "signal_allowed": False,
+                "reason":         f"High-impact news within ±60min: {high_impact_nearby[0][:60]}",
+                "news_items":     high_impact_nearby[:3],
+            }
+
+        return {"news_nearby": False, "signal_allowed": True,
+                "reason": "No high-impact news nearby", "news_items": []}
+    except Exception as e:
+        logger.warning(f"check_news_impact error for {pair}: {e}")
+        return {"news_nearby": False, "signal_allowed": True,
+                "reason": f"News check error (allowing): {e}", "news_items": []}
+
+
+def calculate_weighted_confidence(
+    indicators: Dict[str, Any],
+    signal_direction: str,
+    alignment_score: float = 50.0,
+    confidence_boost: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Weighted confidence scoring: 40% Trend + 30% Momentum + 30% Triggers.
+
+    Trend (40%):
+        - MA50 alignment with signal direction
+        - ADX > 25 (strong trend)
+
+    Momentum (30%):
+        - MACD direction matches signal
+        - RSI not at extreme (not overbought on BUY, not oversold on SELL)
+
+    Triggers (30%):
+        - Stochastic(9,6) off 80/20 levels
+        - Williams%R off extreme levels
+
+    Gates:
+        < 60  → skip (LOW)
+        60-84 → MEDIUM conviction
+        ≥ 85  → HIGH CONVICTION
+
+    Returns:
+        trend_score, momentum_score, trigger_score,
+        weighted_score, conviction_level
+    """
+    try:
+        is_buy = signal_direction == "BUY"
+
+        # ── TREND COMPONENT (40%) ─────────────────────────────────────
+        trend_points = 0.0
+        trend_max    = 2.0
+
+        # MA50 alignment
+        close = indicators.get("current_price", 0)
+        ma50  = indicators.get("ma_50", close)
+        if is_buy and close > ma50:
+            trend_points += 1.0
+        elif not is_buy and close < ma50:
+            trend_points += 1.0
+
+        # ADX > 25 confirms trend strength
+        adx_val = indicators.get("adx", 20.0)
+        if adx_val > 25:
+            adx_pos = indicators.get("adx_pos", 20.0)
+            adx_neg = indicators.get("adx_neg", 20.0)
+            if is_buy and adx_pos > adx_neg:
+                trend_points += 1.0
+            elif not is_buy and adx_neg > adx_pos:
+                trend_points += 1.0
+
+        trend_score = round((trend_points / trend_max) * 100, 1)
+
+        # ── MOMENTUM COMPONENT (30%) ──────────────────────────────────
+        momentum_points = 0.0
+        momentum_max    = 2.0
+
+        # MACD direction
+        macd_val = indicators.get("macd", 0)
+        macd_sig = indicators.get("macd_signal", 0)
+        if is_buy and macd_val > macd_sig:
+            momentum_points += 1.0
+        elif not is_buy and macd_val < macd_sig:
+            momentum_points += 1.0
+
+        # RSI not at extreme (avoid buying overbought, selling oversold)
+        rsi_val = indicators.get("rsi", 50.0)
+        if is_buy and rsi_val < 70:
+            momentum_points += 1.0
+        elif not is_buy and rsi_val > 30:
+            momentum_points += 1.0
+
+        momentum_score = round((momentum_points / momentum_max) * 100, 1)
+
+        # ── TRIGGER COMPONENT (30%) ───────────────────────────────────
+        trigger_points = 0.0
+        trigger_max    = 2.0
+
+        # Stochastic off extreme levels
+        stoch_k = indicators.get("stoch_k", 50.0)
+        if is_buy and stoch_k < 80:
+            trigger_points += 1.0
+        elif not is_buy and stoch_k > 20:
+            trigger_points += 1.0
+
+        # Williams%R off extreme levels
+        williams_val = indicators.get("williams_r", -50.0)
+        if is_buy and williams_val < -20:
+            trigger_points += 1.0
+        elif not is_buy and williams_val > -80:
+            trigger_points += 1.0
+
+        trigger_score = round((trigger_points / trigger_max) * 100, 1)
+
+        # ── WEIGHTED TOTAL ────────────────────────────────────────────
+        weighted_score = round(
+            (trend_score * 0.40) + (momentum_score * 0.30) + (trigger_score * 0.30),
+            1
+        )
+
+        # Apply alignment confidence boost (capped at 100)
+        weighted_score = min(100.0, weighted_score + confidence_boost)
+
+        # Conviction level
+        if weighted_score >= 85:
+            conviction_level = "HIGH"
+        elif weighted_score >= 60:
+            conviction_level = "MEDIUM"
+        else:
+            conviction_level = "LOW"
+
+        logger.info(
+            f"⚖️  Weighted confidence: Trend={trend_score}% | "
+            f"Momentum={momentum_score}% | Trigger={trigger_score}% | "
+            f"Total={weighted_score}% [{conviction_level}]"
+        )
+
+        return {
+            "trend_score":     trend_score,
+            "momentum_score":  momentum_score,
+            "trigger_score":   trigger_score,
+            "weighted_score":  weighted_score,
+            "conviction_level": conviction_level,
+        }
+    except Exception as e:
+        logger.warning(f"calculate_weighted_confidence error: {e}")
+        return {
+            "trend_score": 50.0, "momentum_score": 50.0, "trigger_score": 50.0,
+            "weighted_score": 50.0, "conviction_level": "LOW",
+        }
+
+
+def detect_candlestick_patterns(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Detect key candlestick reversal/continuation patterns on the last 2 candles.
+
+    Patterns detected:
+        ENGULFING  — full body engulf of previous candle
+        PIN_BAR    — long wick (≥2× body), small body
+        DOJI       — body < 10% of total range
+        NONE       — no significant pattern
+
+    Returns:
+        pattern          : str
+        pattern_strength : 0-100
+        bullish          : bool (True = bullish pattern, False = bearish)
+    """
+    try:
+        if df is None or len(df) < 2:
+            return {"pattern": "NONE", "pattern_strength": 0, "bullish": True}
+
+        latest = df.iloc[-1]
+        prev   = df.iloc[-2]
+
+        c_open  = float(latest["open"])
+        c_close = float(latest["close"])
+        c_high  = float(latest["high"])
+        c_low   = float(latest["low"])
+        p_open  = float(prev["open"])
+        p_close = float(prev["close"])
+
+        c_body  = abs(c_close - c_open)
+        c_range = c_high - c_low if c_high != c_low else 1e-10
+        p_body  = abs(p_close - p_open)
+
+        upper_wick = c_high - max(c_open, c_close)
+        lower_wick = min(c_open, c_close) - c_low
+
+        # ── DOJI ─────────────────────────────────────────────────────
+        if c_body / c_range < 0.10:
+            return {"pattern": "DOJI", "pattern_strength": 40, "bullish": c_close >= c_open}
+
+        # ── ENGULFING ─────────────────────────────────────────────────
+        bullish_engulf = (
+            c_close > c_open and          # current is bullish
+            p_close < p_open and          # previous is bearish
+            c_open <= p_close and         # current opens at/below prev close
+            c_close >= p_open             # current closes at/above prev open
+        )
+        bearish_engulf = (
+            c_close < c_open and          # current is bearish
+            p_close > p_open and          # previous is bullish
+            c_open >= p_close and         # current opens at/above prev close
+            c_close <= p_open             # current closes at/below prev open
+        )
+        if bullish_engulf:
+            strength = min(100, int((c_body / max(p_body, 1e-10)) * 60))
+            return {"pattern": "ENGULFING", "pattern_strength": strength, "bullish": True}
+        if bearish_engulf:
+            strength = min(100, int((c_body / max(p_body, 1e-10)) * 60))
+            return {"pattern": "ENGULFING", "pattern_strength": strength, "bullish": False}
+
+        # ── PIN BAR ───────────────────────────────────────────────────
+        if lower_wick >= 2 * c_body and upper_wick < c_body:
+            # Bullish pin bar (hammer) — long lower wick
+            strength = min(100, int((lower_wick / c_range) * 100))
+            return {"pattern": "PIN_BAR", "pattern_strength": strength, "bullish": True}
+        if upper_wick >= 2 * c_body and lower_wick < c_body:
+            # Bearish pin bar (shooting star) — long upper wick
+            strength = min(100, int((upper_wick / c_range) * 100))
+            return {"pattern": "PIN_BAR", "pattern_strength": strength, "bullish": False}
+
+        return {"pattern": "NONE", "pattern_strength": 0, "bullish": c_close >= c_open}
+    except Exception as e:
+        logger.warning(f"detect_candlestick_patterns error: {e}")
+        return {"pattern": "NONE", "pattern_strength": 0, "bullish": True}
+
+
+def apply_safety_switch(
+    indicators: Dict[str, Any],
+    signal_direction: str,
+    alignment: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Safety switch: if Group1 (MA50+ADX) and Group2 (MACD+RSI) agree on direction
+    but Group3 (Stochastic+Williams%R) shows the opposite extreme,
+    hold for a pullback rather than entering immediately.
+
+    Example: BUY signal but Stochastic > 80 and Williams%R > -20 → wait for pullback.
+
+    Returns:
+        signal_allowed : bool
+        reason         : explanation
+    """
+    try:
+        is_buy = signal_direction == "BUY"
+
+        # Group 1: Trend (MA50 + ADX)
+        close    = indicators.get("current_price", 0)
+        ma50     = indicators.get("ma_50", close)
+        adx_val  = indicators.get("adx", 20.0)
+        adx_pos  = indicators.get("adx_pos", 20.0)
+        adx_neg  = indicators.get("adx_neg", 20.0)
+
+        g1_buy  = close > ma50 and (adx_val < 25 or adx_pos > adx_neg)
+        g1_sell = close < ma50 and (adx_val < 25 or adx_neg > adx_pos)
+
+        # Group 2: Momentum (MACD + RSI)
+        macd_val = indicators.get("macd", 0)
+        macd_sig = indicators.get("macd_signal", 0)
+        rsi_val  = indicators.get("rsi", 50.0)
+
+        g2_buy  = macd_val > macd_sig and rsi_val < 65
+        g2_sell = macd_val < macd_sig and rsi_val > 35
+
+        # Group 3: Triggers (Stochastic + Williams%R)
+        stoch_k      = indicators.get("stoch_k", 50.0)
+        williams_val = indicators.get("williams_r", -50.0)
+
+        g3_overbought = stoch_k > 80 and williams_val > -20
+        g3_oversold   = stoch_k < 20 and williams_val < -80
+
+        # Safety switch: Groups 1+2 agree on BUY but Group 3 is overbought → HOLD
+        if is_buy and g1_buy and g2_buy and g3_overbought:
+            return {
+                "signal_allowed": False,
+                "reason": (
+                    f"Safety switch: BUY signal but Stoch={stoch_k:.0f}>80 & "
+                    f"Williams={williams_val:.0f}>-20 — waiting for pullback"
+                ),
+            }
+
+        # Safety switch: Groups 1+2 agree on SELL but Group 3 is oversold → HOLD
+        if not is_buy and g1_sell and g2_sell and g3_oversold:
+            return {
+                "signal_allowed": False,
+                "reason": (
+                    f"Safety switch: SELL signal but Stoch={stoch_k:.0f}<20 & "
+                    f"Williams={williams_val:.0f}<-80 — waiting for pullback"
+                ),
+            }
+
+        return {"signal_allowed": True, "reason": "Safety switch: OK"}
+    except Exception as e:
+        logger.warning(f"apply_safety_switch error: {e}")
+        return {"signal_allowed": True, "reason": f"Safety switch error (allowing): {e}"}
+
 
 # ============ PAIR-SPECIFIC OPTIMIZATION PARAMETERS ============
 PAIR_PARAMETERS = {
@@ -1179,11 +1802,16 @@ def record_trade_result(pair: str, result: str, pips: float):
         daily_pair_performance[key]["losses"] += 1
         daily_pair_performance[key]["loss_pips"] += abs(pips)
 
-async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate AI-powered trading signal with balanced directional analysis"""
+async def generate_ai_analysis(
+    symbol: str,
+    indicators: Dict[str, Any],
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate AI-powered trading signal with multi-indicator analysis and weighted confidence context"""
     try:
         params = PAIR_PARAMETERS.get(symbol, DEFAULT_PAIR_PARAMS)
         use_fixed_pips = params.get('use_fixed_pips', False)
+        ctx = extra_context or {}
 
         system_message = (
             "You are an elite institutional forex trader who trades BOTH directions. "
@@ -1191,15 +1819,43 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             "Your edge comes from identifying reversals at overbought/oversold extremes, not just following trends. "
             "When indicators show overbought conditions (RSI>70, price at upper Bollinger), you MUST recommend SELL. "
             "When indicators show oversold conditions (RSI<30, price at lower Bollinger), you MUST recommend BUY. "
+            "You use a professional multi-indicator system: ADX for trend strength, Stochastic and Williams%R for "
+            "momentum extremes, StochRSI for confirmation, and CCI for cycle positioning. "
             "Never be biased toward one direction."
         )
 
         # Build balanced indicator arguments
-        rsi_val = indicators['rsi']
-        rsi_zone = indicators.get('rsi_zone', 'NEUTRAL')
-        bb_pos = indicators.get('bb_position', 0.5)
-        tech_dir = indicators.get('tech_direction', 'NEUTRAL')
+        rsi_val    = indicators['rsi']
+        rsi_zone   = indicators.get('rsi_zone', 'NEUTRAL')
+        bb_pos     = indicators.get('bb_position', 0.5)
+        tech_dir   = indicators.get('tech_direction', 'NEUTRAL')
         tech_score = indicators.get('tech_score', 0)
+
+        # New indicator values
+        adx_val      = indicators.get('adx', 20.0)
+        stoch_k      = indicators.get('stoch_k', 50.0)
+        stoch_d      = indicators.get('stoch_d', 50.0)
+        stochrsi_k   = indicators.get('stochrsi_k', 50.0)
+        cci_val      = indicators.get('cci', 0.0)
+        williams_val = indicators.get('williams_r', -50.0)
+
+        # Context from multi-indicator pipeline
+        alignment_score   = ctx.get('alignment_score', 50.0)
+        confidence_boost  = ctx.get('confidence_boost', 0.0)
+        williams_signal   = ctx.get('williams_signal', 'NEUTRAL')
+        stochrsi_signal   = ctx.get('stochrsi_signal', 'NEUTRAL')
+        h4_trend          = ctx.get('h4_trend', 'NEUTRAL')
+        dxy_trend         = ctx.get('dxy_trend', 'NEUTRAL')
+        dxy_reason        = ctx.get('dxy_reason', '')
+        news_nearby       = ctx.get('news_nearby', False)
+        weighted_score    = ctx.get('weighted_score', 50.0)
+        conviction_level  = ctx.get('conviction_level', 'MEDIUM')
+        trend_score       = ctx.get('trend_score', 50.0)
+        momentum_score    = ctx.get('momentum_score', 50.0)
+        trigger_score     = ctx.get('trigger_score', 50.0)
+        candle_pattern    = ctx.get('candle_pattern', 'NONE')
+        pattern_strength  = ctx.get('pattern_strength', 0)
+        pattern_bullish   = ctx.get('pattern_bullish', True)
 
         bearish_args = []
         bullish_args = []
@@ -1231,6 +1887,42 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
         elif bb_pos < 0.25:
             bullish_args.append(f"Price at {bb_pos*100:.0f}% BB range — approaching lower support")
 
+        # New indicator arguments
+        if stoch_k > 80:
+            bearish_args.append(f"Stochastic K={stoch_k:.0f} OVERBOUGHT — momentum exhaustion")
+        elif stoch_k < 20:
+            bullish_args.append(f"Stochastic K={stoch_k:.0f} OVERSOLD — momentum reversal likely")
+
+        if williams_val > -20:
+            bearish_args.append(f"Williams%R={williams_val:.0f} OVERBOUGHT — reversal zone")
+        elif williams_val < -80:
+            bullish_args.append(f"Williams%R={williams_val:.0f} OVERSOLD — reversal zone")
+
+        if stochrsi_k > 80:
+            bearish_args.append(f"StochRSI={stochrsi_k:.0f} overbought — RSI momentum fading")
+        elif stochrsi_k < 20:
+            bullish_args.append(f"StochRSI={stochrsi_k:.0f} oversold — RSI momentum building")
+
+        if cci_val > 100:
+            bearish_args.append(f"CCI={cci_val:.0f} above +100 — overbought cycle")
+        elif cci_val < -100:
+            bullish_args.append(f"CCI={cci_val:.0f} below -100 — oversold cycle")
+
+        if adx_val > 25:
+            adx_pos = indicators.get('adx_pos', 20.0)
+            adx_neg = indicators.get('adx_neg', 20.0)
+            if adx_pos > adx_neg:
+                bullish_args.append(f"ADX={adx_val:.0f} strong trend, +DI>{adx_pos:.0f} dominates — bullish momentum")
+            else:
+                bearish_args.append(f"ADX={adx_val:.0f} strong trend, -DI>{adx_neg:.0f} dominates — bearish momentum")
+
+        if candle_pattern != "NONE":
+            pattern_dir = "BULLISH" if pattern_bullish else "BEARISH"
+            if pattern_bullish:
+                bullish_args.append(f"Price action: {candle_pattern} pattern ({pattern_dir}, strength={pattern_strength})")
+            else:
+                bearish_args.append(f"Price action: {candle_pattern} pattern ({pattern_dir}, strength={pattern_strength})")
+
         bearish_text = "\n".join(f"  - {a}" for a in bearish_args) if bearish_args else "  - No strong bearish signals"
         bullish_text = "\n".join(f"  - {a}" for a in bullish_args) if bullish_args else "  - No strong bullish signals"
 
@@ -1240,6 +1932,36 @@ async def generate_ai_analysis(symbol: str, indicators: Dict[str, Any]) -> Dict[
             direction_hint = f"TECHNICAL ANALYSIS STRONGLY SUGGESTS: BUY (score: {tech_score}). You should output BUY unless extremely compelling reason not to."
         else:
             direction_hint = f"Technical indicators are MIXED (score: {tech_score}). Weigh both arguments equally. Let the indicators decide."
+
+        # Build multi-indicator context block
+        alignment_agree_str = "✅ AGREE" if ctx.get('alignment_agree', False) else "⚠️ DISAGREE"
+        multi_indicator_context = f"""
+=== MULTI-INDICATOR ANALYSIS ===
+ADX(14): {adx_val:.1f} ({'STRONG TREND' if adx_val > 25 else 'WEAK/NO TREND'})
+Stochastic(9,6): K={stoch_k:.1f} D={stoch_d:.1f} ({'OVERBOUGHT' if stoch_k > 80 else 'OVERSOLD' if stoch_k < 20 else 'NEUTRAL'})
+StochRSI(14): {stochrsi_k:.1f} ({'OVERBOUGHT' if stochrsi_k > 80 else 'OVERSOLD' if stochrsi_k < 20 else 'NEUTRAL'})
+CCI(14): {cci_val:.1f} ({'OVERBOUGHT' if cci_val > 100 else 'OVERSOLD' if cci_val < -100 else 'NEUTRAL'})
+Williams%R(14): {williams_val:.1f} ({'OVERBOUGHT' if williams_val > -20 else 'OVERSOLD' if williams_val < -80 else 'NEUTRAL'})
+
+=== ALIGNMENT SCORE ===
+Williams%R + StochRSI: {alignment_agree_str} | Alignment: {alignment_score:.0f}% | Confidence Boost: +{confidence_boost:.0f}%
+
+=== H4 TREND CONTEXT ===
+H4 Trend: {h4_trend} (higher-timeframe bias)
+
+=== DXY/CORRELATION ===
+DXY Trend: {dxy_trend} | {dxy_reason}
+
+=== NEWS STATUS ===
+{'⚠️ HIGH IMPACT NEWS NEARBY — extra caution required' if news_nearby else '✅ No high-impact news nearby'}
+
+=== WEIGHTED CONFIDENCE BREAKDOWN (40/30/30) ===
+Trend Score (40%): {trend_score:.0f}% | Momentum Score (30%): {momentum_score:.0f}% | Trigger Score (30%): {trigger_score:.0f}%
+Overall Weighted Score: {weighted_score:.0f}% | Conviction: {conviction_level}
+
+=== PRICE ACTION ===
+Pattern: {candle_pattern} ({'Bullish' if pattern_bullish else 'Bearish'}, strength={pattern_strength})
+"""
 
         if use_fixed_pips:
             tp1_pips = params.get('fixed_tp1_pips', 5)
@@ -1256,7 +1978,7 @@ RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: 
 MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
 BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
 ATR: {indicators['atr']:.{params['decimal_places']}f}
-
+{multi_indicator_context}
 === BEARISH ARGUMENTS (reasons to SELL) ===
 {bearish_text}
 
@@ -1272,6 +1994,8 @@ SL: ATR x {params['atr_multiplier_sl']} | Pip Value: {pip_value}
 === RULES ===
 - If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
 - If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
+- If Williams%R and StochRSI AGREE on direction, weight that heavily
+- If H4 trend conflicts with signal direction, lower confidence by 15
 - Do NOT default to BUY just because the overall trend is up
 - BUY: TP above entry, SL below entry | SELL: TP below entry, SL above entry
 - Round all prices to {params['decimal_places']} decimal places
@@ -1290,7 +2014,7 @@ RSI: {rsi_val:.2f} ({rsi_zone}) | MACD: {indicators['macd']:.6f} | MACD Signal: 
 MA20: {indicators['ma_20']:.{params['decimal_places']}f} | MA50: {indicators['ma_50']:.{params['decimal_places']}f}
 BB Upper: {indicators['bb_upper']:.{params['decimal_places']}f} | BB Lower: {indicators['bb_lower']:.{params['decimal_places']}f} | BB Position: {bb_pos*100:.0f}%
 ATR: {indicators['atr']:.{params['decimal_places']}f}
-
+{multi_indicator_context}
 === BEARISH ARGUMENTS (reasons to SELL) ===
 {bearish_text}
 
@@ -1306,6 +2030,8 @@ Min R:R: {params['min_rr']}
 === RULES ===
 - If RSI > 70 AND price near upper Bollinger: signal MUST be SELL
 - If RSI < 30 AND price near lower Bollinger: signal MUST be BUY
+- If Williams%R and StochRSI AGREE on direction, weight that heavily
+- If H4 trend conflicts with signal direction, lower confidence by 15
 - Do NOT default to BUY just because the overall trend is up
 
 === OUTPUT FORMAT (JSON ONLY) ===
@@ -1566,7 +2292,7 @@ def detect_choppy_market(df: pd.DataFrame, pair: str) -> tuple[bool, str]:
 
 
 async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
-    """Generate a complete trading signal for a pair with ML optimization and Execution Gatekeeper"""
+    """Generate a complete trading signal for a pair with multi-indicator system and Execution Gatekeeper"""
     try:
         params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
 
@@ -1603,9 +2329,114 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         # Record the signal generation timestamp for latency check
         signal_generated_at = time.time()
 
-        ai_analysis = await generate_ai_analysis(pair, indicators)
+        # ================================================================
+        # MULTI-INDICATOR PIPELINE (new)
+        # Steps run before AI to build rich context for the prompt.
+        # ================================================================
+
+        # STEP 1: Alignment score (Williams%R + StochRSI team vote)
+        alignment = calculate_alignment_score(indicators)
+        logger.info(
+            f"🎯 {pair} Alignment: {alignment['alignment_score']:.0f}% "
+            f"(Williams={alignment['williams_signal']}, StochRSI={alignment['stochrsi_signal']}, "
+            f"agree={alignment['agree']}, boost=+{alignment['confidence_boost']:.0f}%)"
+        )
+
+        # STEP 2: H4 trend check
+        GOLD_PAIRS_SKIP = {"XAUUSD", "XAUEUR"}
+        h4_result = await check_h4_trend(pair)
+        h4_trend  = h4_result["h4_trend"]
+
+        # STEP 3: DXY/JPY correlation check (preliminary — direction not yet known)
+        # We run this now to get DXY trend for the AI prompt context.
+        # The actual gate is applied after AI returns a direction.
+        dxy_result = await check_dxy_correlation(pair, "BUY")  # direction placeholder
+        dxy_trend  = dxy_result["dxy_trend"]
+
+        # STEP 4: News impact check
+        news_result = await check_news_impact(pair)
+
+        # GATE 4: News within 1h → skip
+        if not news_result["signal_allowed"]:
+            logger.warning(f"📰 {pair} BLOCKED — {news_result['reason']}")
+            return None
+
+        # STEP 5: Candlestick pattern detection
+        candle_result = detect_candlestick_patterns(df)
+        logger.info(
+            f"🕯️  {pair} Pattern: {candle_result['pattern']} "
+            f"({'Bullish' if candle_result['bullish'] else 'Bearish'}, "
+            f"strength={candle_result['pattern_strength']})"
+        )
+
+        # Build extra context dict for AI prompt
+        extra_context = {
+            "alignment_score":  alignment["alignment_score"],
+            "confidence_boost": alignment["confidence_boost"],
+            "alignment_agree":  alignment["agree"],
+            "williams_signal":  alignment["williams_signal"],
+            "stochrsi_signal":  alignment["stochrsi_signal"],
+            "h4_trend":         h4_trend,
+            "dxy_trend":        dxy_trend,
+            "dxy_reason":       dxy_result["reason"],
+            "news_nearby":      news_result["news_nearby"],
+            # Weighted confidence will be filled after we know direction
+            "weighted_score":   50.0,
+            "conviction_level": "MEDIUM",
+            "trend_score":      50.0,
+            "momentum_score":   50.0,
+            "trigger_score":    50.0,
+            "candle_pattern":   candle_result["pattern"],
+            "pattern_strength": candle_result["pattern_strength"],
+            "pattern_bullish":  candle_result["bullish"],
+        }
+
+        # Call AI with full multi-indicator context
+        ai_analysis = await generate_ai_analysis(pair, indicators, extra_context=extra_context)
         if ai_analysis is None or ai_analysis.get("signal") == "NEUTRAL":
             logger.info(f"No trade signal for {pair} (NEUTRAL or None)")
+            return None
+
+        signal_direction = ai_analysis.get("signal", "NEUTRAL")
+
+        # STEP 6: Weighted confidence (now we know direction)
+        weighted = calculate_weighted_confidence(
+            indicators       = indicators,
+            signal_direction = signal_direction,
+            alignment_score  = alignment["alignment_score"],
+            confidence_boost = alignment["confidence_boost"],
+        )
+
+        # GATE 1: Weighted score < 60 → skip (LOW conviction)
+        if weighted["weighted_score"] < 60:
+            logger.info(
+                f"⚖️  {pair} SKIPPED — weighted score {weighted['weighted_score']:.0f}% < 60 "
+                f"(conviction={weighted['conviction_level']})"
+            )
+            return None
+
+        # GATE 2: H4 trend conflict → skip
+        if pair not in GOLD_PAIRS_SKIP:
+            if signal_direction == "BUY" and h4_trend == "BEARISH":
+                logger.info(f"📊 {pair} SKIPPED — BUY conflicts with H4 BEARISH trend")
+                return None
+            if signal_direction == "SELL" and h4_trend == "BULLISH":
+                logger.info(f"📊 {pair} SKIPPED — SELL conflicts with H4 BULLISH trend")
+                return None
+
+        # GATE 3: DXY/JPY correlation blocks signal
+        dxy_check = await check_dxy_correlation(pair, signal_direction)
+        if signal_direction == "BUY" and not dxy_check["buy_allowed"]:
+            logger.info(f"💱 {pair} SKIPPED — DXY blocks BUY: {dxy_check['reason']}")
+            return None
+        if signal_direction == "SELL" and not dxy_check["sell_allowed"]:
+            logger.info(f"💱 {pair} SKIPPED — DXY blocks SELL: {dxy_check['reason']}")
+            return None
+
+        # GATE 5: Safety switch (oversold/overbought pullback wait)
+        safety = apply_safety_switch(indicators, signal_direction, alignment)
+        if not safety["signal_allowed"]:
+            logger.info(f"🔒 {pair} HELD — {safety['reason']}")
             return None
 
         # FILTER 3: CONFIDENCE — early gate (catches truly bad signals)
@@ -1623,7 +2454,6 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         GOLD_PAIRS_MTF_SKIP = {"XAUUSD", "XAUEUR"}
         if pair not in GOLD_PAIRS_MTF_SKIP:
             try:
-                signal_direction = ai_analysis.get("signal", "NEUTRAL")
                 mtf_confirmed, mtf_reason = await check_higher_timeframe_alignment(pair, signal_direction)
                 if not mtf_confirmed:
                     logger.info(f"🕐 {pair} skipped - MTF failed: {mtf_reason}")
@@ -1631,7 +2461,6 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             except Exception as mtf_err:
                 logger.warning(f"⚠️ {pair} MTF check error (allowing): {mtf_err}")
         else:
-            signal_direction = ai_analysis.get("signal", "NEUTRAL")
             logger.info(f"🕐 {pair} MTF skipped (gold swing pair)")
 
         # FILTER 3c: CHOPPY MARKET DETECTION
@@ -1849,7 +2678,19 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
 
-        await send_signal_to_telegram(signal, regime_name, risk_multiplier)
+        # Build multi-indicator metadata for Telegram message
+        multi_meta = {
+            "weighted_score":   weighted.get("weighted_score", 50.0),
+            "conviction_level": weighted.get("conviction_level", "MEDIUM"),
+            "alignment_score":  alignment.get("alignment_score", 50.0),
+            "h4_trend":         h4_trend,
+            "dxy_trend":        dxy_trend,
+            "news_nearby":      news_result.get("news_nearby", False),
+            "trend_score":      weighted.get("trend_score", 50.0),
+            "momentum_score":   weighted.get("momentum_score", 50.0),
+            "trigger_score":    weighted.get("trigger_score", 50.0),
+        }
+        await send_signal_to_telegram(signal, regime_name, risk_multiplier, multi_meta=multi_meta)
 
         try:
             push_svc = get_push_service()
@@ -1876,7 +2717,12 @@ def sanitize_html(text: str) -> str:
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return text
 
-async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", risk_mult: float = 1.0):
+async def send_signal_to_telegram(
+    signal: Signal,
+    regime_name: str = "UNKNOWN",
+    risk_mult: float = 1.0,
+    multi_meta: Optional[Dict[str, Any]] = None,
+):
     try:
         if not TELEGRAM_BOT_TOKEN:
             logger.warning("Telegram bot token not configured")
@@ -1889,6 +2735,18 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
         GOLD_SIGNAL_PAIRS = {"XAUUSD", "XAUEUR"}
         target_channel = gold_channel_id if signal.pair in GOLD_SIGNAL_PAIRS else channel_id
 
+        # Unpack multi-indicator metadata (with safe defaults)
+        meta              = multi_meta or {}
+        weighted_score    = meta.get("weighted_score", 0.0)
+        conviction_level  = meta.get("conviction_level", "MEDIUM")
+        alignment_score   = meta.get("alignment_score", 50.0)
+        h4_trend          = meta.get("h4_trend", "NEUTRAL")
+        dxy_trend         = meta.get("dxy_trend", "NEUTRAL")
+        news_nearby       = meta.get("news_nearby", False)
+        trend_score       = meta.get("trend_score", 50.0)
+        momentum_score    = meta.get("momentum_score", 50.0)
+        trigger_score     = meta.get("trigger_score", 50.0)
+
         # ── TSCopier-compatible format ────────────────────────────────────
         # Plain text, no HTML. TSCopier AI parses this reliably.
         # Gold/XAUEUR: entry sent as a ±0.50 range so TSCopier uses
@@ -1896,6 +2754,9 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
         signal_emoji = "🟢" if signal.type == "BUY" else "🔴"
         action = signal.type.capitalize()   # "Buy" / "Sell"
         is_gold = "XAU" in signal.pair
+
+        # HIGH CONVICTION label
+        conviction_label = " [HIGH CONVICTION]" if conviction_level == "HIGH" else ""
 
         # For Gold, publish a small range around entry so TSCopier's
         # "Smart Entry Mode" picks the live price within the zone.
@@ -1908,7 +2769,7 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
 
         strategy_label = REGIME_STRATEGY.get(regime_name, "SCALP")
         copier_message = (
-            f"{signal_emoji} #{signal.pair} [{strategy_label}]\n"
+            f"{signal_emoji} #{signal.pair} [{strategy_label}]{conviction_label}\n"
             f"\n"
             f"{entry_line}\n"
             f"\n"
@@ -1925,14 +2786,40 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
             "RANGE": "↔️", "HIGH_VOL": "⚡"
         }.get(regime_name, "📊")
 
+        # H4 trend display
+        h4_emoji = "📈" if h4_trend == "BULLISH" else "📉" if h4_trend == "BEARISH" else "➡️"
+
+        # DXY display
+        dxy_label = "NEUTRAL" if dxy_trend == "NEUTRAL" else dxy_trend
+        dxy_emoji = "💱"
+
+        # News display
+        news_label = "⚠️ BLOCKED" if news_nearby else "✅ Clear"
+
+        # Conviction badge
+        conviction_badge = {
+            "HIGH":   "🔥 HIGH CONVICTION",
+            "MEDIUM": "✅ MEDIUM",
+            "LOW":    "⚠️ LOW",
+        }.get(conviction_level, "✅ MEDIUM")
+
         safe_analysis = sanitize_html(signal.analysis)
         info_message = (
             f"<b>📊 R:R:</b> 1:{signal.risk_reward}  "
             f"<b>⚡ AI Confidence:</b> {signal.confidence}%  "
             f"{regime_emoji} <b>{regime_name}</b>\n"
+            f"\n"
+            f"<b>🎯 Conviction:</b> {conviction_badge}\n"
+            f"<b>⚖️ Technical Score:</b> {weighted_score:.0f}/100 "
+            f"(T:{trend_score:.0f}% M:{momentum_score:.0f}% Tr:{trigger_score:.0f}%)\n"
+            f"<b>🔗 Alignment:</b> {alignment_score:.0f}% (Williams%R + StochRSI)\n"
+            f"<b>{h4_emoji} H4 Trend:</b> {h4_trend}\n"
+            f"<b>{dxy_emoji} DXY:</b> {dxy_label}\n"
+            f"<b>📰 News:</b> {news_label}\n"
+            f"\n"
             f"<b>📝</b> {safe_analysis}\n"
             f"<i>⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom ML + Safe Execution</i>"
+            f"| Grandcom ML + Multi-Indicator Engine</i>"
         )
 
         # Send copier message first (plain text — no parse_mode)
@@ -1948,7 +2835,7 @@ async def send_signal_to_telegram(signal: Signal, regime_name: str = "UNKNOWN", 
             parse_mode="HTML"
         )
 
-        logger.info(f"✅ Signal sent to Telegram {target_channel}: {signal.pair} {signal.type}")
+        logger.info(f"✅ Signal sent to Telegram {target_channel}: {signal.pair} {signal.type} [{conviction_level}]")
     except Exception as e:
         logger.error(f"❌ Error sending to Telegram: {e}")
 
