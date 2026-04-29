@@ -52,9 +52,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
+        "atr_multiplier_tp1": 1.0,   # Swing target: 1.0 × ATR (was 0.05)
+        "atr_multiplier_tp2": 2.0,   # Swing target: 2.0 × ATR (was 0.10)
+        "atr_multiplier_tp3": 3.0,   # Swing target: 3.0 × ATR (was 0.15)
         "min_rr": 1.8,
         "min_confidence": 60,
     },
@@ -63,9 +63,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
+        "atr_multiplier_tp1": 1.0,   # Swing target: 1.0 × ATR (was 0.05)
+        "atr_multiplier_tp2": 2.0,   # Swing target: 2.0 × ATR (was 0.10)
+        "atr_multiplier_tp3": 3.0,   # Swing target: 3.0 × ATR (was 0.15)
         "min_rr": 1.8,
         "min_confidence": 60,
     },
@@ -350,6 +350,102 @@ async def check_dxy_correlation() -> dict:
         return {"dxy_trend": "UNKNOWN", "buy_allowed": True, "dxy_ma20": None, "dxy_price": None}
 
 
+# ============ SESSION-AWARE DXY FILTER ============
+async def check_dxy_correlation_with_session_awareness(
+    signal_direction: str,
+) -> dict:
+    """
+    DXY correlation check with session-aware strictness.
+
+    During afternoon (13:00–21:00 UTC):
+    - Require ADX > 30 (strong trend, not choppy)
+    - Require DXY to be meaningfully above/below MA20 (±0.50 pts)
+
+    Outside afternoon: standard MA20 ±0.2% threshold.
+
+    Returns:
+        allowed    : bool
+        reason     : str
+        dxy_trend  : str
+        buy_allowed: bool
+    """
+    try:
+        now_utc = datetime.now(timezone.utc).hour
+        is_afternoon = 13 <= now_utc < 21
+
+        df = await get_generic_price_data("DXY", interval="1h", outputsize=50)
+        if df is None or len(df) < 21:
+            logger.warning("DXY data unavailable for session-aware check, skipping")
+            return {"allowed": True, "reason": "DXY data unavailable", "dxy_trend": "UNKNOWN", "buy_allowed": True}
+
+        ma20 = ta.trend.SMAIndicator(df["close"], window=20).sma_indicator()
+        latest_close = float(df["close"].iloc[-1])
+        latest_ma20 = float(ma20.iloc[-1])
+
+        # ADX for trend strength
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14)
+        dxy_adx = float(adx_ind.adx().iloc[-1])
+
+        # Determine DXY trend (standard threshold)
+        if latest_close > latest_ma20 * 1.002:
+            dxy_trend = "UPTREND"
+            buy_allowed = False
+        elif latest_close < latest_ma20 * 0.998:
+            dxy_trend = "DOWNTREND"
+            buy_allowed = True
+        else:
+            dxy_trend = "NEUTRAL"
+            buy_allowed = True
+
+        if is_afternoon:
+            # Stricter: require ADX > 30 (strong trend, not choppy afternoon noise)
+            if dxy_adx <= 30:
+                return {
+                    "allowed": False,
+                    "reason": f"Afternoon: DXY ADX too low ({dxy_adx:.1f} ≤ 30, need strong trend)",
+                    "dxy_trend": dxy_trend,
+                    "buy_allowed": False,
+                }
+
+            # For Gold BUY: require DXY clearly below MA20 (not just neutral)
+            if signal_direction == "BUY" and latest_close >= latest_ma20 - 0.50:
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"Afternoon: DXY not weak enough for Gold BUY "
+                        f"(close={latest_close:.3f}, MA20={latest_ma20:.3f})"
+                    ),
+                    "dxy_trend": dxy_trend,
+                    "buy_allowed": False,
+                }
+
+            # For Gold SELL: require DXY clearly above MA20
+            if signal_direction == "SELL" and latest_close <= latest_ma20 + 0.50:
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"Afternoon: DXY not strong enough for Gold SELL "
+                        f"(close={latest_close:.3f}, MA20={latest_ma20:.3f})"
+                    ),
+                    "dxy_trend": dxy_trend,
+                    "buy_allowed": buy_allowed,
+                }
+
+        logger.info(
+            f"DXY session-aware: {dxy_trend} | ADX={dxy_adx:.1f} | "
+            f"close={latest_close:.3f} MA20={latest_ma20:.3f} | afternoon={is_afternoon}"
+        )
+        return {
+            "allowed": True,
+            "reason": "DXY correlation OK",
+            "dxy_trend": dxy_trend,
+            "buy_allowed": buy_allowed,
+        }
+    except Exception as e:
+        logger.error(f"Session-aware DXY check error: {e}")
+        return {"allowed": True, "reason": "DXY check error (pass-through)", "dxy_trend": "UNKNOWN", "buy_allowed": True}
+
+
 # ============ NEWS GUARD ============
 async def check_news_impact(symbol: str = "XAU/USD") -> dict:
     """
@@ -575,6 +671,129 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> dict:
     except Exception as e:
         logger.error(f"Candlestick pattern detection error: {e}")
         return {"pattern": "NONE", "pattern_strength": "WEAK", "bullish": None}
+
+
+# ============ SESSION GUARD ============
+def is_market_dangerous_for_gold() -> bool:
+    """
+    Block trading during low-liquidity/reversal hours.
+
+    Danger Zone: 21:00–01:00 UTC
+    - London close (16:00 EST = 21:00 UTC)
+    - Asia hasn't opened yet (00:00–09:00 UTC)
+
+    Safe Hours: 01:00–21:00 UTC (London + NY overlap + early NY)
+    """
+    now_utc = datetime.now(timezone.utc).hour
+    # Block 21:00–00:59 UTC (evening reversal danger zone)
+    if now_utc >= 21 or now_utc < 1:
+        return True
+    return False
+
+
+# ============ TRAILING STOP ============
+def calculate_trailing_stop(
+    entry_price: float,
+    current_price: float,
+    signal_direction: str,
+    atr: float,
+    atr_multiplier_sl: float = 1.5,
+) -> float:
+    """
+    Calculate trailing stop that moves to break-even when in profit.
+
+    Logic:
+    - If profit < 50 pips: use static SL (1.5 × ATR)
+    - If profit >= 50 pips: move SL to entry (break-even)
+    - If profit >= 100 pips: move SL to entry + 20 pips (lock in gains)
+    """
+    static_sl_distance = atr * atr_multiplier_sl
+
+    if signal_direction.upper() == "BUY":
+        profit_pips = (current_price - entry_price) * 100  # Convert to pips
+
+        if profit_pips >= 100:
+            # Lock in 20 pips of profit
+            return entry_price + (20 / 100)
+        elif profit_pips >= 50:
+            # Move to break-even
+            return entry_price
+        else:
+            # Use static SL
+            return entry_price - static_sl_distance
+
+    else:  # SELL
+        profit_pips = (entry_price - current_price) * 100
+
+        if profit_pips >= 100:
+            # Lock in 20 pips of profit
+            return entry_price - (20 / 100)
+        elif profit_pips >= 50:
+            # Move to break-even
+            return entry_price
+        else:
+            # Use static SL
+            return entry_price + static_sl_distance
+
+
+# ============ SESSION-END CLOSE ============
+async def close_all_gold_signals_at_session_end():
+    """
+    Close all Gold signals at 20:00 UTC (4:00 PM EST).
+    Protects morning gains from evening reversal.
+    """
+    now_utc = datetime.now(timezone.utc).hour
+
+    # Only execute at 20:xx UTC
+    if now_utc != 20:
+        return
+
+    try:
+        active_signals = await db.gold_signals.find(
+            {"pair": {"$in": ["XAUUSD", "XAUEUR"]}, "status": "ACTIVE"}
+        ).to_list(length=100)
+
+        if not active_signals:
+            logger.info("Session-end close: no active Gold signals to close")
+            return
+
+        for signal in active_signals:
+            await db.gold_signals.update_one(
+                {"_id": signal["_id"]},
+                {
+                    "$set": {
+                        "status": "CLOSED",
+                        "close_price": signal.get("current_price"),
+                        "closed_at": datetime.now(timezone.utc),
+                        "close_reason": "SESSION_END_PROTECTION",
+                    }
+                },
+            )
+            logger.info(
+                f"🛑 {signal['pair']} closed at session end (20:00 UTC) "
+                f"to protect from evening reversal"
+            )
+
+        # Notify Telegram
+        if TELEGRAM_BOT_TOKEN and active_signals:
+            count = len(active_signals)
+            msg = (
+                f"🛑 <b>SESSION-END PROTECTION</b>\n"
+                f"Closed {count} active Gold signal(s) at 20:00 UTC "
+                f"to protect from evening reversal danger zone (21:00–01:00 UTC)."
+            )
+            try:
+                async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+                    await bot.send_message(
+                        chat_id=TELEGRAM_GOLD_CHANNEL_ID,
+                        text=msg,
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                logger.error(f"Error sending session-end Telegram notification: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in close_all_gold_signals_at_session_end: {e}")
 
 
 # ============ SAFETY SWITCH ============
@@ -918,6 +1137,16 @@ async def generate_gold_signal(pair: str):
         params = GOLD_PAIRS[pair]
         logger.info(f"📊 Generating gold signal for {pair}")
 
+        # ── FILTER: Evening reversal session guard (Gold only) ───────────────
+        if pair in {"XAUUSD", "XAUEUR"}:
+            if is_market_dangerous_for_gold():
+                now_utc = datetime.now(timezone.utc).hour
+                logger.info(
+                    f"🚫 {pair} BLOCKED — Evening reversal danger zone "
+                    f"({now_utc:02d}:00 UTC is within 21:00–01:00 danger window)"
+                )
+                return
+
         # Fetch H1 data for primary indicator calculation
         df = await get_price_data(pair, interval="1h", outputsize=100)
         if df is None or len(df) < 20:
@@ -959,8 +1188,12 @@ async def generate_gold_signal(pair: str):
             logger.info(f"{pair} SELL skipped — H4 trend is BULLISH (multi-timeframe conflict)")
             return
 
-        # ── Gate 3: DXY blocks BUY → skip ───────────────────────────────────
-        if signal_type == "BUY" and not dxy_data.get("buy_allowed", True):
+        # ── Gate 3: Session-aware DXY filter ────────────────────────────────
+        dxy_session = await check_dxy_correlation_with_session_awareness(signal_type)
+        if not dxy_session.get("allowed", True):
+            logger.info(f"{pair} skipped — {dxy_session.get('reason', 'DXY session filter')}")
+            return
+        if signal_type == "BUY" and not dxy_session.get("buy_allowed", True):
             logger.info(f"{pair} BUY skipped — DXY in strong uptrend (inverse correlation)")
             return
 
@@ -989,9 +1222,26 @@ async def generate_gold_signal(pair: str):
         sl_price = ai_analysis["sl_price"]
         risk_reward = ai_analysis.get("risk_reward", params["min_rr"])
         conviction_level = weighted.get("conviction_level", "MEDIUM")
+        atr = indicators["atr"]
+
+        # ── Trailing stop: move SL to break-even / lock-in if in profit ──────
+        current_price = indicators.get("current_price", entry_price)
+        trailing_sl = calculate_trailing_stop(
+            entry_price=entry_price,
+            current_price=current_price,
+            signal_direction=signal_type,
+            atr=atr,
+            atr_multiplier_sl=params.get("atr_multiplier_sl", 1.5),
+        )
+        if signal_type == "BUY" and trailing_sl > sl_price:
+            sl_price = round(trailing_sl, params["decimal_places"])
+            logger.info(f"🛑 {pair} Trailing SL activated: {sl_price}")
+        elif signal_type == "SELL" and trailing_sl < sl_price:
+            sl_price = round(trailing_sl, params["decimal_places"])
+            logger.info(f"🛑 {pair} Trailing SL activated: {sl_price}")
 
         # ── Prepare Telegram metadata ────────────────────────────────────────
-        dxy_trend = dxy_data.get("dxy_trend", "UNKNOWN")
+        dxy_trend = dxy_session.get("dxy_trend", dxy_data.get("dxy_trend", "UNKNOWN"))
         dxy_status = "CONFLICT ⚠️" if dxy_trend == "UPTREND" and signal_type == "BUY" else dxy_trend
         news_status = "BLOCKED ⚠️" if news_data.get("news_nearby") else "Clear ✅"
         h4_trend = h4_data.get("h4_trend", "UNKNOWN")
@@ -1064,8 +1314,18 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
+    # Close all Gold signals at 20:00 UTC daily (before evening danger zone)
+    scheduler.add_job(
+        close_all_gold_signals_at_session_end,
+        "cron",
+        hour=20,
+        minute=0,
+        timezone="UTC",
+        id="gold_session_end_close",
+    )
     scheduler.start()
     logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
+    logger.info("🛑 Session-end close scheduled at 20:00 UTC daily")
     asyncio.create_task(run_gold_signals())
     yield
     scheduler.shutdown()

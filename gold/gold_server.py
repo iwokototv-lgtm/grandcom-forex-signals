@@ -49,9 +49,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
+        "atr_multiplier_tp1": 1.0,   # Swing target: 1.0 × ATR (was 0.05)
+        "atr_multiplier_tp2": 2.0,   # Swing target: 2.0 × ATR (was 0.10)
+        "atr_multiplier_tp3": 3.0,   # Swing target: 3.0 × ATR (was 0.15)
         "min_rr": 1.8,
         "min_confidence": 60,
     },
@@ -60,9 +60,9 @@ GOLD_PAIRS = {
         "pip_value": 0.10,
         "decimal_places": 2,
         "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
+        "atr_multiplier_tp1": 1.0,   # Swing target: 1.0 × ATR (was 0.05)
+        "atr_multiplier_tp2": 2.0,   # Swing target: 2.0 × ATR (was 0.10)
+        "atr_multiplier_tp3": 3.0,   # Swing target: 3.0 × ATR (was 0.15)
         "min_rr": 1.8,
         "min_confidence": 60,
     },
@@ -168,6 +168,119 @@ def calculate_indicators(df, params):
     except Exception as e:
         logger.error(f"Indicator calc error: {e}")
         return None
+
+# ============ SESSION GUARD ============
+def is_market_dangerous_for_gold() -> bool:
+    """
+    Block trading during low-liquidity/reversal hours.
+
+    Danger Zone: 21:00–01:00 UTC
+    - London close (16:00 EST = 21:00 UTC)
+    - Asia hasn't opened yet (00:00–09:00 UTC)
+
+    Safe Hours: 01:00–21:00 UTC (London + NY overlap + early NY)
+    """
+    now_utc = datetime.now(timezone.utc).hour
+    # Block 21:00–00:59 UTC (evening reversal danger zone)
+    if now_utc >= 21 or now_utc < 1:
+        return True
+    return False
+
+
+# ============ TRAILING STOP ============
+def calculate_trailing_stop(
+    entry_price: float,
+    current_price: float,
+    signal_direction: str,
+    atr: float,
+    atr_multiplier_sl: float = 1.5,
+) -> float:
+    """
+    Calculate trailing stop that moves to break-even when in profit.
+
+    Logic:
+    - If profit < 50 pips: use static SL (1.5 × ATR)
+    - If profit >= 50 pips: move SL to entry (break-even)
+    - If profit >= 100 pips: move SL to entry + 20 pips (lock in gains)
+    """
+    static_sl_distance = atr * atr_multiplier_sl
+
+    if signal_direction.upper() == "BUY":
+        profit_pips = (current_price - entry_price) * 100
+
+        if profit_pips >= 100:
+            return entry_price + (20 / 100)
+        elif profit_pips >= 50:
+            return entry_price
+        else:
+            return entry_price - static_sl_distance
+
+    else:  # SELL
+        profit_pips = (entry_price - current_price) * 100
+
+        if profit_pips >= 100:
+            return entry_price - (20 / 100)
+        elif profit_pips >= 50:
+            return entry_price
+        else:
+            return entry_price + static_sl_distance
+
+
+# ============ SESSION-END CLOSE ============
+async def close_all_gold_signals_at_session_end():
+    """
+    Close all Gold signals at 20:00 UTC (4:00 PM EST).
+    Protects morning gains from evening reversal.
+    """
+    now_utc = datetime.now(timezone.utc).hour
+
+    # Only execute at 20:xx UTC
+    if now_utc != 20:
+        return
+
+    try:
+        active_signals = await db.gold_signals.find(
+            {"pair": {"$in": ["XAUUSD", "XAUEUR"]}, "status": "ACTIVE"}
+        ).to_list(length=100)
+
+        if not active_signals:
+            logger.info("Session-end close: no active Gold signals to close")
+            return
+
+        for signal in active_signals:
+            await db.gold_signals.update_one(
+                {"_id": signal["_id"]},
+                {
+                    "$set": {
+                        "status": "CLOSED",
+                        "close_price": signal.get("current_price"),
+                        "closed_at": datetime.now(timezone.utc),
+                        "close_reason": "SESSION_END_PROTECTION",
+                    }
+                },
+            )
+            logger.info(
+                f"🛑 {signal['pair']} closed at session end (20:00 UTC) "
+                f"to protect from evening reversal"
+            )
+
+        # Notify Telegram
+        if TELEGRAM_BOT_TOKEN and active_signals:
+            count = len(active_signals)
+            msg = (
+                f"🛑 SESSION-END PROTECTION\n"
+                f"Closed {count} active Gold signal(s) at 20:00 UTC "
+                f"to protect from evening reversal danger zone (21:00–01:00 UTC)."
+            )
+            try:
+                async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+                    await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=msg)
+            except Exception as e:
+                logger.error(f"Error sending session-end Telegram notification: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in close_all_gold_signals_at_session_end: {e}")
+
 
 # ============ AI ANALYSIS ============
 async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
@@ -366,6 +479,16 @@ async def generate_gold_signal(pair: str):
         params = GOLD_PAIRS[pair]
         logger.info(f"📊 Generating gold signal for {pair}")
 
+        # ── FILTER: Evening reversal session guard (Gold only) ───────────────
+        if pair in {"XAUUSD", "XAUEUR"}:
+            if is_market_dangerous_for_gold():
+                now_utc = datetime.now(timezone.utc).hour
+                logger.info(
+                    f"🚫 {pair} BLOCKED — Evening reversal danger zone "
+                    f"({now_utc:02d}:00 UTC is within 21:00–01:00 danger window)"
+                )
+                return
+
         df = await get_price_data(pair, interval="4h", outputsize=100)
         if df is None or len(df) < 20:
             logger.warning(f"Insufficient data for {pair}")
@@ -406,6 +529,22 @@ async def generate_gold_signal(pair: str):
                 round(entry_price - atr * params["atr_multiplier_tp3"], dp),
             ]
             sl_price = round(entry_price + atr * params["atr_multiplier_sl"], dp)
+
+        # ── Trailing stop: move SL to break-even / lock-in if in profit ──────
+        current_price = indicators.get("current_price", entry_price)
+        trailing_sl = calculate_trailing_stop(
+            entry_price=entry_price,
+            current_price=current_price,
+            signal_direction=signal_type,
+            atr=atr,
+            atr_multiplier_sl=params.get("atr_multiplier_sl", 1.5),
+        )
+        if signal_type == "BUY" and trailing_sl > sl_price:
+            sl_price = round(trailing_sl, dp)
+            logger.info(f"🛑 {pair} Trailing SL activated: {sl_price}")
+        elif signal_type == "SELL" and trailing_sl < sl_price:
+            sl_price = round(trailing_sl, dp)
+            logger.info(f"🛑 {pair} Trailing SL activated: {sl_price}")
 
         # Calculate actual R:R from ATR-based levels
         risk = abs(entry_price - sl_price)
@@ -588,9 +727,19 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
     scheduler.add_job(check_all_gold_outcomes, "interval", seconds=60, id="gold_outcome_tracker")
+    # Close all Gold signals at 20:00 UTC daily (before evening danger zone)
+    scheduler.add_job(
+        close_all_gold_signals_at_session_end,
+        "cron",
+        hour=20,
+        minute=0,
+        timezone="UTC",
+        id="gold_session_end_close",
+    )
     scheduler.start()
     logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
     logger.info("🔍 Gold Outcome Tracker started — checking every 60s")
+    logger.info("🛑 Session-end close scheduled at 20:00 UTC daily")
     asyncio.create_task(run_gold_signals())
     yield
     scheduler.shutdown()
