@@ -43,6 +43,9 @@ from subscription_service import (
     SUBSCRIPTION_PACKAGES, TIER_FEATURES
 )
 
+# Import ATR-based TP Calculator
+from tp_calculator import TPCalculator
+
 # ============================================================
 # EXECUTION GATEKEEPER  (Safe Execution Mode v2)
 # Your exact class — symbol-aware pip multipliers, per-asset
@@ -2569,6 +2572,56 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             regime_name      = 'UNKNOWN'
             regime_confidence= 0.5
             risk_multiplier  = 1.0
+
+        # ================================================================
+        # ATR-BASED TP OVERRIDE  ← Pair-DNA aware TP levels (Forex only)
+        # Gold pairs keep their own ATR multipliers from gold_server.py.
+        # For all Forex pairs we recalculate TP1/TP2/TP3 using H4 ATR so
+        # that levels are realistic and capped at 5 pips between each step.
+        # ================================================================
+        GOLD_TP_SKIP = {"XAUUSD", "XAUEUR"}
+        if pair not in GOLD_TP_SKIP:
+            try:
+                # Fetch H4 candles for ATR calculation (14-period needs ≥15 bars)
+                h4_df_atr = await get_price_data(pair, interval="4h", outputsize=20)
+                if h4_df_atr is not None and len(h4_df_atr) >= 15:
+                    h4_highs  = h4_df_atr["high"].tolist()
+                    h4_lows   = h4_df_atr["low"].tolist()
+                    h4_closes = h4_df_atr["close"].tolist()
+                    h4_atr = TPCalculator.calculate_atr(h4_highs, h4_lows, h4_closes, period=14)
+                else:
+                    # Fall back to the ATR already computed on the primary timeframe
+                    h4_atr = float(indicators.get("atr", 0.0))
+                    logger.warning(
+                        f"⚠️ {pair} H4 data unavailable for ATR — using primary-TF ATR={h4_atr:.5f}"
+                    )
+
+                if h4_atr > 0.0:
+                    atr_tp_levels, atr_used = TPCalculator.calculate_tp_levels(
+                        pair             = pair,
+                        entry_price      = entry_price,
+                        signal_direction = signal_direction,
+                        atr              = h4_atr,
+                        decimal_places   = params.get("decimal_places", 5),
+                    )
+                    if atr_tp_levels:
+                        tp_levels = atr_tp_levels
+                        logger.info(
+                            f"📊 {pair} ATR-TP (H4 ATR={atr_used:.5f}): "
+                            f"TP1={tp_levels[0]} | TP2={tp_levels[1]} | TP3={tp_levels[2]}"
+                        )
+                    else:
+                        logger.warning(
+                            f"⚠️ {pair} ATR-TP calculation returned empty — keeping prior TP levels"
+                        )
+                else:
+                    logger.warning(
+                        f"⚠️ {pair} ATR=0 — keeping prior TP levels"
+                    )
+            except Exception as atr_tp_err:
+                logger.warning(
+                    f"⚠️ {pair} ATR-TP override failed ({atr_tp_err}) — keeping prior TP levels"
+                )
 
         # ================================================================
         # EXECUTION GATEKEEPER  ← Symbol-aware validation layer
