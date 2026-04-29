@@ -31,6 +31,16 @@ except ImportError:
 # Import Signal Outcome Tracker
 from signal_outcome_tracker import SignalOutcomeTracker, init_outcome_tracker, get_outcome_tracker
 
+# ── Modular Forex upgrade (pair profiles, session, DXY, pip calc, heatmap) ──
+from pair_profiles import (
+    get_pair_profile, get_pip_size, get_decimal_places,
+    PairType, SessionType, PAIR_PROFILES,
+)
+from session_manager import SessionManager
+from dxy_correlation_engine import DXYCorrelationEngine
+from pip_calculator import PipCalculator
+from cross_pair_heatmap import CrossPairHeatmap
+
 # Import Push Notification Service
 from notification_service import PushNotificationService, init_push_service, get_push_service
 
@@ -2296,10 +2306,49 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
     try:
         params = PAIR_PARAMETERS.get(pair, DEFAULT_PAIR_PARAMS)
 
-        # FILTER 1: SESSION
+        # ── Pair profile (new modular system) ────────────────────
+        pair_profile = get_pair_profile(pair)
+
+        # FILTER 0: CROSS-PAIR USD EXPOSURE GUARD
+        # Prevent double-risking USD by capping concurrent USD-exposed signals at 2.
+        try:
+            active_docs_heatmap = await db.signals.find(
+                {"status": "ACTIVE"}, {"pair": 1}
+            ).to_list(length=200)
+            active_signals_heatmap = [{"symbol": d["pair"]} for d in active_docs_heatmap]
+            if CrossPairHeatmap.should_filter_signal(pair, active_signals_heatmap, max_usd_exposure=2):
+                exposure_summary = CrossPairHeatmap.get_exposure_summary(active_signals_heatmap)
+                logger.info(
+                    f"🔥 {pair} SKIPPED — USD exposure cap reached "
+                    f"({exposure_summary['usd_count']}/2 USD pairs active: "
+                    f"{exposure_summary['usd_pairs']})"
+                )
+                return None
+        except Exception as heatmap_err:
+            logger.warning(f"⚠️ {pair} heatmap check error (allowing): {heatmap_err}")
+
+        # FILTER 1: SESSION (legacy + new session intelligence)
         if not is_session_optimal(pair):
             logger.info(f"⏰ {pair} skipped - not in optimal session")
             return None
+
+        # FILTER 1b: SESSION INTELLIGENCE (pair-profile aware)
+        if pair_profile:
+            session_multiplier = SessionManager.get_session_confidence_multiplier(pair_profile)
+            gate_threshold = SessionManager.get_gate_score_threshold(pair_profile)
+            session_label = SessionManager.get_session_label()
+            is_high_liq = SessionManager.is_high_liquidity_session(pair_profile)
+            logger.info(
+                f"🕐 {pair} session={session_label} | "
+                f"high_liquidity={is_high_liq} | "
+                f"conf_multiplier={session_multiplier:.2f} | "
+                f"gate_threshold={gate_threshold}"
+            )
+        else:
+            session_multiplier = 1.0
+            gate_threshold = 60
+            session_label = "Unknown"
+            is_high_liq = True
 
         # FILTER 2: DRAWDOWN PROTECTION
         can_trade, pause_reason = check_drawdown_protection(pair)
@@ -2407,11 +2456,15 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             confidence_boost = alignment["confidence_boost"],
         )
 
-        # GATE 1: Weighted score < 60 → skip (LOW conviction)
-        if weighted["weighted_score"] < 60:
+        # GATE 1: Weighted score < session-adjusted gate threshold → skip
+        # During London-NY overlap the threshold is lowered (pair_profile.gate_score_overlap)
+        # to capture the Golden Window's extra liquidity.
+        effective_gate = gate_threshold  # set by SessionManager above (default 60)
+        if weighted["weighted_score"] < effective_gate:
             logger.info(
-                f"⚖️  {pair} SKIPPED — weighted score {weighted['weighted_score']:.0f}% < 60 "
-                f"(conviction={weighted['conviction_level']})"
+                f"⚖️  {pair} SKIPPED — weighted score {weighted['weighted_score']:.0f}% "
+                f"< gate {effective_gate} (session={session_label}, "
+                f"conviction={weighted['conviction_level']})"
             )
             return None
 
@@ -2424,7 +2477,10 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
                 logger.info(f"📊 {pair} SKIPPED — SELL conflicts with H4 BULLISH trend")
                 return None
 
-        # GATE 3: DXY/JPY correlation blocks signal
+        # GATE 3: DXY correlation flip (new modular engine)
+        # Replaces the old binary block with a scored boost/penalty system.
+        # The old check_dxy_correlation() is still called for the legacy dxy_trend
+        # label used in the Telegram info block; the new engine handles direction logic.
         dxy_check = await check_dxy_correlation(pair, signal_direction)
         if signal_direction == "BUY" and not dxy_check["buy_allowed"]:
             logger.info(f"💱 {pair} SKIPPED — DXY blocks BUY: {dxy_check['reason']}")
@@ -2432,6 +2488,47 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         if signal_direction == "SELL" and not dxy_check["sell_allowed"]:
             logger.info(f"💱 {pair} SKIPPED — DXY blocks SELL: {dxy_check['reason']}")
             return None
+
+        # GATE 3b: DXY correlation engine — compute boost/penalty for confidence
+        # dxy_score is approximated from the existing dxy_trend string:
+        #   BULLISH → 70 (above threshold), BEARISH → 30, NEUTRAL → 50
+        _dxy_score_map = {"BULLISH": 70.0, "BEARISH": 30.0, "NEUTRAL": 50.0}
+        dxy_score_approx = _dxy_score_map.get(dxy_trend, 50.0)
+        dxy_signal_dir = DXYCorrelationEngine.get_dxy_signal_direction(pair, dxy_score_approx)
+        dxy_label = DXYCorrelationEngine.get_dxy_label(dxy_signal_dir, pair)
+        logger.info(f"💱 {pair} DXY correlation: {dxy_label} (signal={dxy_signal_dir})")
+
+        # Apply DXY confidence multiplier to the weighted score
+        if pair_profile:
+            dxy_adjusted_confidence = DXYCorrelationEngine.apply_dxy_correlation_multiplier(
+                signal_direction=signal_direction,
+                dxy_signal=dxy_signal_dir,
+                base_confidence=weighted["weighted_score"],
+                pair_profile=pair_profile,
+            )
+            logger.info(
+                f"💱 {pair} DXY-adjusted confidence: "
+                f"{weighted['weighted_score']:.1f}% → {dxy_adjusted_confidence:.1f}%"
+            )
+        else:
+            dxy_adjusted_confidence = weighted["weighted_score"]
+
+        # GATE 3c: Session confidence penalty
+        # Pairs outside their primary session get a confidence penalty.
+        session_adjusted_confidence = dxy_adjusted_confidence * session_multiplier
+        if session_multiplier < 1.0:
+            logger.info(
+                f"🕐 {pair} session penalty applied: "
+                f"{dxy_adjusted_confidence:.1f}% × {session_multiplier:.2f} "
+                f"= {session_adjusted_confidence:.1f}%"
+            )
+            # Re-check gate after penalty
+            if session_adjusted_confidence < effective_gate:
+                logger.info(
+                    f"⚖️  {pair} SKIPPED — session-penalised confidence "
+                    f"{session_adjusted_confidence:.1f}% < gate {effective_gate}"
+                )
+                return None
 
         # GATE 5: Safety switch (oversold/overbought pullback wait)
         safety = apply_safety_switch(indicators, signal_direction, alignment)
@@ -2623,6 +2720,33 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         # END EXECUTION GATEKEEPER
         # ================================================================
 
+        # ================================================================
+        # SPREAD GUARD + FREEZE LEVEL CHECK (PipCalculator)
+        # Ensures TP1 is far enough from entry to be worth taking.
+        # Uses pair-profile pip sizes (JPY = 0.01, others = 0.0001).
+        # ================================================================
+        pip_size_label = PipCalculator.get_pip_label(pair)
+        if tp_levels:
+            freeze_ok = PipCalculator.check_freeze_level(
+                symbol=pair,
+                entry_price=entry_price,
+                tp1_price=tp_levels[0],
+                freeze_level_pips=2.0,
+            )
+            if not freeze_ok:
+                logger.info(
+                    f"🧊 {pair} FROZEN — TP1 too close to entry "
+                    f"(< 2 pips, pip_size={pip_size_label}). Skipping."
+                )
+                return None
+            logger.info(
+                f"📐 {pair} spread guard OK | pip_size={pip_size_label} | "
+                f"entry={entry_price} TP1={tp_levels[0]}"
+            )
+        # ================================================================
+        # END SPREAD GUARD
+        # ================================================================
+
         # Parse risk_reward
         risk_reward = ai_analysis.get("risk_reward", params['min_rr'])
         if isinstance(risk_reward, str) and ":" in risk_reward:
@@ -2679,16 +2803,36 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         signal.id = str(result.inserted_id)
 
         # Build multi-indicator metadata for Telegram message
+        # Includes new institutional fields: session, DXY signal, pip size, USD exposure
+        try:
+            _exposure_docs = await db.signals.find(
+                {"status": "ACTIVE"}, {"pair": 1}
+            ).to_list(length=200)
+            _exposure_summary = CrossPairHeatmap.get_exposure_summary(
+                [{"symbol": d["pair"]} for d in _exposure_docs]
+            )
+        except Exception:
+            _exposure_summary = {"usd_count": 0, "usd_pairs": [], "at_cap": False}
+
         multi_meta = {
-            "weighted_score":   weighted.get("weighted_score", 50.0),
-            "conviction_level": weighted.get("conviction_level", "MEDIUM"),
-            "alignment_score":  alignment.get("alignment_score", 50.0),
-            "h4_trend":         h4_trend,
-            "dxy_trend":        dxy_trend,
-            "news_nearby":      news_result.get("news_nearby", False),
-            "trend_score":      weighted.get("trend_score", 50.0),
-            "momentum_score":   weighted.get("momentum_score", 50.0),
-            "trigger_score":    weighted.get("trigger_score", 50.0),
+            "weighted_score":           weighted.get("weighted_score", 50.0),
+            "conviction_level":         weighted.get("conviction_level", "MEDIUM"),
+            "alignment_score":          alignment.get("alignment_score", 50.0),
+            "h4_trend":                 h4_trend,
+            "dxy_trend":                dxy_trend,
+            "news_nearby":              news_result.get("news_nearby", False),
+            "trend_score":              weighted.get("trend_score", 50.0),
+            "momentum_score":           weighted.get("momentum_score", 50.0),
+            "trigger_score":            weighted.get("trigger_score", 50.0),
+            # ── New institutional fields ──────────────────────────────
+            "session_label":            session_label,
+            "is_high_liquidity":        is_high_liq,
+            "dxy_signal_dir":           dxy_signal_dir,
+            "dxy_label":                dxy_label,
+            "pip_size_label":           pip_size_label,
+            "pair_type":                pair_profile.pair_type.value if pair_profile else "UNKNOWN",
+            "usd_exposure_count":       _exposure_summary["usd_count"],
+            "usd_exposure_pairs":       _exposure_summary["usd_pairs"],
         }
         await send_signal_to_telegram(signal, regime_name, risk_multiplier, multi_meta=multi_meta)
 
@@ -2746,6 +2890,15 @@ async def send_signal_to_telegram(
         trend_score       = meta.get("trend_score", 50.0)
         momentum_score    = meta.get("momentum_score", 50.0)
         trigger_score     = meta.get("trigger_score", 50.0)
+        # ── New institutional fields ──────────────────────────────────────
+        session_label_tg    = meta.get("session_label", "Unknown")
+        is_high_liq_tg      = meta.get("is_high_liquidity", True)
+        dxy_signal_dir_tg   = meta.get("dxy_signal_dir", "NEUTRAL")
+        dxy_label_tg        = meta.get("dxy_label", "⚪ DXY Neutral")
+        pip_size_label_tg   = meta.get("pip_size_label", "0.0001 pip")
+        pair_type_tg        = meta.get("pair_type", "UNKNOWN")
+        usd_exposure_count  = meta.get("usd_exposure_count", 0)
+        usd_exposure_pairs  = meta.get("usd_exposure_pairs", [])
 
         # ── TSCopier-compatible format ────────────────────────────────────
         # Plain text, no HTML. TSCopier AI parses this reliably.
@@ -2758,6 +2911,9 @@ async def send_signal_to_telegram(
         # HIGH CONVICTION label
         conviction_label = " [HIGH CONVICTION]" if conviction_level == "HIGH" else ""
 
+        # Session tag for copier message
+        overlap_tag = " [OVERLAP]" if "Overlap" in session_label_tg else ""
+
         # For Gold, publish a small range around entry so TSCopier's
         # "Smart Entry Mode" picks the live price within the zone.
         if is_gold:
@@ -2768,8 +2924,18 @@ async def send_signal_to_telegram(
             entry_line = f"{action} {signal.entry_price}"
 
         strategy_label = REGIME_STRATEGY.get(regime_name, "SCALP")
+
+        # Asset class tag: FOREX | CROSS | GOLD
+        if is_gold:
+            asset_class_tag = "GOLD"
+        elif pair_type_tg in ("USD_LED", "USD_FOLLOW"):
+            asset_class_tag = "FOREX"
+        else:
+            asset_class_tag = "CROSS"
+
         copier_message = (
-            f"{signal_emoji} #{signal.pair} [{strategy_label}]{conviction_label}\n"
+            f"{signal_emoji} #{signal.pair} [{strategy_label}]{conviction_label}{overlap_tag}\n"
+            f"#{asset_class_tag} | {session_label_tg}\n"
             f"\n"
             f"{entry_line}\n"
             f"\n"
@@ -2789,9 +2955,8 @@ async def send_signal_to_telegram(
         # H4 trend display
         h4_emoji = "📈" if h4_trend == "BULLISH" else "📉" if h4_trend == "BEARISH" else "➡️"
 
-        # DXY display
-        dxy_label = "NEUTRAL" if dxy_trend == "NEUTRAL" else dxy_trend
-        dxy_emoji = "💱"
+        # DXY display — use new institutional label
+        dxy_display = sanitize_html(dxy_label_tg)
 
         # News display
         news_label = "⚠️ BLOCKED" if news_nearby else "✅ Clear"
@@ -2802,6 +2967,17 @@ async def send_signal_to_telegram(
             "MEDIUM": "✅ MEDIUM",
             "LOW":    "⚠️ LOW",
         }.get(conviction_level, "✅ MEDIUM")
+
+        # Session liquidity badge
+        liq_badge = "🔥 HIGH (Overlap)" if "Overlap" in session_label_tg else (
+            "✅ Primary" if is_high_liq_tg else "⚠️ Off-session"
+        )
+
+        # USD exposure display
+        usd_exp_str = (
+            f"{usd_exposure_count}/2 ({', '.join(usd_exposure_pairs)})"
+            if usd_exposure_pairs else f"{usd_exposure_count}/2"
+        )
 
         safe_analysis = sanitize_html(signal.analysis)
         info_message = (
@@ -2814,12 +2990,16 @@ async def send_signal_to_telegram(
             f"(T:{trend_score:.0f}% M:{momentum_score:.0f}% Tr:{trigger_score:.0f}%)\n"
             f"<b>🔗 Alignment:</b> {alignment_score:.0f}% (Williams%R + StochRSI)\n"
             f"<b>{h4_emoji} H4 Trend:</b> {h4_trend}\n"
-            f"<b>{dxy_emoji} DXY:</b> {dxy_label}\n"
+            f"<b>💱 DXY:</b> {dxy_display}\n"
             f"<b>📰 News:</b> {news_label}\n"
+            f"\n"
+            f"<b>🕐 Session:</b> {sanitize_html(session_label_tg)} | <b>Liquidity:</b> {liq_badge}\n"
+            f"<b>📐 Pip Size:</b> {pip_size_label_tg} | <b>Asset Class:</b> #{asset_class_tag}\n"
+            f"<b>🔥 USD Exposure:</b> {usd_exp_str} active\n"
             f"\n"
             f"<b>📝</b> {safe_analysis}\n"
             f"<i>⏰ {signal.created_at.strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom ML + Multi-Indicator Engine</i>"
+            f"| Grandcom ML + Multi-Indicator Engine v3</i>"
         )
 
         # Send copier message first (plain text — no parse_mode)
