@@ -20,6 +20,7 @@ from telegram import Bot
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 # Railway-safe LLM import: emergentintegrations on Emergent pod, litellm fallback on Railway
 HAS_EMERGENT_LLM = False
@@ -438,6 +439,14 @@ async def generate_gold_signal(pair: str):
             "timeframe": "4H",
             "status": "ACTIVE",
             "created_at": datetime.now(timezone.utc),
+            "atr": indicators.get("atr"),
+            "strategy": "TREND",
+            # Break-even protection fields
+            "position_remaining_pct": 1.0,
+            "sl_moved_at": None,
+            "sl_move_reason": None,
+            "partial_closes": [],
+            "total_pnl_locked": 0.0,
         }
         await db.gold_signals.insert_one(signal_doc)
 
@@ -542,7 +551,6 @@ async def send_close_notification(signal: dict, outcome: dict):
 
 async def check_all_gold_outcomes():
     try:
-        from bson import ObjectId
         active = await db.gold_signals.find({"status": "ACTIVE"}).to_list(length=100)
         if not active:
             return
@@ -581,6 +589,352 @@ async def check_all_gold_outcomes():
     except Exception as e:
         logger.error(f"Error in gold outcome check: {e}")
 
+# ============ BREAK-EVEN PROTECTION ============
+
+def calculate_breakeven_sl(
+    entry_price: float,
+    current_price: float,
+    signal_direction: str,
+    atr: float,
+    strategy: str = "TREND",  # "TREND" or "REVERSAL"
+) -> dict:
+    """
+    Calculate break-even stop loss based on profit level.
+
+    Stages:
+    1. Entry to +30 pips: Static SL (1.5×ATR trend / 1.0×ATR reversal)
+    2. +30 to +50 pips:   Move SL to entry (break-even)
+    3. +50 to +100 pips:  Close 30%, move SL to entry + 10 pips
+    4. +100+ pips:        Close 50%, move SL to entry + 30 pips
+
+    Returns:
+        breakeven_sl : float  — new SL price
+        action       : str    — "HOLD" | "MOVE_SL" | "CLOSE_PARTIAL"
+        close_pct    : float  — % to close (0 if no partial)
+        reason       : str
+        stage        : int    — 1–4
+    """
+    atr_mult = 1.5 if strategy == "TREND" else 1.0
+
+    # Calculate profit in pips (Gold: 1 pip = $0.10, price diff × 10 = pips)
+    if signal_direction.upper() == "BUY":
+        profit_pips = (current_price - entry_price) * 10
+        static_sl = entry_price - (atr * atr_mult)
+    else:  # SELL
+        profit_pips = (entry_price - current_price) * 10
+        static_sl = entry_price + (atr * atr_mult)
+
+    # Stage 1: Entry to +30 pips — use static SL
+    if profit_pips < 30:
+        return {
+            "breakeven_sl": static_sl,
+            "action": "HOLD",
+            "close_pct": 0,
+            "reason": f"Early stage: +{profit_pips:.0f} pips (need +30 for BE)",
+            "stage": 1,
+        }
+
+    # Stage 2: +30 to +50 pips — move SL to entry (break-even)
+    if 30 <= profit_pips < 50:
+        return {
+            "breakeven_sl": entry_price,
+            "action": "MOVE_SL",
+            "close_pct": 0,
+            "reason": f"Break-even protection: +{profit_pips:.0f} pips, SL moved to entry",
+            "stage": 2,
+        }
+
+    # Stage 3: +50 to +100 pips — close 30%, move SL to entry + 10 pips
+    if 50 <= profit_pips < 100:
+        pip_offset = 10 / 10  # 10 pips in price units (Gold: 1 pip = 0.10)
+        if signal_direction.upper() == "BUY":
+            breakeven_sl = entry_price + pip_offset
+        else:
+            breakeven_sl = entry_price - pip_offset
+        return {
+            "breakeven_sl": breakeven_sl,
+            "action": "CLOSE_PARTIAL",
+            "close_pct": 0.30,
+            "reason": f"Profit lock: +{profit_pips:.0f} pips, close 30% at TP1, SL to entry+10",
+            "stage": 3,
+        }
+
+    # Stage 4: +100+ pips — close 50%, move SL to entry + 30 pips
+    pip_offset = 30 / 10  # 30 pips in price units
+    if signal_direction.upper() == "BUY":
+        breakeven_sl = entry_price + pip_offset
+    else:
+        breakeven_sl = entry_price - pip_offset
+    return {
+        "breakeven_sl": breakeven_sl,
+        "action": "CLOSE_PARTIAL",
+        "close_pct": 0.50,
+        "reason": f"Strong profit: +{profit_pips:.0f} pips, close 50% at TP2, SL to entry+30",
+        "stage": 4,
+    }
+
+
+async def execute_partial_close(
+    signal_id: str,
+    pair: str,
+    close_pct: float,
+    current_price: float,
+    profit_pips: float,
+) -> dict:
+    """
+    Close a percentage of the position at current price and record it in DB.
+
+    Args:
+        signal_id    : MongoDB signal _id (string)
+        pair         : Currency pair (e.g. "XAUUSD")
+        close_pct    : Fraction to close (0.30 = 30%)
+        current_price: Current market price
+        profit_pips  : Current profit in pips
+
+    Returns:
+        closed        : bool
+        remaining_pct : float — fraction still open
+        pnl           : float — profit from closed portion
+        reason        : str
+    """
+    try:
+        signal = await db.gold_signals.find_one({"_id": ObjectId(signal_id)})
+        if not signal:
+            return {"closed": False, "reason": "Signal not found"}
+
+        # Only close if position still has room (avoid double-closing same stage)
+        position_remaining = signal.get("position_remaining_pct", 1.0)
+        if position_remaining <= 0:
+            return {"closed": False, "reason": "Position already fully closed"}
+
+        # Effective close fraction is relative to the original position
+        effective_close = close_pct * position_remaining
+
+        # PnL calculation — Gold: $0.10 per pip per 0.01 lot (simplified scalar)
+        pnl_per_pip = effective_close * 0.10
+        pnl = profit_pips * pnl_per_pip
+
+        remaining_pct = max(0.0, position_remaining - effective_close)
+
+        partial_record = {
+            "closed_at": datetime.now(timezone.utc),
+            "close_pct": close_pct,
+            "effective_close_pct": effective_close,
+            "close_price": current_price,
+            "pnl": round(pnl, 2),
+            "profit_pips": round(profit_pips, 1),
+        }
+
+        await db.gold_signals.update_one(
+            {"_id": ObjectId(signal_id)},
+            {
+                "$set": {
+                    "position_remaining_pct": round(remaining_pct, 4),
+                    "total_pnl_locked": round(
+                        signal.get("total_pnl_locked", 0.0) + pnl, 2
+                    ),
+                },
+                "$push": {"partial_closes": partial_record},
+            },
+        )
+
+        logger.info(
+            f"✅ Partial close: {pair} closed {close_pct*100:.0f}% "
+            f"@ {current_price} | PnL: ${pnl:.2f} | Remaining: {remaining_pct*100:.0f}%"
+        )
+
+        return {
+            "closed": True,
+            "remaining_pct": remaining_pct,
+            "pnl": pnl,
+            "reason": f"Closed {close_pct*100:.0f}% at {current_price}",
+        }
+
+    except Exception as e:
+        logger.error(f"Error executing partial close for {signal_id}: {e}")
+        return {"closed": False, "reason": f"Error: {e}"}
+
+
+async def notify_breakeven_telegram(
+    pair: str,
+    direction: str,
+    new_sl: float,
+    profit_pips: float,
+    action_type: str,
+    close_pct: float = 0,
+    pnl: float = 0,
+):
+    """Send Telegram notification for break-even / partial-close actions."""
+    try:
+        if not TELEGRAM_BOT_TOKEN:
+            return
+
+        if action_type == "BREAK_EVEN":
+            msg = (
+                f"🛑 <b>BREAK-EVEN PROTECTION</b>\n"
+                f"<b>Pair:</b> {pair}\n"
+                f"<b>Direction:</b> {direction}\n"
+                f"<b>SL Moved to:</b> {new_sl:.2f}\n"
+                f"<b>Current Profit:</b> +{profit_pips:.0f} pips\n"
+                f"<b>Status:</b> Trade is now protected from loss"
+            )
+        elif action_type == "PARTIAL_CLOSE":
+            msg = (
+                f"💰 <b>PARTIAL CLOSE</b>\n"
+                f"<b>Pair:</b> {pair}\n"
+                f"<b>Direction:</b> {direction}\n"
+                f"<b>Closed:</b> {close_pct*100:.0f}%\n"
+                f"<b>PnL Locked:</b> ${pnl:.2f}\n"
+                f"<b>New SL:</b> {new_sl:.2f}\n"
+                f"<b>Profit at Close:</b> +{profit_pips:.0f} pips"
+            )
+        else:
+            return
+
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(
+                chat_id=TELEGRAM_GOLD_CHANNEL_ID,
+                text=msg,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Error sending break-even Telegram notification: {e}")
+
+
+async def monitor_breakeven_protection():
+    """
+    Background task — runs every 30 seconds.
+    Checks all ACTIVE signals and applies break-even / partial-close logic.
+    """
+    try:
+        active_signals = await db.gold_signals.find(
+            {"status": "ACTIVE"}
+        ).to_list(length=100)
+
+        if not active_signals:
+            return
+
+        logger.info(f"🛡️ Break-even monitor: checking {len(active_signals)} active signal(s)")
+
+        for signal in active_signals:
+            pair = signal.get("pair", "XAUUSD")
+            signal_id = str(signal["_id"])
+            entry_price = signal.get("entry_price")
+            signal_direction = signal.get("type", "BUY")
+            strategy = signal.get("strategy", "TREND")
+            atr = signal.get("atr", 0.0) or 0.0
+
+            if not entry_price:
+                continue
+
+            # Fetch current price
+            try:
+                current_price = await get_live_price(pair)
+                if current_price is None:
+                    continue
+            except Exception as e:
+                logger.warning(f"Could not get current price for {pair}: {e}")
+                continue
+
+            # Calculate profit in pips
+            if signal_direction == "BUY":
+                profit_pips = (current_price - entry_price) * 10
+            else:
+                profit_pips = (entry_price - current_price) * 10
+
+            # Skip if in loss or flat
+            if profit_pips <= 0:
+                continue
+
+            # If ATR not stored on signal, fall back to a safe default
+            if atr == 0.0:
+                atr = 1.0
+
+            be_result = calculate_breakeven_sl(
+                entry_price=entry_price,
+                current_price=current_price,
+                signal_direction=signal_direction,
+                atr=atr,
+                strategy=strategy,
+            )
+
+            current_sl = signal.get("sl_price")
+            new_sl = be_result["breakeven_sl"]
+
+            # ── Action: MOVE_SL (Stage 2) ────────────────────────────────────
+            if be_result["action"] == "MOVE_SL":
+                sl_improved = (
+                    (signal_direction == "BUY" and (current_sl is None or new_sl > current_sl))
+                    or (signal_direction == "SELL" and (current_sl is None or new_sl < current_sl))
+                )
+                if sl_improved:
+                    await db.gold_signals.update_one(
+                        {"_id": signal["_id"]},
+                        {
+                            "$set": {
+                                "sl_price": new_sl,
+                                "sl_moved_at": datetime.now(timezone.utc),
+                                "sl_move_reason": be_result["reason"],
+                            }
+                        },
+                    )
+                    logger.info(
+                        f"🛑 {pair} SL → break-even {new_sl:.2f} "
+                        f"(profit: +{profit_pips:.0f} pips)"
+                    )
+                    await notify_breakeven_telegram(
+                        pair, signal_direction, new_sl, profit_pips, "BREAK_EVEN"
+                    )
+
+            # ── Action: CLOSE_PARTIAL (Stages 3 & 4) ────────────────────────
+            elif be_result["action"] == "CLOSE_PARTIAL" and be_result["close_pct"] > 0:
+                # Guard: only execute each stage once by checking existing partial closes
+                existing_closes = signal.get("partial_closes", [])
+                stage = be_result["stage"]
+                already_closed = any(
+                    pc.get("stage") == stage for pc in existing_closes
+                )
+                if already_closed:
+                    continue
+
+                close_result = await execute_partial_close(
+                    signal_id=signal_id,
+                    pair=pair,
+                    close_pct=be_result["close_pct"],
+                    current_price=current_price,
+                    profit_pips=profit_pips,
+                )
+
+                if close_result["closed"]:
+                    await db.gold_signals.update_one(
+                        {"_id": signal["_id"]},
+                        {
+                            "$set": {
+                                "sl_price": new_sl,
+                                "sl_moved_at": datetime.now(timezone.utc),
+                                "sl_move_reason": be_result["reason"],
+                            }
+                        },
+                    )
+                    logger.info(
+                        f"💰 {pair} partial close stage {stage}: "
+                        f"{be_result['close_pct']*100:.0f}% @ {current_price} "
+                        f"| PnL: ${close_result['pnl']:.2f}"
+                    )
+                    await notify_breakeven_telegram(
+                        pair,
+                        signal_direction,
+                        new_sl,
+                        profit_pips,
+                        "PARTIAL_CLOSE",
+                        close_pct=be_result["close_pct"],
+                        pnl=close_result["pnl"],
+                    )
+
+    except Exception as e:
+        logger.error(f"Error in break-even monitor: {e}")
+
+
 # ============ APP ============
 scheduler = AsyncIOScheduler()
 
@@ -588,9 +942,16 @@ scheduler = AsyncIOScheduler()
 async def lifespan(app: FastAPI):
     scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
     scheduler.add_job(check_all_gold_outcomes, "interval", seconds=60, id="gold_outcome_tracker")
+    scheduler.add_job(
+        monitor_breakeven_protection,
+        "interval",
+        seconds=30,
+        id="breakeven_monitor",
+    )
     scheduler.start()
     logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
     logger.info("🔍 Gold Outcome Tracker started — checking every 60s")
+    logger.info("🛡️ Break-even protection monitor started (every 30s)")
     asyncio.create_task(run_gold_signals())
     yield
     scheduler.shutdown()
