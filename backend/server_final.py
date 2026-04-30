@@ -1231,6 +1231,8 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
         signal_dict['regime']              = regime_name
         signal_dict['risk_multiplier']     = risk_multiplier
         signal_dict['breakeven_triggered'] = False   # set True when TP1 hit
+        signal_dict['breakeven_stage']     = 1       # pyramid stage (1–5)
+        signal_dict['partial_close_pct']   = 0.0     # cumulative % closed
         result = await db.signals.insert_one(signal_dict)
         signal.id = str(result.inserted_id)
 
@@ -1257,6 +1259,301 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
 
 # ============ TELEGRAM BOT ============
 telegram_bot = None
+
+# ============================================================
+# PYRAMID PROFIT LOCKING — calculate_breakeven_sl()
+# ============================================================
+
+def calculate_breakeven_sl(
+    entry_price: float,
+    current_price: float,
+    signal_direction: str,
+    atr: float,
+    pair: str = "",
+    strategy: str = "TREND",
+) -> dict:
+    """
+    OPTIMAL PYRAMID PROFIT LOCKING STRATEGY.
+
+    Converts raw price movement to pips using the pair's pip_value from
+    PAIR_PARAMETERS (falls back to 0.0001 for unknown pairs).
+
+    Stages:
+    1. Entry to +30 pips  : Static SL — let trade establish
+    2. +30 to +50 pips    : Move SL to entry (break-even)
+    3. +50 to +100 pips   : Close 15%, SL to entry + 5 pips
+    4. +100 to +150 pips  : Close 35%, SL to entry + 20 pips
+    5. +150+ pips         : Close 50%, SL to entry + 50 pips
+    """
+    atr_mult = 1.5 if strategy == "TREND" else 1.0
+
+    # Resolve pip_value for this pair (price units per 1 pip)
+    params    = PAIR_PARAMETERS.get(pair.upper(), DEFAULT_PAIR_PARAMS)
+    pip_value = float(params.get("pip_value", 0.0001))
+
+    # Calculate profit in pips
+    if signal_direction.upper() == "BUY":
+        profit_pips = (current_price - entry_price) / pip_value
+        static_sl   = entry_price - (atr * atr_mult)
+    else:  # SELL
+        profit_pips = (entry_price - current_price) / pip_value
+        static_sl   = entry_price + (atr * atr_mult)
+
+    # Stage 1: Entry to +30 pips — use static SL
+    if profit_pips < 30:
+        return {
+            "breakeven_sl": static_sl,
+            "action":       "HOLD",
+            "close_pct":    0,
+            "reason":       f"Early stage: +{profit_pips:.0f} pips (need +30 for BE)",
+            "stage":        1,
+        }
+
+    # Stage 2: +30 to +50 pips — move SL to entry (break-even)
+    if profit_pips < 50:
+        return {
+            "breakeven_sl": entry_price,
+            "action":       "MOVE_SL",
+            "close_pct":    0,
+            "reason":       f"Break-even protection: +{profit_pips:.0f} pips, SL moved to entry",
+            "stage":        2,
+        }
+
+    # Stage 3: +50 to +100 pips — close 15%, SL to entry + 5 pips
+    if profit_pips < 100:
+        pip_offset = 5 * pip_value  # 5 pips in price units
+        if signal_direction.upper() == "BUY":
+            breakeven_sl = entry_price + pip_offset
+        else:
+            breakeven_sl = entry_price - pip_offset
+        return {
+            "breakeven_sl": breakeven_sl,
+            "action":       "CLOSE_PARTIAL",
+            "close_pct":    0.15,
+            "reason":       f"Micro-lock: +{profit_pips:.0f} pips, close 15%, SL to entry+5",
+            "stage":        3,
+        }
+
+    # Stage 4: +100 to +150 pips — close 35%, SL to entry + 20 pips
+    if profit_pips < 150:
+        pip_offset = 20 * pip_value  # 20 pips in price units
+        if signal_direction.upper() == "BUY":
+            breakeven_sl = entry_price + pip_offset
+        else:
+            breakeven_sl = entry_price - pip_offset
+        return {
+            "breakeven_sl": breakeven_sl,
+            "action":       "CLOSE_PARTIAL",
+            "close_pct":    0.35,
+            "reason":       f"Scale out: +{profit_pips:.0f} pips, close 35%, SL to entry+20",
+            "stage":        4,
+        }
+
+    # Stage 5: +150+ pips — close 50%, SL to entry + 50 pips
+    pip_offset = 50 * pip_value  # 50 pips in price units
+    if signal_direction.upper() == "BUY":
+        breakeven_sl = entry_price + pip_offset
+    else:
+        breakeven_sl = entry_price - pip_offset
+    return {
+        "breakeven_sl": breakeven_sl,
+        "action":       "CLOSE_PARTIAL",
+        "close_pct":    0.50,
+        "reason":       f"Strong momentum: +{profit_pips:.0f} pips, close 50%, SL to entry+50",
+        "stage":        5,
+    }
+
+
+# ============================================================
+# PYRAMID PROFIT LOCKING MONITOR — monitor_breakeven_protection()
+# ============================================================
+
+# Stage-specific Telegram message templates
+_STAGE_MESSAGES = {
+    2: (
+        "🔔 BREAK-EVEN — {pair} {signal_type}\n"
+        "\n"
+        "✅ +{profit_pips:.0f} pips in profit\n"
+        "📌 Move SL → {new_sl} (break-even)\n"
+        "\n"
+        "Remaining targets:\n"
+        "TP2: {tp2}\n"
+        "TP3: {tp3}\n"
+        "\n"
+        "🛡 Trade is now risk-free\n"
+        "⏰ {ts}\n"
+        "Grandcom Swing EA\n"
+    ),
+    3: (
+        "💰 PARTIAL CLOSE — {pair} {signal_type} [Stage 3]\n"
+        "\n"
+        "✅ +{profit_pips:.0f} pips in profit\n"
+        "📤 Close 15% of position now\n"
+        "📌 Move SL → {new_sl} (entry + 5 pips)\n"
+        "\n"
+        "Remaining: 85% open\n"
+        "TP2: {tp2} | TP3: {tp3}\n"
+        "\n"
+        "🔒 Micro-lock: profit secured, upside preserved\n"
+        "⏰ {ts}\n"
+        "Grandcom Swing EA\n"
+    ),
+    4: (
+        "💰 SCALE OUT — {pair} {signal_type} [Stage 4]\n"
+        "\n"
+        "✅ +{profit_pips:.0f} pips in profit\n"
+        "📤 Close 35% of position now\n"
+        "📌 Move SL → {new_sl} (entry + 20 pips)\n"
+        "\n"
+        "Remaining: 50% open\n"
+        "TP3: {tp3}\n"
+        "\n"
+        "📈 Momentum locked — letting winners run\n"
+        "⏰ {ts}\n"
+        "Grandcom Swing EA\n"
+    ),
+    5: (
+        "🏆 STRONG MOMENTUM — {pair} {signal_type} [Stage 5]\n"
+        "\n"
+        "✅ +{profit_pips:.0f} pips in profit\n"
+        "📤 Close 50% of position now\n"
+        "📌 Move SL → {new_sl} (entry + 50 pips)\n"
+        "\n"
+        "Remaining: 50% open — let it run to TP3\n"
+        "TP3: {tp3}\n"
+        "\n"
+        "🚀 Institutional pyramid complete\n"
+        "⏰ {ts}\n"
+        "Grandcom Swing EA\n"
+    ),
+}
+
+
+async def monitor_breakeven_protection():
+    """
+    Pyramid Profit Locking monitor — runs every 5 minutes.
+
+    For every ACTIVE signal, evaluates the current profit in pips against
+    the 5-stage pyramid and:
+      - Advances the stage when a new threshold is crossed
+      - Updates sl_price and partial_close_pct in the DB
+      - Sends a stage-specific Telegram alert
+
+    DB fields managed:
+      breakeven_stage      : int  (1–5, current stage)
+      breakeven_triggered  : bool (True once stage ≥ 2)
+      sl_price             : float (updated SL)
+      partial_close_pct    : float (cumulative % closed so far)
+      breakeven_at         : datetime (first time stage ≥ 2)
+      breakeven_price      : float (price when stage ≥ 2 first triggered)
+    """
+    try:
+        # Fetch all ACTIVE signals that haven't yet reached Stage 5
+        active = await db.signals.find(
+            {"status": "ACTIVE", "breakeven_stage": {"$not": {"$gte": 5}}}
+        ).to_list(length=100)
+
+        if not active:
+            return
+
+        for sig in active:
+            pair         = sig.get("pair", "")
+            signal_type  = sig.get("type", "BUY")
+            entry_price  = sig.get("entry_price", 0.0)
+            tp_levels    = sig.get("tp_levels", [])
+            current_stage = int(sig.get("breakeven_stage", 1))
+
+            if not pair or not entry_price:
+                continue
+
+            # Fetch live price
+            df = await get_price_data(pair, interval="1h", outputsize=2)
+            if df is None or len(df) == 0:
+                continue
+
+            current_price = float(df.iloc[-1]["close"])
+
+            # Retrieve ATR from indicators (best-effort; fall back to 0)
+            try:
+                indicators = calculate_technical_indicators(df)
+                atr = float(indicators.get("atr", 0.0))
+            except Exception:
+                atr = 0.0
+
+            result = calculate_breakeven_sl(
+                entry_price      = entry_price,
+                current_price    = current_price,
+                signal_direction = signal_type,
+                atr              = atr,
+                pair             = pair,
+            )
+
+            new_stage  = result["stage"]
+            new_sl     = result["breakeven_sl"]
+            action     = result["action"]
+            close_pct  = result["close_pct"]
+
+            # Only act when the stage has advanced
+            if new_stage <= current_stage:
+                continue
+
+            logger.info(
+                f"📊 {pair} {signal_type} | Stage {current_stage}→{new_stage} | "
+                f"action={action} close={close_pct*100:.0f}% new_sl={new_sl:.5f}"
+            )
+
+            # Build DB update
+            now = datetime.utcnow()
+            update_fields: dict = {
+                "breakeven_stage": new_stage,
+                "sl_price":        new_sl,
+                "last_stage_at":   now,
+            }
+            if new_stage >= 2 and not sig.get("breakeven_triggered"):
+                update_fields["breakeven_triggered"] = True
+                update_fields["breakeven_at"]        = now
+                update_fields["breakeven_price"]     = current_price
+            if close_pct > 0:
+                update_fields["partial_close_pct"] = close_pct
+
+            await db.signals.update_one(
+                {"_id": sig["_id"]},
+                {"$set": update_fields}
+            )
+
+            # Send stage-specific Telegram alert
+            if TELEGRAM_BOT_TOKEN and new_stage in _STAGE_MESSAGES:
+                try:
+                    bot     = Bot(token=TELEGRAM_BOT_TOKEN)
+                    channel = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+                    tp2     = tp_levels[1] if len(tp_levels) > 1 else "N/A"
+                    tp3     = tp_levels[2] if len(tp_levels) > 2 else "N/A"
+
+                    # Compute profit_pips for the message
+                    params    = PAIR_PARAMETERS.get(pair.upper(), DEFAULT_PAIR_PARAMS)
+                    pip_value = float(params.get("pip_value", 0.0001))
+                    if signal_type.upper() == "BUY":
+                        profit_pips = (current_price - entry_price) / pip_value
+                    else:
+                        profit_pips = (entry_price - current_price) / pip_value
+
+                    msg = _STAGE_MESSAGES[new_stage].format(
+                        pair        = pair,
+                        signal_type = signal_type,
+                        profit_pips = profit_pips,
+                        new_sl      = round(new_sl, params.get("decimal_places", 5)),
+                        tp2         = tp2,
+                        tp3         = tp3,
+                        ts          = now.strftime("%Y-%m-%d %H:%M UTC"),
+                    )
+                    await bot.send_message(chat_id=channel, text=msg)
+                    logger.info(f"✅ Stage {new_stage} alert sent for {pair} {signal_type}")
+                except Exception as tg_err:
+                    logger.error(f"Telegram stage-{new_stage} send error for {pair}: {tg_err}")
+
+    except Exception as e:
+        logger.error(f"monitor_breakeven_protection error: {e}")
+
 
 # ============ BREAKEVEN MONITOR ============
 async def check_breakeven_forex():
@@ -1549,19 +1846,24 @@ async def get_breakeven_signals_forex(current_user: dict = Depends(get_current_u
     """
     MT5 EA polls this to get signals where TP1 was hit.
     EA uses this to move SL to entry on the open trade.
+    Also exposes pyramid stage fields so the EA can execute partial closes.
     """
     try:
         signals = await db.signals.find(
             {"status": "ACTIVE", "breakeven_triggered": True},
             {"pair":1,"type":1,"entry_price":1,"tp_levels":1,
-             "sl_price":1,"breakeven_price":1,"breakeven_at":1}
+             "sl_price":1,"breakeven_price":1,"breakeven_at":1,
+             "breakeven_stage":1,"partial_close_pct":1,"last_stage_at":1}
         ).sort("breakeven_at", -1).limit(50).to_list(50)
         result = [{"id": str(s["_id"]), "pair": s.get("pair"),
                    "type": s.get("type"), "entry_price": s.get("entry_price"),
                    "tp_levels": s.get("tp_levels",[]),
                    "sl_price": s.get("sl_price"),
                    "breakeven_price": s.get("breakeven_price"),
-                   "breakeven_at": s.get("breakeven_at","").isoformat() if s.get("breakeven_at") else None}
+                   "breakeven_at": s.get("breakeven_at","").isoformat() if s.get("breakeven_at") else None,
+                   "breakeven_stage": s.get("breakeven_stage", 1),
+                   "partial_close_pct": s.get("partial_close_pct", 0.0),
+                   "last_stage_at": s.get("last_stage_at","").isoformat() if s.get("last_stage_at") else None}
                   for s in signals]
         return {"success": True, "breakeven_signals": result, "count": len(result)}
     except Exception as e:
@@ -2638,13 +2940,21 @@ async def startup_event():
     )
     asyncio.create_task(auto_generate_signals())
 
-    # Breakeven monitor — runs every 5 minutes
+    # Legacy breakeven monitor (TP1 → move SL to entry) — runs every 5 minutes
     async def _breakeven_loop():
         while True:
             await asyncio.sleep(300)   # 5 minutes
             await check_breakeven_forex()
     asyncio.create_task(_breakeven_loop())
-    logger.info("✅ Breakeven monitor started — checks every 5 min")
+    logger.info("✅ Legacy breakeven monitor started — checks every 5 min")
+
+    # Pyramid Profit Locking monitor — runs every 5 minutes
+    async def _pyramid_loop():
+        while True:
+            await asyncio.sleep(300)   # 5 minutes
+            await monitor_breakeven_protection()
+    asyncio.create_task(_pyramid_loop())
+    logger.info("✅ Pyramid Profit Locking monitor started — checks every 5 min")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
