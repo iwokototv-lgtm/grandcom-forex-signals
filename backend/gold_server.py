@@ -51,28 +51,30 @@ GOLD_PAIRS = {
         "twelve_data_symbol": "XAU/USD",
         "pip_value": 0.10,
         "decimal_places": 2,
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
-        "min_rr": 1.8,
-        "min_confidence": 60,
+        "atr_multiplier_sl": 0.4,    # ✅ $8.59 — tight SL
+        "atr_multiplier_tp1": 0.5,   # ✅ $10.74 — safe distance, passes broker freeze level
+        "atr_multiplier_tp2": 1.0,   # ✅ $21.48
+        "atr_multiplier_tp3": 1.5,   # ✅ $32.22
+        "min_rr": 1.25,              # ✅ Achievable R:R
+        "min_confidence": 70,         # ✅ Filter weak signals
+        "signal_throttle_hours": 6,   # ✅ 6-hour throttle per pair
     },
     "XAUEUR": {
         "twelve_data_symbol": "XAU/EUR",
         "pip_value": 0.10,
         "decimal_places": 2,
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 0.05,  # ~0.5 pips — scalping/tight swing
-        "atr_multiplier_tp2": 0.10,  # ~1.0 pips
-        "atr_multiplier_tp3": 0.15,  # ~1.5 pips
-        "min_rr": 1.8,
-        "min_confidence": 60,
+        "atr_multiplier_sl": 0.4,    # ✅ $8.59 — tight SL
+        "atr_multiplier_tp1": 0.5,   # ✅ $10.74 — safe distance, passes broker freeze level
+        "atr_multiplier_tp2": 1.0,   # ✅ $21.48
+        "atr_multiplier_tp3": 1.5,   # ✅ $32.22
+        "min_rr": 1.25,              # ✅ Achievable R:R
+        "min_confidence": 70,         # ✅ Filter weak signals
+        "signal_throttle_hours": 6,   # ✅ 6-hour throttle per pair
     },
 }
 
-SIGNAL_INTERVAL_MINUTES = 2
-MIN_CONFIDENCE = 60
+SIGNAL_INTERVAL_MINUTES = 240  # ✅ Scan every 4 hours (was 2 minutes — 720 cycles/day)
+MIN_CONFIDENCE = 70
 
 # ============ DB ============
 client = AsyncIOMotorClient(MONGO_URL)
@@ -912,11 +914,84 @@ async def send_signal_to_telegram(
         logger.error(f"❌ Error sending gold signal to Telegram: {e}")
 
 
+# ============ THROTTLE & DRAWDOWN GUARDS ============
+async def check_signal_throttle(pair: str, throttle_hours: int = 6) -> bool:
+    """
+    Check if we've already sent a signal for this pair in the last N hours.
+    Returns True if we should send a signal, False if throttled.
+    """
+    try:
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=throttle_hours)
+        recent_signal = await db.gold_signals.find_one(
+            {
+                "pair": pair,
+                "created_at": {"$gte": cutoff_time},
+                "status": "ACTIVE"
+            }
+        )
+
+        if recent_signal:
+            logger.info(
+                f"🛑 {pair} throttled — signal sent within last {throttle_hours}h, skipping"
+            )
+            return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Throttle check error for {pair}: {e}")
+        return True  # Allow signal on error
+
+
+async def check_drawdown_stop(pair: str, max_consecutive_losses: int = 2) -> bool:
+    """
+    Check if we've hit the drawdown stop (2 consecutive losses).
+    If so, pause trading for 12 hours.
+    Returns True if trading is allowed, False if paused.
+    """
+    try:
+        # Get last 2 closed signals
+        recent_closed = await db.gold_signals.find(
+            {"pair": pair, "status": "CLOSED"}
+        ).sort("closed_at", -1).limit(2).to_list(2)
+
+        if len(recent_closed) < 2:
+            return True  # Not enough history, allow trading
+
+        # Check if both are losses
+        losses = sum(1 for sig in recent_closed if sig.get("pnl", 0) < 0 or sig.get("result") == "LOSS")
+
+        if losses >= max_consecutive_losses:
+            # Check if 12 hours have passed since last loss
+            last_loss_time = recent_closed[0].get("closed_at")
+            if last_loss_time:
+                hours_since = (datetime.now(timezone.utc) - last_loss_time).total_seconds() / 3600
+                if hours_since < 12:
+                    logger.info(
+                        f"🛑 {pair} drawdown stop active — {losses} consecutive losses, "
+                        f"pausing for {12 - hours_since:.1f}h more"
+                    )
+                    return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Drawdown check error for {pair}: {e}")
+        return True  # Allow trading on error
+
+
 # ============ SIGNAL GENERATION ============
 async def generate_gold_signal(pair: str):
     try:
         params = GOLD_PAIRS[pair]
         logger.info(f"📊 Generating gold signal for {pair}")
+
+        # ── THROTTLE CHECK ────────────────────────────────────────────────────
+        throttle_hours = params.get("signal_throttle_hours", 6)
+        if not await check_signal_throttle(pair, throttle_hours):
+            return  # Skip this cycle
+
+        # ── DRAWDOWN STOP CHECK ───────────────────────────────────────────────
+        if not await check_drawdown_stop(pair, max_consecutive_losses=2):
+            return  # Skip this cycle
 
         # Fetch H1 data for primary indicator calculation
         df = await get_price_data(pair, interval="1h", outputsize=100)
