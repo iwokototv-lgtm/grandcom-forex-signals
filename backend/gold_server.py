@@ -524,6 +524,296 @@ def calculate_weighted_confidence(indicators: dict, alignment: dict) -> dict:
         }
 
 
+# ============ REVERSAL DETECTION ============
+def detect_v_recovery(df: pd.DataFrame, atr: float) -> dict:
+    """
+    Detect V-Recovery pattern (sharp drop + bounce).
+
+    Returns:
+        pattern_found : bool
+        strength      : float (0-100)
+        entry_price   : float | None
+        reason        : str
+    """
+    try:
+        if len(df) < 20:
+            return {"pattern_found": False, "strength": 0, "entry_price": None, "reason": "Insufficient data"}
+
+        recent = df.tail(10)
+
+        # Sharp drop over last 2-3 candles (pips = price × 100 for gold approximation)
+        drop_pips = (recent.iloc[-3]["close"] - recent.iloc[-1]["close"]) * 100
+
+        # Bounce: last candle closes higher than the one before it
+        is_bouncing = recent.iloc[-1]["close"] > recent.iloc[-2]["close"]
+
+        # RSI oversold
+        rsi = ta.momentum.RSIIndicator(df["close"], window=14).rsi().iloc[-1]
+        is_oversold = rsi < 30
+
+        # ADX trending (not choppy)
+        adx = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx().iloc[-1]
+        is_trending = adx > 25
+
+        # Volume spike on the drop candle
+        vol_avg = df["volume"].tail(20).mean() if "volume" in df.columns else 0
+        vol_spike = (
+            df["volume"].iloc[-3] > vol_avg * 1.5
+            if "volume" in df.columns and vol_avg > 0
+            else False
+        )
+
+        if drop_pips > 50 and is_bouncing and is_oversold and is_trending and vol_spike:
+            strength = min(100, (drop_pips / 100) * 20 + (100 - rsi) * 0.5)
+            entry_price = float(recent.iloc[-1]["close"])
+            return {
+                "pattern_found": True,
+                "strength": round(strength, 1),
+                "entry_price": entry_price,
+                "reason": f"V-Recovery: {drop_pips:.0f} pip drop, RSI={rsi:.0f}, ADX={adx:.0f}, Vol spike",
+            }
+
+        return {"pattern_found": False, "strength": 0, "entry_price": None, "reason": "No V-Recovery"}
+    except Exception as e:
+        logger.error(f"V-Recovery detection error: {e}")
+        return {"pattern_found": False, "strength": 0, "entry_price": None, "reason": f"Error: {e}"}
+
+
+def detect_double_bottom(df: pd.DataFrame) -> dict:
+    """
+    Detect Double Bottom reversal pattern.
+
+    Returns:
+        pattern_found  : bool
+        strength       : float (0-100)
+        support_level  : float | None
+        entry_price    : float | None
+        reason         : str
+    """
+    try:
+        if len(df) < 30:
+            return {
+                "pattern_found": False, "strength": 0,
+                "support_level": None, "entry_price": None,
+                "reason": "Insufficient data",
+            }
+
+        recent = df.tail(30).copy().reset_index(drop=True)
+
+        # Find local lows (rolling min with center=True marks true local minima)
+        lows = recent["low"].rolling(window=3, center=True).min()
+        low_indices = lows[lows == recent["low"]].index.tolist()
+
+        if len(low_indices) < 2:
+            return {
+                "pattern_found": False, "strength": 0,
+                "support_level": None, "entry_price": None,
+                "reason": "Not enough local lows",
+            }
+
+        low1_idx = low_indices[-2]
+        low2_idx = low_indices[-1]
+        low1_price = float(recent.loc[low1_idx, "low"])
+        low2_price = float(recent.loc[low2_idx, "low"])
+
+        # Both lows must be within 5 pips of each other
+        low_diff_pips = abs(low1_price - low2_price) * 100
+        if low_diff_pips > 5:
+            return {
+                "pattern_found": False, "strength": 0,
+                "support_level": None, "entry_price": None,
+                "reason": f"Lows too far apart ({low_diff_pips:.1f} pips)",
+            }
+
+        # Higher high must exist between the two lows
+        between = recent.loc[low1_idx:low2_idx, "high"]
+        if len(between) < 2:
+            return {
+                "pattern_found": False, "strength": 0,
+                "support_level": None, "entry_price": None,
+                "reason": "No candles between lows",
+            }
+
+        high_between = float(between.max())
+        if high_between <= max(low1_price, low2_price):
+            return {
+                "pattern_found": False, "strength": 0,
+                "support_level": None, "entry_price": None,
+                "reason": "No higher high between lows",
+            }
+
+        # RSI bullish divergence: lower price low but higher RSI low
+        rsi_series = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
+        # Map recent-df indices back to original df tail
+        orig_offset = len(df) - 30
+        rsi1 = float(rsi_series.iloc[orig_offset + low1_idx])
+        rsi2 = float(rsi_series.iloc[orig_offset + low2_idx])
+        has_divergence = (low2_price <= low1_price) and (rsi2 > rsi1)
+
+        # Volume increase on second bounce
+        vol_increase = False
+        if "volume" in recent.columns:
+            vol1 = float(recent.loc[low1_idx, "volume"])
+            vol2 = float(recent.loc[low2_idx, "volume"])
+            vol_increase = vol2 > vol1 * 1.2
+
+        support_level = min(low1_price, low2_price)
+        entry_price = round(support_level + 0.10, 2)  # slightly above support
+
+        if has_divergence and vol_increase:
+            strength = min(100, (5 - low_diff_pips) * 10 + (rsi2 - rsi1) * 2)
+            return {
+                "pattern_found": True,
+                "strength": round(strength, 1),
+                "support_level": support_level,
+                "entry_price": entry_price,
+                "reason": (
+                    f"Double Bottom: Support={support_level:.2f}, "
+                    f"RSI divergence ({rsi1:.0f}→{rsi2:.0f}), Vol increase"
+                ),
+            }
+
+        return {
+            "pattern_found": False, "strength": 0,
+            "support_level": None, "entry_price": None,
+            "reason": "Double Bottom conditions not met (divergence or volume missing)",
+        }
+    except Exception as e:
+        logger.error(f"Double Bottom detection error: {e}")
+        return {
+            "pattern_found": False, "strength": 0,
+            "support_level": None, "entry_price": None,
+            "reason": f"Error: {e}",
+        }
+
+
+def detect_rsi_divergence(df: pd.DataFrame) -> dict:
+    """
+    Detect RSI Divergence (bullish or bearish).
+
+    Bullish : Lower low in price, higher low in RSI  → weakening downtrend
+    Bearish : Higher high in price, lower high in RSI → weakening uptrend
+
+    Returns:
+        divergence_type : "BULLISH" | "BEARISH" | "NONE"
+        strength        : float (0-100)
+        reason          : str
+    """
+    try:
+        if len(df) < 30:
+            return {"divergence_type": "NONE", "strength": 0, "reason": "Insufficient data"}
+
+        recent = df.tail(30).copy().reset_index(drop=True)
+        rsi = ta.momentum.RSIIndicator(recent["close"], window=14).rsi()
+
+        # Local lows in price
+        price_lows_series = recent["low"].rolling(window=5, center=True).min()
+        price_low_indices = price_lows_series[price_lows_series == recent["low"]].index.tolist()
+
+        # Local lows in RSI
+        rsi_lows_series = rsi.rolling(window=5, center=True).min()
+        rsi_low_indices = rsi_lows_series[rsi_lows_series == rsi].index.tolist()
+
+        if len(price_low_indices) < 2 or len(rsi_low_indices) < 2:
+            return {"divergence_type": "NONE", "strength": 0, "reason": "Not enough swing points"}
+
+        # Last two price lows
+        price_low1 = float(recent.loc[price_low_indices[-2], "low"])
+        price_low2 = float(recent.loc[price_low_indices[-1], "low"])
+
+        # Corresponding RSI values at those price-low indices
+        rsi_low1 = float(rsi.iloc[price_low_indices[-2]])
+        rsi_low2 = float(rsi.iloc[price_low_indices[-1]])
+
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if price_low2 < price_low1 and rsi_low2 > rsi_low1:
+            strength = min(100, (price_low1 - price_low2) * 1000 + (rsi_low2 - rsi_low1) * 2)
+            return {
+                "divergence_type": "BULLISH",
+                "strength": round(strength, 1),
+                "reason": (
+                    f"Bullish Divergence: Price lower ({price_low2:.5f} < {price_low1:.5f}), "
+                    f"RSI higher ({rsi_low2:.0f} > {rsi_low1:.0f})"
+                ),
+            }
+
+        # Local highs in price for bearish divergence check
+        price_highs_series = recent["high"].rolling(window=5, center=True).max()
+        price_high_indices = price_highs_series[price_highs_series == recent["high"]].index.tolist()
+
+        # Local highs in RSI
+        rsi_highs_series = rsi.rolling(window=5, center=True).max()
+        rsi_high_indices = rsi_highs_series[rsi_highs_series == rsi].index.tolist()
+
+        if len(price_high_indices) >= 2 and len(rsi_high_indices) >= 2:
+            price_high1 = float(recent.loc[price_high_indices[-2], "high"])
+            price_high2 = float(recent.loc[price_high_indices[-1], "high"])
+            rsi_high1 = float(rsi.iloc[price_high_indices[-2]])
+            rsi_high2 = float(rsi.iloc[price_high_indices[-1]])
+
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            if price_high2 > price_high1 and rsi_high2 < rsi_high1:
+                strength = min(100, (price_high2 - price_high1) * 1000 + (rsi_high1 - rsi_high2) * 2)
+                return {
+                    "divergence_type": "BEARISH",
+                    "strength": round(strength, 1),
+                    "reason": (
+                        f"Bearish Divergence: Price higher ({price_high2:.5f} > {price_high1:.5f}), "
+                        f"RSI lower ({rsi_high2:.0f} < {rsi_high1:.0f})"
+                    ),
+                }
+
+        return {"divergence_type": "NONE", "strength": 0, "reason": "No RSI divergence detected"}
+    except Exception as e:
+        logger.error(f"RSI divergence detection error: {e}")
+        return {"divergence_type": "NONE", "strength": 0, "reason": f"Error: {e}"}
+
+
+def apply_reversal_risk_management(
+    signal_direction: str,
+    entry_price: float,
+    atr: float,
+    pattern_strength: float,
+) -> dict:
+    """
+    Reversal trades use tighter SL and scaled position sizing.
+
+    SL  : 1.0 × ATR  (vs 1.5 for trend trades)
+    TP1 : 0.8 × ATR
+    TP2 : 1.5 × ATR
+    TP3 : 2.2 × ATR
+    Size: 0.5% (strong >80), 0.4% (medium 70-80), 0.3% (weak 60-70)
+    """
+    if signal_direction == "BUY":
+        sl_price = entry_price - (atr * 1.0)
+        tp_levels = [
+            entry_price + (atr * 0.8),
+            entry_price + (atr * 1.5),
+            entry_price + (atr * 2.2),
+        ]
+    else:
+        sl_price = entry_price + (atr * 1.0)
+        tp_levels = [
+            entry_price - (atr * 0.8),
+            entry_price - (atr * 1.5),
+            entry_price - (atr * 2.2),
+        ]
+
+    if pattern_strength > 80:
+        position_size_pct = 0.5
+    elif pattern_strength > 70:
+        position_size_pct = 0.4
+    else:
+        position_size_pct = 0.3
+
+    return {
+        "sl_price": sl_price,
+        "tp_levels": tp_levels,
+        "position_size_pct": position_size_pct,
+        "reason": f"Reversal risk mgmt: SL={sl_price:.5f}, size={position_size_pct}%",
+    }
+
+
 # ============ CANDLESTICK PATTERNS ============
 def detect_candlestick_patterns(df: pd.DataFrame) -> dict:
     """
@@ -862,6 +1152,7 @@ async def send_signal_to_telegram(
     h4_trend="UNKNOWN",
     dxy_status="NEUTRAL",
     news_status="Clear",
+    strategy="TREND",
 ):
     try:
         if not TELEGRAM_BOT_TOKEN:
@@ -872,42 +1163,73 @@ async def send_signal_to_telegram(
         signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
         action = signal_type.capitalize()
 
-        # HIGH CONVICTION label
-        conviction_tag = " [HIGH CONVICTION 🔥]" if conviction_level == "HIGH" else ""
-
-        # Entry range for TSCopier smart entry
-        entry_lo = round(entry_price - 0.50, 2)
-        entry_hi = round(entry_price + 0.50, 2)
-
-        copier_message = (
-            f"{signal_emoji} #{pair} [SWING]{conviction_tag}\n"
-            f"\n"
-            f"{action} {entry_lo} - {entry_hi}\n"
-            f"\n"
-            f"TP1: {tp_levels[0]}\n"
-            f"TP2: {tp_levels[1]}\n"
-            f"TP3: {tp_levels[2]}\n"
-            f"\n"
-            f"SL: {sl_price}\n"
-        )
-
         safe_analysis = sanitize_html(analysis)
-        info_message = (
-            f"<b>📊 R:R:</b> 1:{risk_reward}  "
-            f"<b>⚡ AI Confidence:</b> {confidence}%\n"
-            f"<b>🎯 Technical Score:</b> {technical_score:.0f}/100  "
-            f"<b>🔗 Alignment:</b> {alignment_score:.0f}% (W%R + StochRSI)\n"
-            f"<b>📈 H4 Trend:</b> {h4_trend}  "
-            f"<b>💵 DXY:</b> {dxy_status}  "
-            f"<b>📰 News:</b> {news_status}\n"
-            f"<b>📝</b> {safe_analysis}\n"
-            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom Gold ML Engine v2</i>"
-        )
+
+        if strategy == "REVERSAL":
+            # ── Reversal-specific Telegram messages ──────────────────────────
+            entry_lo = round(entry_price - 0.50, 2)
+            entry_hi = round(entry_price + 0.50, 2)
+
+            copier_message = (
+                f"🔄 #{pair} [REVERSAL]\n"
+                f"\n"
+                f"{action} {entry_lo} - {entry_hi}\n"
+                f"\n"
+                f"TP1: {tp_levels[0]}\n"
+                f"TP2: {tp_levels[1]}\n"
+                f"TP3: {tp_levels[2]}\n"
+                f"\n"
+                f"SL: {sl_price}\n"
+            )
+
+            info_message = (
+                f"🔄 <b>REVERSAL TRADE</b>\n"
+                f"<b>Pattern:</b> {safe_analysis}\n"
+                f"<b>Entry:</b> {entry_price}\n"
+                f"<b>TP1:</b> {tp_levels[0]}  <b>TP2:</b> {tp_levels[1]}  <b>TP3:</b> {tp_levels[2]}\n"
+                f"<b>SL:</b> {sl_price}\n"
+                f"<b>Confidence:</b> {confidence:.0f}%\n"
+                f"<b>Risk:</b> Tight SL (1.0×ATR) — Fast exit strategy\n"
+                f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+                f"| Grandcom Gold ML Engine v2</i>"
+            )
+        else:
+            # ── Standard trend signal messages ───────────────────────────────
+            # HIGH CONVICTION label
+            conviction_tag = " [HIGH CONVICTION 🔥]" if conviction_level == "HIGH" else ""
+
+            # Entry range for TSCopier smart entry
+            entry_lo = round(entry_price - 0.50, 2)
+            entry_hi = round(entry_price + 0.50, 2)
+
+            copier_message = (
+                f"{signal_emoji} #{pair} [SWING]{conviction_tag}\n"
+                f"\n"
+                f"{action} {entry_lo} - {entry_hi}\n"
+                f"\n"
+                f"TP1: {tp_levels[0]}\n"
+                f"TP2: {tp_levels[1]}\n"
+                f"TP3: {tp_levels[2]}\n"
+                f"\n"
+                f"SL: {sl_price}\n"
+            )
+
+            info_message = (
+                f"<b>📊 R:R:</b> 1:{risk_reward}  "
+                f"<b>⚡ AI Confidence:</b> {confidence}%\n"
+                f"<b>🎯 Technical Score:</b> {technical_score:.0f}/100  "
+                f"<b>🔗 Alignment:</b> {alignment_score:.0f}% (W%R + StochRSI)\n"
+                f"<b>📈 H4 Trend:</b> {h4_trend}  "
+                f"<b>💵 DXY:</b> {dxy_status}  "
+                f"<b>📰 News:</b> {news_status}\n"
+                f"<b>📝</b> {safe_analysis}\n"
+                f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+                f"| Grandcom Gold ML Engine v2</i>"
+            )
 
         await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
         await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
-        logger.info(f"✅ Gold signal sent to {TELEGRAM_GOLD_CHANNEL_ID}: {pair} {signal_type}")
+        logger.info(f"✅ Gold signal sent to {TELEGRAM_GOLD_CHANNEL_ID}: {pair} {signal_type} [{strategy}]")
     except Exception as e:
         logger.error(f"❌ Error sending gold signal to Telegram: {e}")
 
@@ -928,6 +1250,108 @@ async def generate_gold_signal(pair: str):
         if not indicators:
             return
 
+        atr = indicators["atr"]
+
+        # ── REVERSAL DETECTION (runs before AI trend analysis) ───────────────
+        v_recovery = detect_v_recovery(df, atr)
+        double_bottom = detect_double_bottom(df)
+        rsi_div = detect_rsi_divergence(df)
+
+        reversal_candidates = []
+        if v_recovery["pattern_found"]:
+            reversal_candidates.append(
+                ("V-Recovery", v_recovery["strength"], v_recovery["entry_price"], "BUY")
+            )
+        if double_bottom["pattern_found"]:
+            reversal_candidates.append(
+                ("Double Bottom", double_bottom["strength"], double_bottom["entry_price"], "BUY")
+            )
+        if rsi_div["divergence_type"] == "BULLISH":
+            reversal_candidates.append(
+                ("RSI Bullish Div", rsi_div["strength"], None, "BUY")
+            )
+        if rsi_div["divergence_type"] == "BEARISH":
+            reversal_candidates.append(
+                ("RSI Bearish Div", rsi_div["strength"], None, "SELL")
+            )
+
+        if reversal_candidates:
+            strongest = max(reversal_candidates, key=lambda x: x[1])
+            pattern_name, pattern_strength, rev_entry, rev_direction = strongest
+
+            if pattern_strength > 70:
+                logger.info(
+                    f"🔄 REVERSAL DETECTED on {pair}: {pattern_name} "
+                    f"(strength={pattern_strength:.0f}%) — prioritising over trend signal"
+                )
+
+                rev_entry_price = rev_entry if rev_entry is not None else indicators["current_price"]
+                rev_risk = apply_reversal_risk_management(
+                    rev_direction, rev_entry_price, atr, pattern_strength
+                )
+                rev_tp_levels = [round(p, params["decimal_places"]) for p in rev_risk["tp_levels"]]
+                rev_sl_price = round(rev_risk["sl_price"], params["decimal_places"])
+                rev_entry_price = round(rev_entry_price, params["decimal_places"])
+
+                # Confidence: base 60 + scaled by pattern strength
+                rev_confidence = min(100, 60 + (pattern_strength - 70) * 1.5)
+
+                reversal_analysis = (
+                    f"REVERSAL: {pattern_name} (strength={pattern_strength:.0f}%) | "
+                    f"{rsi_div.get('reason', '')} | "
+                    f"{v_recovery.get('reason', '') if v_recovery['pattern_found'] else ''}"
+                ).strip(" |")
+
+                # Store reversal signal in DB
+                rev_doc = {
+                    "pair": pair,
+                    "type": rev_direction,
+                    "entry_price": rev_entry_price,
+                    "current_price": indicators["current_price"],
+                    "tp_levels": rev_tp_levels,
+                    "sl_price": rev_sl_price,
+                    "confidence": round(rev_confidence, 1),
+                    "analysis": reversal_analysis,
+                    "risk_reward": round(
+                        abs(rev_tp_levels[1] - rev_entry_price)
+                        / max(abs(rev_entry_price - rev_sl_price), 1e-9),
+                        2,
+                    ),
+                    "timeframe": "H1",
+                    "status": "ACTIVE",
+                    "strategy": "REVERSAL",
+                    "reversal_pattern": pattern_name,
+                    "reversal_strength": pattern_strength,
+                    "position_size_pct": rev_risk["position_size_pct"],
+                    "created_at": datetime.now(timezone.utc),
+                    "adx": indicators.get("adx"),
+                    "stoch_k": indicators.get("stoch_k"),
+                    "williams_r": indicators.get("williams_r"),
+                    "cci": indicators.get("cci"),
+                }
+                await db.gold_signals.insert_one(rev_doc)
+
+                # Send reversal Telegram alert
+                await send_signal_to_telegram(
+                    pair=pair,
+                    signal_type=rev_direction,
+                    entry_price=rev_entry_price,
+                    tp_levels=rev_tp_levels,
+                    sl_price=rev_sl_price,
+                    confidence=round(rev_confidence, 1),
+                    risk_reward=rev_doc["risk_reward"],
+                    analysis=reversal_analysis,
+                    strategy="REVERSAL",
+                )
+
+                logger.info(
+                    f"✅ {pair} REVERSAL {rev_direction} @ {rev_entry_price} | "
+                    f"TP: {rev_tp_levels} | SL: {rev_sl_price} | "
+                    f"Pattern: {pattern_name} | Strength: {pattern_strength:.0f}%"
+                )
+                return  # Reversal signal sent — skip trend analysis this cycle
+
+        # ── AI TREND ANALYSIS ────────────────────────────────────────────────
         ai_analysis = await generate_ai_analysis(pair, indicators, params)
         if not ai_analysis:
             return
@@ -1009,6 +1433,7 @@ async def generate_gold_signal(pair: str):
             "risk_reward": risk_reward,
             "timeframe": "H1",
             "status": "ACTIVE",
+            "strategy": "TREND",
             "created_at": datetime.now(timezone.utc),
             # New fields
             "conviction_level": conviction_level,
@@ -1040,6 +1465,7 @@ async def generate_gold_signal(pair: str):
             h4_trend=h4_trend,
             dxy_status=dxy_status,
             news_status=news_status,
+            strategy="TREND",
         )
 
         logger.info(
