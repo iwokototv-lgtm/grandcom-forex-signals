@@ -26,22 +26,6 @@ SAFETY SYSTEMS
 ✅ Per-pair throttle + drawdown protection
 ✅ Duplicate guard + breakeven monitor
 ✅ Single TSCopier plain-text message
-
-INSTITUTIONAL UPGRADE (v4)
-───────────────────────────
-✅ Flash Crash Circuit Breaker
-✅ Session-Based Confidence Filter
-✅ Shannon Entropy Filter
-✅ Fair Value Gap Detection
-✅ Hurst Exponent Regime Detection
-✅ Keltner Channels
-✅ OBV Volume-Price Divergence
-✅ Liquidity Sweep Detection
-✅ Order Block Strength Scoring
-✅ Fear & Greed + Gold-Silver Ratio
-✅ Volume-Weighted MACD
-✅ ATR Trailing Stop
-✅ Black Box Logging
 """
 
 from fastapi import FastAPI
@@ -648,7 +632,7 @@ R:R → TP1={round(m_tp1/m_sl,2)} | TP2={round(m_tp2/m_sl,2)} | TP3={round(m_tp3
         ai_data = None
         for i in range(3):
             try:
-                ai_data = json.loads(raw if i == 0 else re.sub(r',\s*([}\]])', r'\1', raw).replace("'",'\"'))
+                ai_data = json.loads(raw if i == 0 else re.sub(r',\s*([}\]])', r'\1', raw).replace("'",'"'))
                 break
             except Exception:
                 if i == 2:
@@ -835,23 +819,23 @@ async def generate_gold_signal(pair: str):
         risk_reward = ai_analysis.get("risk_reward", params["min_rr"])
         analysis    = ai_analysis.get("analysis", "")
 
-        # 14. Confidence gate
+        # 13. Confidence gate
         if confidence < MIN_CONFIDENCE:
             logger.info(f"📊 {pair} confidence {confidence}% < {MIN_CONFIDENCE}% — blocked")
             return
 
-        # 15. Signal validation
+        # 14. Signal validation
         valid, reason = validate_gold_signal(signal_type, entry_price, sl_price, tp_levels, confidence, params)
         if not valid:
             logger.warning(f"🚫 {pair} validation failed: {reason}")
             return
 
-        # 16. Duplicate guard
+        # 15. Duplicate guard
         if await is_duplicate_active(pair, signal_type):
             logger.info(f"⚠️ {pair} {signal_type} already ACTIVE")
             return
 
-        # 17. Save to DB
+        # 16. Save to DB
         await db.gold_signals.insert_one({
             "pair":             pair,
             "type":             signal_type,
@@ -879,10 +863,10 @@ async def generate_gold_signal(pair: str):
             "created_at":       datetime.now(timezone.utc),
         })
 
-        # 18. Throttle record
+        # 17. Throttle record
         last_signal_time[pair] = datetime.utcnow()
 
-        # 19. Send Telegram
+        # 18. Send Telegram
         await send_signal_to_telegram(
             pair=pair, signal_type=signal_type, entry_price=entry_price,
             tp_levels=tp_levels, sl_price=sl_price, confidence=round(confidence,1),
@@ -1077,7 +1061,7 @@ async def get_breakeven_signals():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8001)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8002)))
 
 # ============================================================
 # INSTITUTIONAL UPGRADE BLOCK — v4
@@ -1513,6 +1497,64 @@ def detect_liquidity_sweep(df: pd.DataFrame) -> dict:
 
 
 # ============================================================
+# GATE: ORDER BLOCK STRENGTH SCORING (Feature 24)
+# ============================================================
+def score_order_blocks(df: pd.DataFrame) -> dict:
+    """
+    Identifies institutional order blocks — displacement candles
+    with strong body and minimal wicks that broke market structure.
+    Assigns 0-100 strength score based on body size and volume.
+    Only trade signals that occur near high-strength (>70%) OBs.
+    """
+    try:
+        if len(df) < 10:
+            return {"ob_detected": False, "nearest_ob": None}
+
+        recent  = df.tail(20).reset_index(drop=True)
+        current = float(df.iloc[-1]["close"])
+        obs     = []
+
+        for i in range(1, len(recent) - 1):
+            c      = recent.iloc[i]
+            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+            body   = abs(cl - o)
+            rng    = h - l if h != l else 0.0001
+            vol    = float(c.get("volume", 1.0)) if "volume" in c.index else 1.0
+
+            # Displacement candle: large body (>60% of range), small wicks
+            if body / rng > 0.60:
+                strength = min(100, int(body / rng * 100))
+                obs.append({
+                    "type":     "BULLISH_OB" if cl > o else "BEARISH_OB",
+                    "high":     h,
+                    "low":      l,
+                    "mid":      (h + l) / 2,
+                    "strength": strength,
+                    "distance": abs(current - (h + l) / 2),
+                    "index":    i,
+                })
+
+        if not obs:
+            return {"ob_detected": False, "nearest_ob": None}
+
+        # Filter to high-strength only (>70%)
+        strong_obs = [ob for ob in obs if ob["strength"] >= 70]
+        if not strong_obs:
+            return {"ob_detected": False, "nearest_ob": None, "weak_obs": len(obs)}
+
+        nearest = min(strong_obs, key=lambda x: x["distance"])
+        return {
+            "ob_detected":  True,
+            "nearest_ob":   nearest,
+            "ob_count":     len(strong_obs),
+            "near_ob":      nearest["distance"] < float(df.iloc[-1]["atr"] if "atr" in df.columns else 20),
+        }
+    except Exception as e:
+        logger.warning(f"Order block error: {e}")
+        return {"ob_detected": False, "nearest_ob": None}
+
+
+# ============================================================
 # GATE: FEAR & GREED + GOLD-SILVER RATIO (Features 10i, 25)
 # ============================================================
 async def get_fear_greed_index() -> dict:
@@ -1649,6 +1691,15 @@ async def update_trailing_stops():
 
     except Exception as e:
         logger.error(f"Trailing stop error: {e}")
+
+
+# ============================================================
+# SCHEDULER: Register new jobs
+# ============================================================
+def register_new_jobs(scheduler: AsyncIOScheduler):
+    """Register all new feature jobs on the existing scheduler."""
+    scheduler.add_job(update_trailing_stops, "interval", minutes=5,  id="trailing_stops")
+    logger.info("✅ New jobs registered: trailing_stops")
 
 
 # ============================================================
