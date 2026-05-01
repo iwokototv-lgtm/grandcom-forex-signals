@@ -324,6 +324,12 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         stochrsi_ind      = ta.momentum.StochRSIIndicator(df["close"], window=14, smooth1=3, smooth2=3)
         df["stochrsi_k"]  = stochrsi_ind.stochrsi_k() * 100
         df["stochrsi_d"]  = stochrsi_ind.stochrsi_d() * 100
+        # Stochastic(9,6) — 3rd confirmation vote for G3 team
+        stoch_ind         = ta.momentum.StochasticOscillator(
+                                df["high"], df["low"], df["close"], window=9, smooth_window=6
+                            )
+        df["stoch_k"]     = stoch_ind.stoch()
+        df["stoch_d"]     = stoch_ind.stoch_signal()
 
         # ── GROUP 4: SIZING ───────────────────────────────────────────
         df["atr"]         = ta.volatility.AverageTrueRange(
@@ -378,13 +384,24 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
             g2_verdict = "NEUTRAL"
 
         # ── GROUP 3 VERDICT: TRIGGER TEAM ────────────────────────────
-        # Williams%R: < -80 = oversold BUY | > -20 = overbought SELL
-        # StochRSI K: < 20  = oversold BUY | > 80  = overbought SELL
-        wpr_zone  = "OVERSOLD" if wpr < -80 else "OVERBOUGHT" if wpr > -20 else "NEUTRAL"
-        srsi_zone = "OVERSOLD" if srsi_k < 20 else "OVERBOUGHT" if srsi_k > 80 else "NEUTRAL"
-        if wpr_zone == "OVERSOLD" and srsi_zone == "OVERSOLD":
+        # Williams%R + StochRSI(14) MUST BOTH agree = mathematical confirmation
+        # If they agree    -> confidence BOOSTED (team_agree=True)
+        # If they disagree -> AI stays cautious (trigger_disagree=True)
+        # Stochastic(9,6)  -> 3rd confirmation vote (+10pts when confirms)
+        wpr_zone   = "OVERSOLD"   if wpr    < -80 else ("OVERBOUGHT" if wpr    > -20 else "NEUTRAL")
+        srsi_zone  = "OVERSOLD"   if srsi_k <  20 else ("OVERBOUGHT" if srsi_k >  80 else "NEUTRAL")
+        stoch_zone = "OVERSOLD"   if stoch_k < 20 else ("OVERBOUGHT" if stoch_k > 80 else "NEUTRAL")
+
+        trigger_agree_buy  = (wpr_zone == "OVERSOLD"   and srsi_zone == "OVERSOLD")
+        trigger_agree_sell = (wpr_zone == "OVERBOUGHT" and srsi_zone == "OVERBOUGHT")
+        trigger_disagree   = not trigger_agree_buy and not trigger_agree_sell
+        trigger_agree      = trigger_agree_buy or trigger_agree_sell
+        stoch_confirms     = ((trigger_agree_sell and stoch_zone == "OVERBOUGHT") or
+                              (trigger_agree_buy  and stoch_zone == "OVERSOLD"))
+
+        if trigger_agree_buy:
             g3_verdict = "BUY"
-        elif wpr_zone == "OVERBOUGHT" and srsi_zone == "OVERBOUGHT":
+        elif trigger_agree_sell:
             g3_verdict = "SELL"
         else:
             g3_verdict = "NEUTRAL"
