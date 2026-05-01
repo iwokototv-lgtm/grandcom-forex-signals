@@ -1,0 +1,37 @@
+# IDE and editors
+.idea/
+.vscode/
+
+# Dependencies
+node_modules/
+__pycache__/
+*pyc*
+venv/
+.venv/
+
+# Environment files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+
+# Logs
+*.log
+npm-debug.log*
+
+# System files
+.DS_Store
+
+# Python build
+dist/
+build/
+*.egg-info/
+
+# ML models
+models/*.joblib
+
+# Data
+*.jsonl
