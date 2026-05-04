@@ -70,6 +70,10 @@ MAX_DAILY_LOSSES        = 2
 MAX_DAILY_PIPS          = 40
 PAUSE_HOURS             = 12
 
+BLACKBOX_LOG  = os.getenv("BLACKBOX_LOG",  "blackbox_trades.jsonl")
+DENIAL_LOG    = os.getenv("DENIAL_LOG",    "denial_log.csv")
+TRAILING_LOG  = os.getenv("TRAILING_LOG",  "trailing_stops.jsonl")
+
 last_signal_time: dict = {}
 daily_losses:     dict = {}
 
@@ -991,6 +995,53 @@ async def check_all_gold_outcomes():
                 logger.info(f"📊 {pair} closed: {outcome['status']} | {outcome['pips']:+.1f} pips")
     except Exception as e:
         logger.error(f"Outcome check error: {e}")
+
+# ============ TRAILING STOPS ============
+async def update_trailing_stops():
+    """
+    ATR-based trailing stop (2.5×ATR).
+    Moves SL up (for BUY) or down (for SELL) as price progresses.
+    Keeps winners running while protecting unrealised profit.
+    """
+    try:
+        active = await db.gold_signals.find(
+            {"status": "ACTIVE", "breakeven_triggered": True}
+        ).to_list(length=50)
+
+        for sig in active:
+            pair        = sig.get("pair")
+            signal_type = sig.get("type")
+            entry       = sig.get("entry_price", 0)
+            current_sl  = sig.get("sl_price", 0)
+            atr_at_entry= sig.get("atr", 20.0)
+
+            df = await get_price_data(pair, interval="1h", outputsize=5)
+            if df is None or len(df) == 0:
+                continue
+
+            current_price = float(df.iloc[-1]["close"])
+            trail_dist    = atr_at_entry * 2.5   # 2.5×ATR trailing distance
+
+            if signal_type == "BUY":
+                new_sl = round(current_price - trail_dist, 2)
+                if new_sl > current_sl and new_sl > entry:   # only move up, never below entry
+                    await db.gold_signals.update_one(
+                        {"_id": sig["_id"]},
+                        {"$set": {"sl_price": new_sl, "trailing_sl": True, "trailing_updated_at": datetime.now(timezone.utc)}}
+                    )
+                    logger.info(f"📈 {pair} Trailing SL moved UP: {current_sl} → {new_sl}")
+
+            elif signal_type == "SELL":
+                new_sl = round(current_price + trail_dist, 2)
+                if new_sl < current_sl and new_sl < entry:   # only move down, never above entry
+                    await db.gold_signals.update_one(
+                        {"_id": sig["_id"]},
+                        {"$set": {"sl_price": new_sl, "trailing_sl": True, "trailing_updated_at": datetime.now(timezone.utc)}}
+                    )
+                    logger.info(f"📉 {pair} Trailing SL moved DOWN: {current_sl} → {new_sl}")
+
+    except Exception as e:
+        logger.error(f"Trailing stop error: {e}")
 
 # ============ APP ============
 scheduler = AsyncIOScheduler()
