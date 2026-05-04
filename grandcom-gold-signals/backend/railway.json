@@ -4,6 +4,6 @@
     "builder": "RAILPACK"
   },
   "deploy": {
-    "startCommand": "python main.py"
+    "startCommand": "python gold_server.py"
   }
 }
