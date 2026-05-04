@@ -70,6 +70,10 @@ MAX_DAILY_LOSSES        = 2
 MAX_DAILY_PIPS          = 40
 PAUSE_HOURS             = 12
 
+BLACKBOX_LOG  = os.getenv("BLACKBOX_LOG",  "blackbox_trades.jsonl")
+DENIAL_LOG    = os.getenv("DENIAL_LOG",    "denial_log.csv")
+TRAILING_LOG  = os.getenv("TRAILING_LOG",  "trailing_stops.jsonl")
+
 last_signal_time: dict = {}
 daily_losses:     dict = {}
 
@@ -1123,11 +1127,6 @@ import json as _json_log
 import csv
 import hashlib
 from pathlib import Path
-
-# ── Black box log files ───────────────────────────────────────
-BLACKBOX_LOG  = os.getenv("BLACKBOX_LOG",  "blackbox_trades.jsonl")
-DENIAL_LOG    = os.getenv("DENIAL_LOG",    "denial_log.csv")
-TRAILING_LOG  = os.getenv("TRAILING_LOG",  "trailing_stops.jsonl")
 
 # ── Circuit breaker state ─────────────────────────────────────
 circuit_breaker: dict = {"paused_until": None, "last_price": None, "last_price_time": None}
