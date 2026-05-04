@@ -1052,7 +1052,7 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(run_gold_signals,        "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
+    scheduler.add_job(run_gold_signals,        "interval", hours=4,                         id="run_gold_signals")
     scheduler.add_job(check_breakeven,         "interval", minutes=5,                        id="breakeven_monitor")
     scheduler.add_job(check_all_gold_outcomes, "interval", seconds=60,                       id="outcome_tracker")
     scheduler.add_job(update_trailing_stops,   "interval", minutes=5,                        id="trailing_stops")
