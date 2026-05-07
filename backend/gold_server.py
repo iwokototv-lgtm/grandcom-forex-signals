@@ -31,7 +31,11 @@ logger = logging.getLogger("gold_server")
 MONGO_URL = os.environ.get("MONGO_URL")
 DB_NAME = os.environ.get("DB_NAME", "gold_signals")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_GOLD_CHANNEL_ID = int(os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408"))
+_channel_id_raw = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408")
+try:
+    TELEGRAM_GOLD_CHANNEL_ID: int | str = int(_channel_id_raw)
+except ValueError:
+    TELEGRAM_GOLD_CHANNEL_ID = _channel_id_raw  # keep as string (e.g. "@grandcomgold")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY")
 
