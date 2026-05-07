@@ -1,675 +1,634 @@
 """
 Grandcom Gold Signals Server
-Standalone backend for XAUUSD & XAUEUR signals
-Sends to @grandcomgold Telegram channel
-Designed for Railway deployment (no emergentintegrations dependency)
+Clean rebuild — XAUUSD & XAUEUR only
+Railway deployment ready
 """
-from fastapi import FastAPI
-from contextlib import asynccontextmanager
-import os
-import logging
-import json
-import re
-import asyncio
-import aiohttp
-import ta
-import pandas as pd
-import numpy as np
-from datetime import datetime, timezone
-from telegram import Bot
-from dotenv import load_dotenv
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from motor.motor_asyncio import AsyncIOMotorClient
 
-# Railway-safe LLM import: emergentintegrations on Emergent pod, litellm fallback on Railway
-HAS_EMERGENT_LLM = False
-try:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-    HAS_EMERGENT_LLM = True
-except ImportError:
-    pass
+import asyncio
+import json
+import logging
+import os
+import re
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import aiohttp
+import pandas as pd
+import ta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from motor.motor_asyncio import AsyncIOMotorClient
+from telegram import Bot
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger("gold_server")
 
-# ============ CONFIG ============
-MONGO_URL = os.environ.get("MONGO_URL")
+# ---------------------------------------------------------------------------
+# Config — read once at startup, fail fast if critical vars are missing
+# ---------------------------------------------------------------------------
+MONGO_URL = os.environ.get("MONGO_URL", "")
 DB_NAME = os.environ.get("DB_NAME", "gold_signals")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_GOLD_CHANNEL_ID = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "@grandcomgold")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY", "")
 
-# Gold pair configuration — ATR-based swing strategy
-GOLD_PAIRS = {
+# Telegram channel — accept numeric ID or @username
+_raw_channel = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408")
+try:
+    TELEGRAM_CHANNEL_ID: int | str = int(_raw_channel)
+except ValueError:
+    TELEGRAM_CHANNEL_ID = _raw_channel  # keep as @username string
+
+SIGNAL_INTERVAL_MINUTES = 2
+MIN_CONFIDENCE = 60
+
+# ---------------------------------------------------------------------------
+# Pairs
+# ---------------------------------------------------------------------------
+PAIRS = {
     "XAUUSD": {
-        "twelve_data_symbol": "XAU/USD",
-        "pip_value": 0.10,
-        "decimal_places": 2,
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 2.0,
-        "atr_multiplier_tp2": 3.5,
-        "atr_multiplier_tp3": 5.0,
-        "min_rr": 1.8,
-        "min_confidence": 60,
+        "symbol": "XAU/USD",
+        "decimals": 2,
+        "atr_sl": 1.5,
+        "atr_tp1": 2.0,
+        "atr_tp2": 3.5,
+        "atr_tp3": 5.0,
     },
     "XAUEUR": {
-        "twelve_data_symbol": "XAU/EUR",
-        "pip_value": 0.10,
-        "decimal_places": 2,
-        "atr_multiplier_sl": 1.5,
-        "atr_multiplier_tp1": 2.0,
-        "atr_multiplier_tp2": 3.5,
-        "atr_multiplier_tp3": 5.0,
-        "min_rr": 1.8,
-        "min_confidence": 60,
+        "symbol": "XAU/EUR",
+        "decimals": 2,
+        "atr_sl": 1.5,
+        "atr_tp1": 2.0,
+        "atr_tp2": 3.5,
+        "atr_tp3": 5.0,
     },
 }
 
-SIGNAL_INTERVAL_MINUTES = 240
-MIN_CONFIDENCE = 60
-THROTTLE_HOURS = 6
+# ---------------------------------------------------------------------------
+# MongoDB
+# ---------------------------------------------------------------------------
+_mongo_client: AsyncIOMotorClient | None = None
+_db = None
 
-# ============ DB ============
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
 
-# ============ PRICE DATA ============
-async def get_price_data(pair: str, interval: str = "1h", outputsize: int = 100):
-    symbol = GOLD_PAIRS[pair]["twelve_data_symbol"]
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
+def get_db():
+    return _db
+
+
+# ---------------------------------------------------------------------------
+# Telegram bot singleton
+# ---------------------------------------------------------------------------
+_bot: Bot | None = None
+
+
+def get_bot() -> Bot:
+    global _bot
+    if _bot is None:
+        if not TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+        _bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    return _bot
+
+
+# ---------------------------------------------------------------------------
+# Price data — TwelveData 4H OHLCV
+# ---------------------------------------------------------------------------
+async def fetch_ohlcv(pair: str, outputsize: int = 100) -> pd.DataFrame | None:
+    """Fetch 4H OHLCV from TwelveData. Returns chronological DataFrame or None."""
+    cfg = PAIRS[pair]
+    url = (
+        f"https://api.twelvedata.com/time_series"
+        f"?symbol={cfg['symbol']}&interval=4h&outputsize={outputsize}"
+        f"&apikey={TWELVE_DATA_API_KEY}"
+    )
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
-                if "values" not in data:
-                    logger.error(f"No data for {pair}: {data.get('message', 'Unknown error')}")
-                    return None
-                df = pd.DataFrame(data["values"])
-                for col in ["open", "high", "low", "close"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.sort_index(ascending=False).reset_index(drop=True)
-                return df
-    except Exception as e:
-        logger.error(f"Error fetching {pair}: {e}")
+
+        if "values" not in data:
+            logger.error(f"[{pair}] TwelveData error: {data.get('message', data)}")
+            return None
+
+        df = pd.DataFrame(data["values"])
+        for col in ("open", "high", "low", "close"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.iloc[::-1].reset_index(drop=True)  # oldest → newest
+        logger.info(f"[{pair}] Fetched {len(df)} 4H candles")
+        return df
+
+    except Exception as exc:
+        logger.error(f"[{pair}] fetch_ohlcv failed: {exc}")
         return None
 
-def calculate_indicators(df, params):
+
+# ---------------------------------------------------------------------------
+# Technical indicators
+# ---------------------------------------------------------------------------
+def compute_indicators(df: pd.DataFrame, decimals: int) -> dict | None:
+    """Compute RSI, MACD, MA20/50, ATR on the DataFrame. Returns latest values."""
     try:
-        df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-        macd = ta.trend.MACD(df["close"])
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-        df["ma_20"] = ta.trend.SMAIndicator(df["close"], window=20).sma_indicator()
-        df["ma_50"] = ta.trend.SMAIndicator(df["close"], window=50).sma_indicator()
-        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
-        df["bb_upper"] = bb.bollinger_hband()
-        df["bb_lower"] = bb.bollinger_lband()
-        atr_ind = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14)
-        df["atr"] = atr_ind.average_true_range()
-        latest = df.iloc[-1]
-        dp = params["decimal_places"]
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
 
-        rsi_val = float(latest["rsi"])
-        macd_val = float(latest["macd"])
-        macd_sig = float(latest["macd_signal"])
-        close = float(latest["close"])
-        bb_up = float(latest["bb_upper"])
-        bb_low = float(latest["bb_lower"])
-        bb_range = bb_up - bb_low if bb_up != bb_low else 1.0
-        ma20 = float(latest["ma_20"])
-        ma50 = float(latest["ma_50"])
-        bb_position = (close - bb_low) / bb_range
+        rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
+        macd_obj = ta.trend.MACD(close)
+        ma20 = ta.trend.SMAIndicator(close, window=20).sma_indicator()
+        ma50 = ta.trend.SMAIndicator(close, window=50).sma_indicator()
+        atr = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
 
-        # --- TREND-FOLLOWING DIRECTION ---
-        # Primary rule: price vs MA50 determines direction
-        # Override ONLY at extreme RSI levels (very rare)
-        if close > ma50:
-            trend = "BULLISH"
-            if rsi_val > 75 and bb_position > 0.95:
-                signal_direction = "SELL"
-                logger.info(f"EXTREME OVERBOUGHT override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> SELL")
-            else:
-                signal_direction = "BUY"
-        else:
-            trend = "BEARISH"
-            if rsi_val < 25 and bb_position < 0.05:
-                signal_direction = "BUY"
-                logger.info(f"EXTREME OVERSOLD override: RSI={rsi_val:.1f}, BB={bb_position:.2f} -> BUY")
-            else:
-                signal_direction = "SELL"
-
-        # RSI zone label
-        if rsi_val > 70:
-            rsi_zone = "OVERBOUGHT"
-        elif rsi_val < 30:
-            rsi_zone = "OVERSOLD"
-        else:
-            rsi_zone = "NEUTRAL"
-
-        logger.info(f"Trend: {trend} | Direction: {signal_direction} | RSI={rsi_val:.1f}({rsi_zone}) | BB_pos={bb_position:.2f} | Price={close} vs MA50={ma50:.2f}")
+        last = df.iloc[-1]
+        dp = decimals
 
         return {
-            "current_price": round(close, dp),
-            "rsi": rsi_val,
-            "rsi_zone": rsi_zone,
-            "macd": macd_val,
-            "macd_signal": macd_sig,
-            "ma_20": round(ma20, dp),
-            "ma_50": round(ma50, dp),
-            "bb_upper": round(bb_up, dp),
-            "bb_lower": round(bb_low, dp),
-            "bb_position": round(bb_position, 2),
-            "atr": round(float(latest["atr"]), dp),
-            "trend": trend,
-            "signal_direction": signal_direction,
+            "price":      round(float(last["close"]), dp),
+            "rsi":        round(float(rsi.iloc[-1]), 2),
+            "macd":       round(float(macd_obj.macd().iloc[-1]), 6),
+            "macd_sig":   round(float(macd_obj.macd_signal().iloc[-1]), 6),
+            "ma20":       round(float(ma20.iloc[-1]), dp),
+            "ma50":       round(float(ma50.iloc[-1]), dp),
+            "atr":        round(float(atr.iloc[-1]), dp),
+            "trend":      "BULLISH" if float(last["close"]) > float(ma50.iloc[-1]) else "BEARISH",
         }
-    except Exception as e:
-        logger.error(f"Indicator calc error: {e}")
+
+    except Exception as exc:
+        logger.error(f"compute_indicators failed: {exc}")
         return None
 
-# ============ AI ANALYSIS ============
-async def generate_ai_analysis(symbol: str, indicators: dict, params: dict):
-    try:
-        # Direction is ALREADY decided by trend (calculate_indicators)
-        # AI only provides confidence, entry price, and analysis text
-        forced_direction = indicators["signal_direction"]
 
-        system_message = (
-            "You are an elite institutional gold trader. "
-            "You will be given a trading direction (BUY or SELL) based on trend analysis. "
-            "Your job is to assess confidence (0-100) and provide a brief analysis. "
-            "If the setup looks weak, set confidence below 60 to filter it out."
-        )
+# ---------------------------------------------------------------------------
+# GPT-4o-mini signal analysis
+# ---------------------------------------------------------------------------
+_SYSTEM_PROMPT = (
+    "You are an elite institutional gold trader. "
+    "Analyse the provided market data and return a JSON trading signal. "
+    "Respond ONLY with valid JSON — no markdown, no extra text."
+)
 
-        prompt = f"""
-Analyze {symbol} for a {forced_direction} trade setup.
+_USER_TEMPLATE = """\
+Analyse {pair} (4H timeframe) and provide a trading signal.
 
-=== MARKET DATA ===
-Current Price: {indicators['current_price']}
-Trend: {indicators['trend']} (Price vs MA50)
-RSI: {indicators['rsi']:.2f} ({indicators['rsi_zone']})
-MACD: {indicators['macd']:.6f} | MACD Signal: {indicators['macd_signal']:.6f}
-MA20: {indicators['ma_20']} | MA50: {indicators['ma_50']}
-BB Upper: {indicators['bb_upper']} | BB Lower: {indicators['bb_lower']}
-ATR: {indicators['atr']}
+MARKET DATA
+-----------
+Price : {price}
+RSI   : {rsi}
+MACD  : {macd}  |  Signal: {macd_sig}
+MA20  : {ma20}  |  MA50: {ma50}
+ATR   : {atr}
+Trend : {trend}
 
-=== DIRECTION: {forced_direction} (trend-following) ===
+ATR MULTIPLIERS  (SL: {atr_sl}x | TP1: {atr_tp1}x | TP2: {atr_tp2}x | TP3: {atr_tp3}x)
 
-=== ATR MULTIPLIERS ===
-SL: {params['atr_multiplier_sl']} | TP1: {params['atr_multiplier_tp1']} | TP2: {params['atr_multiplier_tp2']} | TP3: {params['atr_multiplier_tp3']}
-
-=== RULES ===
-- Signal MUST be {forced_direction} (direction is decided by trend)
-- Set confidence 0-100 based on how strong the {forced_direction} setup looks
-- If the setup looks poor, set confidence below 60
-- {"BUY: TP above entry, SL below entry" if forced_direction == "BUY" else "SELL: TP below entry, SL above entry"}
-
-=== OUTPUT FORMAT (JSON ONLY) ===
-{{"signal":"{forced_direction}","confidence":0-100,"entry_price":numeric,"tp_levels":[tp1,tp2,tp3],"sl_price":numeric,"analysis":"<150 words","risk_reward":numeric}}
-RESPOND ONLY WITH VALID JSON. NO OTHER TEXT.
+OUTPUT FORMAT — return exactly this JSON structure:
+{{
+  "signal": "BUY" | "SELL" | "NEUTRAL",
+  "confidence": <integer 0-100>,
+  "entry_price": <number>,
+  "tp_levels": [<tp1>, <tp2>, <tp3>],
+  "sl_price": <number>,
+  "analysis": "<max 120 words>",
+  "risk_reward": <number>
+}}
 """
 
-        ai_response = None
-        for attempt in range(3):
-            try:
-                if HAS_EMERGENT_LLM:
-                    chat = LlmChat(
-                        api_key=OPENAI_API_KEY,
-                        session_id=f"gold_{symbol}_{datetime.now(timezone.utc).timestamp()}_{attempt}",
-                        system_message=system_message
-                    ).with_model("openai", "gpt-4o-mini")
-                    user_msg = UserMessage(text=prompt)
-                    ai_response = await chat.send_message(user_msg)
-                else:
-                    import litellm
-                    response = await litellm.acompletion(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": system_message},
-                            {"role": "user", "content": prompt}
-                        ],
-                        api_key=OPENAI_API_KEY,
-                    )
-                    ai_response = response.choices[0].message.content
-                if ai_response and len(ai_response.strip()) > 10:
-                    break
-            except Exception as e:
-                logger.warning(f"LLM attempt {attempt+1}/3 for {symbol}: {e}")
-                await asyncio.sleep(1)
 
-        if not ai_response or len(ai_response.strip()) < 10:
-            logger.error(f"No AI response for {symbol}")
-            return None
+async def gpt_signal(pair: str, ind: dict, cfg: dict) -> dict | None:
+    """Call GPT-4o-mini and return parsed signal dict, or None on failure."""
+    import litellm  # imported here so startup doesn't fail if key is missing
 
-        # Parse JSON — handle markdown fences and malformed JSON
-        raw = ai_response.strip()
-        fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', raw, re.DOTALL)
-        if fence_match:
-            raw = fence_match.group(1).strip()
-        if not raw.startswith('{'):
-            brace_match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if brace_match:
-                raw = brace_match.group(0)
+    prompt = _USER_TEMPLATE.format(
+        pair=pair,
+        price=ind["price"],
+        rsi=ind["rsi"],
+        macd=ind["macd"],
+        macd_sig=ind["macd_sig"],
+        ma20=ind["ma20"],
+        ma50=ind["ma50"],
+        atr=ind["atr"],
+        trend=ind["trend"],
+        atr_sl=cfg["atr_sl"],
+        atr_tp1=cfg["atr_tp1"],
+        atr_tp2=cfg["atr_tp2"],
+        atr_tp3=cfg["atr_tp3"],
+    )
 
-        ai_data = None
-        for parse_attempt in range(3):
-            try:
-                if parse_attempt == 0:
-                    ai_data = json.loads(raw)
-                elif parse_attempt == 1:
-                    fixed = re.sub(r',\s*}', '}', raw)
-                    fixed = re.sub(r',\s*]', ']', fixed)
-                    fixed = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
-                    fixed = re.sub(r'(\d)\s*\n\s*"', r'\1,\n"', fixed)
-                    fixed = fixed.replace("'", '"')
-                    ai_data = json.loads(fixed)
-                else:
-                    conf_m = re.search(r'"confidence"\s*:\s*([\d.]+)', raw)
-                    entry_m = re.search(r'"entry_price"\s*:\s*([\d.]+)', raw)
-                    analysis_m = re.search(r'"analysis"\s*:\s*"([^"]*)"', raw)
-                    ai_data = {
-                        "signal": forced_direction,
-                        "confidence": float(conf_m.group(1)) if conf_m else 50.0,
-                        "entry_price": float(entry_m.group(1)) if entry_m else indicators['current_price'],
-                        "analysis": analysis_m.group(1) if analysis_m else "AI analysis unavailable",
-                        "tp_levels": [], "sl_price": 0
-                    }
+    raw_response = None
+    for attempt in range(3):
+        try:
+            resp = await litellm.acompletion(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+                api_key=OPENAI_API_KEY,
+                timeout=30,
+            )
+            raw_response = resp.choices[0].message.content
+            if raw_response and len(raw_response.strip()) > 10:
                 break
-            except Exception:
-                if parse_attempt == 2:
-                    logger.warning(f"All JSON parsing failed for {symbol}")
+        except Exception as exc:
+            logger.warning(f"[{pair}] GPT attempt {attempt + 1}/3 failed: {exc}")
+            await asyncio.sleep(2)
 
-        if not ai_data:
-            return None
-
-        # Force signal to match trend direction (AI cannot override)
-        ai_data["signal"] = forced_direction
-
-        # Confidence validation
-        confidence = ai_data.get("confidence", 50.0)
-        if not isinstance(confidence, (int, float)) or confidence < 0 or confidence > 100:
-            confidence = 50.0
-        ai_data["confidence"] = confidence
-
-        # risk_reward validation
-        risk_reward = ai_data.get("risk_reward", params["min_rr"])
-        if isinstance(risk_reward, str):
-            try:
-                if ":" in risk_reward:
-                    parts = risk_reward.split(":")
-                    risk_reward = float(parts[-1])
-                else:
-                    risk_reward = float(risk_reward)
-            except (ValueError, IndexError):
-                risk_reward = params["min_rr"]
-        if not isinstance(risk_reward, (int, float)) or risk_reward <= 0:
-            risk_reward = params["min_rr"]
-        ai_data["risk_reward"] = round(risk_reward, 1)
-
-        return ai_data
-    except Exception as e:
-        logger.error(f"Error generating AI analysis for {symbol}: {e}")
+    if not raw_response:
+        logger.error(f"[{pair}] No GPT response after 3 attempts")
         return None
 
-# ============ TELEGRAM ============
-def sanitize_html(text: str) -> str:
-    if not text:
-        return ""
+    return _parse_gpt_response(pair, raw_response)
+
+
+def _parse_gpt_response(pair: str, raw: str) -> dict | None:
+    """Extract JSON from GPT response, handling markdown fences and minor formatting issues."""
+    text = raw.strip()
+
+    # Strip markdown code fences
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    # Find first JSON object if there's surrounding text
+    if not text.startswith("{"):
+        brace = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace:
+            text = brace.group(0)
+
+    # Attempt 1: direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: light cleanup
+    try:
+        fixed = re.sub(r",\s*}", "}", text)
+        fixed = re.sub(r",\s*]", "]", fixed)
+        fixed = fixed.replace("'", '"')
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: regex field extraction
+    try:
+        sig_m   = re.search(r'"signal"\s*:\s*"(\w+)"', text)
+        conf_m  = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
+        entry_m = re.search(r'"entry_price"\s*:\s*([\d.]+)', text)
+        anal_m  = re.search(r'"analysis"\s*:\s*"([^"]*)"', text)
+        rr_m    = re.search(r'"risk_reward"\s*:\s*([\d.]+)', text)
+        return {
+            "signal":       sig_m.group(1)   if sig_m   else "NEUTRAL",
+            "confidence":   float(conf_m.group(1))  if conf_m  else 50.0,
+            "entry_price":  float(entry_m.group(1)) if entry_m else 0.0,
+            "analysis":     anal_m.group(1)  if anal_m  else "",
+            "risk_reward":  float(rr_m.group(1))    if rr_m    else 2.0,
+            "tp_levels":    [],
+            "sl_price":     0.0,
+        }
+    except Exception as exc:
+        logger.error(f"[{pair}] JSON parse failed entirely: {exc}\nRaw: {raw[:300]}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# TP / SL calculation — ATR-based, always geometrically valid
+# ---------------------------------------------------------------------------
+def build_levels(signal: str, entry: float, atr: float, cfg: dict) -> tuple[list[float], float]:
+    """Return (tp_levels, sl_price) using ATR multipliers."""
+    dp = cfg["decimals"]
+    if signal == "BUY":
+        tps = [
+            round(entry + atr * cfg["atr_tp1"], dp),
+            round(entry + atr * cfg["atr_tp2"], dp),
+            round(entry + atr * cfg["atr_tp3"], dp),
+        ]
+        sl = round(entry - atr * cfg["atr_sl"], dp)
+    else:  # SELL
+        tps = [
+            round(entry - atr * cfg["atr_tp1"], dp),
+            round(entry - atr * cfg["atr_tp2"], dp),
+            round(entry - atr * cfg["atr_tp3"], dp),
+        ]
+        sl = round(entry + atr * cfg["atr_sl"], dp)
+    return tps, sl
+
+
+# ---------------------------------------------------------------------------
+# Telegram delivery
+# ---------------------------------------------------------------------------
+def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING"):
+
+async def send_to_telegram(
+    pair: str,
+    signal: str,
+    entry: float,
+    tps: list[float],
+    sl: float,
+    confidence: float,
+    rr: float,
+    analysis: str,
+) -> None:
+    """Send two messages: copier-format signal + analysis card."""
     try:
-        if not TELEGRAM_BOT_TOKEN:
-            logger.warning("Telegram bot token not configured")
-            return
+        bot = get_bot()
+        emoji = "🟢" if signal == "BUY" else "🔴"
+        action = signal.capitalize()
+        lo = round(entry - 0.50, 2)
+        hi = round(entry + 0.50, 2)
 
-        signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
-        action = signal_type.capitalize()
-
-        # Entry range for TSCopier smart entry
-        entry_lo = round(entry_price - 0.50, 2)
-        entry_hi = round(entry_price + 0.50, 2)
-
-        copier_message = (
-            f"{signal_emoji} #{pair} [SWING]\n"
+        copier_msg = (
+            f"{emoji} #{pair} [SWING]\n"
             f"\n"
-            f"{action} {entry_lo} - {entry_hi}\n"
+            f"{action} {lo} - {hi}\n"
             f"\n"
-            f"TP1: {tp_levels[0]}\n"
-            f"TP2: {tp_levels[1]}\n"
-            f"TP3: {tp_levels[2]}\n"
+            f"TP1: {tps[0]}\n"
+            f"TP2: {tps[1]}\n"
+            f"TP3: {tps[2]}\n"
             f"\n"
-            f"SL: {sl_price}\n"
+            f"SL: {sl}\n"
         )
 
-        safe_analysis = sanitize_html(analysis)
-        info_message = (
-            f"<b>📊 R:R:</b> 1:{risk_reward}  "
-            f"<b>⚡ AI Confidence:</b> {confidence}%\n"
-            f"<b>📝</b> {safe_analysis}\n"
+        info_msg = (
+            f"<b>📊 R:R:</b> 1:{rr}  "
+            f"<b>⚡ Confidence:</b> {confidence}%\n"
+            f"<b>📝</b> {_html_escape(analysis)}\n"
             f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom Gold ML Engine</i>"
+            f"| Grandcom Gold Engine</i>"
         )
 
-        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=copier_message)
-            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=info_message, parse_mode="HTML")
-        logger.info(f"✅ Gold signal sent to {TELEGRAM_GOLD_CHANNEL_ID}: {pair} {signal_type}")
-    except Exception as e:
-        logger.error(f"❌ Error sending gold signal to Telegram: {e}", exc_info=True)
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=copier_msg)
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=info_msg, parse_mode="HTML")
+        logger.info(f"[{pair}] Signal sent to Telegram channel {TELEGRAM_CHANNEL_ID}")
 
-# ============ SIGNAL GENERATION ============
-# Throttle tracking — max 1 signal per pair per THROTTLE_HOURS
-last_signal_time: dict = {}
+    except Exception as exc:
+        logger.error(f"[{pair}] Telegram delivery failed: {exc}")
 
-async def is_duplicate_active(pair: str, signal_type: str) -> bool:
-    """Prevent duplicate: same pair+direction already ACTIVE"""
-    existing = await db.gold_signals.find_one({"pair": pair, "type": signal_type, "status": "ACTIVE"})
-    return existing is not None
 
-async def check_h4_trend(pair: str) -> str:
-    """H4 MTF alignment — only trade with H4 trend"""
-    try:
-        symbol = GOLD_PAIRS[pair]["twelve_data_symbol"]
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=4h&outputsize=55&apikey={TWELVE_DATA_API_KEY}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                data = await resp.json()
-                if "values" not in data:
-                    return "NEUTRAL"
-                df = pd.DataFrame(data["values"])
-                for col in ["open", "high", "low", "close"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.sort_index(ascending=False).reset_index(drop=True)
-                if len(df) < 50:
-                    return "NEUTRAL"
-                df["ma50"] = ta.trend.SMAIndicator(df["close"], window=50).sma_indicator()
-                latest = df.iloc[-1]
-                close = float(latest["close"])
-                ma50 = float(latest["ma50"])
-                return "BULLISH" if close > ma50 else "BEARISH"
-    except Exception as e:
-        logger.warning(f"H4 check failed for {pair}: {e}")
-        return "NEUTRAL"
+# ---------------------------------------------------------------------------
+# Core signal generation — one pair at a time
+# ---------------------------------------------------------------------------
+async def generate_signal(pair: str) -> None:
+    """Full pipeline: fetch → indicators → GPT → validate → store → send."""
+    cfg = PAIRS[pair]
+    logger.info(f"[{pair}] Starting signal generation")
 
-async def generate_gold_signal(pair: str):
-    try:
-        params = GOLD_PAIRS[pair]
-        logger.info(f"📊 Generating gold signal for {pair}")
+    # 1. Price data
+    df = await fetch_ohlcv(pair)
+    if df is None or len(df) < 52:
+        logger.warning(f"[{pair}] Insufficient candles ({len(df) if df is not None else 0}), skipping")
+        return
 
-        # 1. Throttle — max 1 signal per THROTTLE_HOURS
-        last_ts = last_signal_time.get(pair)
-        if last_ts and (datetime.utcnow() - last_ts).total_seconds() / 3600 < THROTTLE_HOURS:
-            remaining = THROTTLE_HOURS - (datetime.utcnow() - last_ts).total_seconds() / 3600
-            logger.info(f"⏳ {pair} throttled — {remaining:.1f}h remaining")
-            return
+    # 2. Indicators
+    ind = compute_indicators(df, cfg["decimals"])
+    if ind is None:
+        logger.warning(f"[{pair}] Indicator computation failed, skipping")
+        return
 
-        df = await get_price_data(pair, interval="4h", outputsize=100)
-        if df is None or len(df) < 20:
-            logger.warning(f"Insufficient data for {pair}")
-            return
+    logger.info(
+        f"[{pair}] price={ind['price']} rsi={ind['rsi']} "
+        f"macd={ind['macd']} trend={ind['trend']} atr={ind['atr']}"
+    )
 
-        indicators = calculate_indicators(df, params)
-        if not indicators:
-            return
+    # 3. GPT analysis
+    gpt = await gpt_signal(pair, ind, cfg)
+    if gpt is None:
+        logger.warning(f"[{pair}] GPT returned no signal, skipping")
+        return
 
-        # Direction is set by trend — AI cannot override
-        signal_type = indicators["signal_direction"]
+    signal_type = str(gpt.get("signal", "NEUTRAL")).upper()
+    confidence  = float(gpt.get("confidence", 0))
+    analysis    = str(gpt.get("analysis", ""))
 
-        # 2. H4 MTF alignment — block contra-trend signals
-        h4_trend = await check_h4_trend(pair)
-        if h4_trend == "BEARISH" and signal_type == "BUY":
-            logger.info(f"🚫 {pair} BUY blocked by H4 BEARISH")
-            return
-        if h4_trend == "BULLISH" and signal_type == "SELL":
-            logger.info(f"🚫 {pair} SELL blocked by H4 BULLISH")
-            return
-        logger.info(f"📐 {pair} H4={h4_trend} signal={signal_type} — aligned ✅")
+    logger.info(f"[{pair}] GPT → signal={signal_type} confidence={confidence}")
 
-        # 3. Duplicate guard — don't open same pair+direction if already active
-        if await is_duplicate_active(pair, signal_type):
-            logger.info(f"⚠️ {pair} {signal_type} already ACTIVE — skipping")
-            return
+    # 4. Filter NEUTRAL and low-confidence
+    if signal_type == "NEUTRAL":
+        logger.info(f"[{pair}] NEUTRAL signal — no trade")
+        return
 
-        ai_analysis = await generate_ai_analysis(pair, indicators, params)
-        if not ai_analysis:
-            return
+    if signal_type not in ("BUY", "SELL"):
+        logger.warning(f"[{pair}] Unexpected signal value '{signal_type}' — skipping")
+        return
 
-        confidence = float(ai_analysis.get("confidence", 0))
-        if confidence < params["min_confidence"]:
-            logger.info(f"{pair} skipped — confidence {confidence}% < {params['min_confidence']}%")
-            return
+    if confidence < MIN_CONFIDENCE:
+        logger.info(f"[{pair}] Confidence {confidence}% < {MIN_CONFIDENCE}% threshold — skipping")
+        return
 
-        # Use AI entry price, force correct TP/SL using ATR (guarantees valid risk)
-        entry_price = ai_analysis.get("entry_price", indicators["current_price"])
-        atr = indicators["atr"]
-        dp = params["decimal_places"]
+    # 5. Build ATR-based levels (always geometrically valid)
+    entry = float(gpt.get("entry_price") or ind["price"])
+    if entry <= 0:
+        entry = ind["price"]
 
-        if signal_type == "BUY":
-            tp_levels = [
-                round(entry_price + atr * params["atr_multiplier_tp1"], dp),
-                round(entry_price + atr * params["atr_multiplier_tp2"], dp),
-                round(entry_price + atr * params["atr_multiplier_tp3"], dp),
-            ]
-            sl_price = round(entry_price - atr * params["atr_multiplier_sl"], dp)
-        else:
-            tp_levels = [
-                round(entry_price - atr * params["atr_multiplier_tp1"], dp),
-                round(entry_price - atr * params["atr_multiplier_tp2"], dp),
-                round(entry_price - atr * params["atr_multiplier_tp3"], dp),
-            ]
-            sl_price = round(entry_price + atr * params["atr_multiplier_sl"], dp)
+    tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
 
-        # Calculate actual R:R from ATR-based levels
-        risk = abs(entry_price - sl_price)
-        reward = abs(tp_levels[0] - entry_price)
-        if risk > 0:
-            actual_rr = round(reward / risk, 1)
-        else:
-            actual_rr = params["min_rr"]
-        risk_reward = max(actual_rr, params["min_rr"])
+    # Sanity check
+    if signal_type == "BUY" and (tps[0] <= entry or sl >= entry):
+        logger.warning(f"[{pair}] BUY level geometry invalid — skipping")
+        return
+    if signal_type == "SELL" and (tps[0] >= entry or sl <= entry):
+        logger.warning(f"[{pair}] SELL level geometry invalid — skipping")
+        return
 
-        # Validate: TP/SL must be on correct sides
-        if signal_type == "BUY" and (tp_levels[0] <= entry_price or sl_price >= entry_price):
-            logger.warning(f"{pair} BUY invalid structure — skipping")
-            return
-        if signal_type == "SELL" and (tp_levels[0] >= entry_price or sl_price <= entry_price):
-            logger.warning(f"{pair} SELL invalid structure — skipping")
-            return
+    # 6. Risk/reward
+    risk   = abs(entry - sl)
+    reward = abs(tps[0] - entry)
+    rr     = round(reward / risk, 1) if risk > 0 else 2.0
 
-        # Store in DB
-        signal_doc = {
-            "pair": pair,
-            "type": signal_type,
-            "entry_price": entry_price,
-            "current_price": indicators["current_price"],
-            "tp_levels": tp_levels,
-            "sl_price": sl_price,
-            "confidence": round(confidence, 1),
-            "analysis": ai_analysis.get("analysis", ""),
-            "risk_reward": risk_reward,
-            "timeframe": "4H",
-            "status": "ACTIVE",
-            "created_at": datetime.now(timezone.utc),
-        }
-        await db.gold_signals.insert_one(signal_doc)
+    # 7. Store in MongoDB
+    db = get_db()
+    if db is not None:
+        try:
+            doc = {
+                "pair":          pair,
+                "type":          signal_type,
+                "entry_price":   entry,
+                "current_price": ind["price"],
+                "tp_levels":     tps,
+                "sl_price":      sl,
+                "confidence":    round(confidence, 1),
+                "analysis":      analysis,
+                "risk_reward":   rr,
+                "timeframe":     "4H",
+                "status":        "ACTIVE",
+                "indicators":    ind,
+                "created_at":    datetime.now(timezone.utc),
+            }
+            result = await db.gold_signals.insert_one(doc)
+            logger.info(f"[{pair}] Signal stored — id={result.inserted_id}")
+        except Exception as exc:
+            logger.error(f"[{pair}] MongoDB insert failed: {exc}")
+    else:
+        logger.warning(f"[{pair}] MongoDB not available — signal not stored")
 
-        # Send to Telegram
-        await send_signal_to_telegram(
-            pair=pair,
-            signal_type=signal_type,
-            entry_price=entry_price,
-            tp_levels=tp_levels,
-            sl_price=sl_price,
-            confidence=round(confidence, 1),
-            risk_reward=risk_reward,
-            analysis=ai_analysis.get("analysis", ""),
-        )
+    # 8. Send to Telegram
+    await send_to_telegram(pair, signal_type, entry, tps, sl, round(confidence, 1), rr, analysis)
 
-        logger.info(f"✅ {pair} {signal_type} @ {entry_price} | TP: {tp_levels} | SL: {sl_price} | R:R: 1:{risk_reward} | Conf: {confidence}%")
+    logger.info(
+        f"[{pair}] ✅ {signal_type} @ {entry} | "
+        f"TP: {tps} | SL: {sl} | R:R 1:{rr} | Conf: {confidence}%"
+    )
 
-        # Record throttle timestamp
-        last_signal_time[pair] = datetime.utcnow()
 
-    except Exception as e:
-        logger.error(f"Error generating gold signal for {pair}: {e}")
+# ---------------------------------------------------------------------------
+# Scheduler job — runs every SIGNAL_INTERVAL_MINUTES
+# ---------------------------------------------------------------------------
+async def run_all_signals() -> None:
+    logger.info("=== Signal generation cycle START ===")
+    for pair in PAIRS:
+        try:
+            await generate_signal(pair)
+        except Exception as exc:
+            # One pair failing must never crash the loop
+            logger.error(f"[{pair}] Unhandled error in generate_signal: {exc}", exc_info=True)
+        await asyncio.sleep(2)  # brief pause between pairs
+    logger.info("=== Signal generation cycle END ===")
 
-async def run_gold_signals():
-    logger.info("🥇 Running gold signal generation...")
-    for pair in GOLD_PAIRS:
-        await generate_gold_signal(pair)
-        await asyncio.sleep(2)
-    logger.info("🥇 Gold signal generation complete")
 
-# ============ OUTCOME TRACKER ============
-GOLD_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "XAUEUR": "XAU/EUR"}
-
-async def get_live_price(pair: str):
-    try:
-        api_symbol = GOLD_SYMBOL_MAP.get(pair, pair)
-        url = f"https://api.twelvedata.com/price?symbol={api_symbol}&apikey={TWELVE_DATA_API_KEY}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-                if "price" in data:
-                    return float(data["price"])
-                logger.warning(f"No live price for {pair}: {data}")
-                return None
-    except Exception as e:
-        logger.error(f"Error fetching live price for {pair}: {e}")
-        return None
-
-def calculate_pips(pair: str, entry: float, exit_price: float, signal_type: str) -> float:
-    pip_value = 0.1  # Gold pip
-    diff = exit_price - entry
-    if signal_type == "SELL":
-        diff = -diff
-    return round(diff / pip_value, 1)
-
-async def check_signal_outcome(signal: dict, current_price: float):
-    signal_type = signal.get("type", "").upper()
-    entry = signal.get("entry_price", 0)
-    sl = signal.get("sl_price", 0)
-    tps = signal.get("tp_levels", [])
-    if not signal_type or not entry or not sl or not tps:
-        return None
-
-    pair = signal.get("pair", "XAUUSD")
-
-    if signal_type == "BUY":
-        if current_price <= sl:
-            return {"status": "CLOSED_SL", "result": "LOSS", "exit_price": current_price,
-                    "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": None}
-        for i in reversed(range(len(tps))):
-            if current_price >= tps[i]:
-                return {"status": f"CLOSED_TP{i+1}", "result": "WIN", "exit_price": current_price,
-                        "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": i+1}
-    elif signal_type == "SELL":
-        if current_price >= sl:
-            return {"status": "CLOSED_SL", "result": "LOSS", "exit_price": current_price,
-                    "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": None}
-        for i in reversed(range(len(tps))):
-            if current_price <= tps[i]:
-                return {"status": f"CLOSED_TP{i+1}", "result": "WIN", "exit_price": current_price,
-                        "pips": calculate_pips(pair, entry, current_price, signal_type), "tp_hit": i+1}
-    return None
-
-async def send_close_notification(signal: dict, outcome: dict):
-    try:
-        if not TELEGRAM_BOT_TOKEN:
-            return
-        result_emoji = "✅" if outcome["result"] == "WIN" else "❌"
-        pips_emoji = "📈" if outcome["pips"] > 0 else "📉"
-        tp_info = f"\n<b>Target Hit:</b> TP{outcome['tp_hit']}" if outcome.get("tp_hit") else ""
-        message = (
-            f"{result_emoji} <b>TRADE CLOSED: {signal.get('pair', 'N/A')}</b> {result_emoji}\n\n"
-            f"<b>📊 Direction:</b> {signal.get('type', 'N/A')}\n"
-            f"<b>💰 Entry:</b> {signal.get('entry_price', 'N/A')}\n"
-            f"<b>🎯 Exit:</b> {outcome['exit_price']}\n"
-            f"<b>{pips_emoji} Pips:</b> {outcome['pips']:+.1f}\n"
-            f"<b>📋 Result:</b> {outcome['result']}{tp_info}\n\n"
-            f"<b>⏰ Closed:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-            f"<i>🤖 Auto-tracked by Grandcom Gold ML Engine</i>"
-        )
-        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-            await bot.send_message(chat_id=TELEGRAM_GOLD_CHANNEL_ID, text=message, parse_mode="HTML")
-        logger.info(f"📩 Close notification sent for {signal.get('pair')}")
-    except Exception as e:
-        logger.error(f"Error sending close notification: {e}", exc_info=True)
-
-async def check_all_gold_outcomes():
-    try:
-        from bson import ObjectId
-        active = await db.gold_signals.find({"status": "ACTIVE"}).to_list(length=100)
-        if not active:
-            return
-        logger.info(f"🔍 Checking {len(active)} active gold signals...")
-        checked, closed = 0, 0
-        signals_by_pair = {}
-        for s in active:
-            p = s.get("pair")
-            if p not in signals_by_pair:
-                signals_by_pair[p] = []
-            signals_by_pair[p].append(s)
-
-        for pair, signals in signals_by_pair.items():
-            price = await get_live_price(pair)
-            if price is None:
-                continue
-            for signal in signals:
-                checked += 1
-                outcome = await check_signal_outcome(signal, price)
-                if outcome:
-                    await db.gold_signals.update_one(
-                        {"_id": signal["_id"]},
-                        {"$set": {
-                            "status": outcome["status"],
-                            "result": outcome["result"],
-                            "exit_price": outcome["exit_price"],
-                            "pips": outcome["pips"],
-                            "closed_at": datetime.now(timezone.utc)
-                        }}
-                    )
-                    await send_close_notification(signal, outcome)
-                    closed += 1
-                    logger.info(f"📊 {pair} signal closed: {outcome['status']} | {outcome['pips']:+.1f} pips")
-            await asyncio.sleep(0.5)
-        logger.info(f"🔍 Outcome check: {checked} checked, {closed} closed")
-    except Exception as e:
-        logger.error(f"Error in gold outcome check: {e}")
-
-# ============ APP ============
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 scheduler = AsyncIOScheduler()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
-    scheduler.add_job(check_all_gold_outcomes, "interval", seconds=60, id="gold_outcome_tracker")
+    global _mongo_client, _db
+
+    # --- Startup validation ---
+    missing = []
+    if not MONGO_URL:
+        missing.append("MONGO_URL")
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not TWELVE_DATA_API_KEY:
+        missing.append("TWELVE_DATA_API_KEY")
+    if not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY / EMERGENT_LLM_KEY")
+
+    if missing:
+        logger.error(f"❌ Missing required environment variables: {missing}")
+        logger.error("Server will start but signal generation will fail until these are set.")
+    else:
+        logger.info("✅ All required environment variables present")
+
+    # --- MongoDB ---
+    if MONGO_URL:
+        try:
+            _mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+            _db = _mongo_client[DB_NAME]
+            await _db.command("ping")
+            logger.info(f"✅ MongoDB connected — db={DB_NAME}")
+        except Exception as exc:
+            logger.error(f"❌ MongoDB connection failed: {exc}")
+            _db = None
+
+    # --- Telegram bot ---
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            bot = get_bot()
+            me = await bot.get_me()
+            logger.info(f"✅ Telegram bot ready — @{me.username} → channel {TELEGRAM_CHANNEL_ID}")
+        except Exception as exc:
+            logger.error(f"❌ Telegram bot init failed: {exc}")
+
+    # --- Scheduler ---
+    scheduler.add_job(
+        run_all_signals,
+        "interval",
+        minutes=SIGNAL_INTERVAL_MINUTES,
+        id="gold_signals",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
-    logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
-    logger.info("🔍 Gold Outcome Tracker started — checking every 60s")
-    asyncio.create_task(run_gold_signals())
+    logger.info(
+        f"✅ Scheduler started — pairs={list(PAIRS.keys())} "
+        f"interval={SIGNAL_INTERVAL_MINUTES}min"
+    )
+
+    # Run immediately on startup
+    asyncio.create_task(run_all_signals())
+
     yield
-    scheduler.shutdown()
-    client.close()
 
-app = FastAPI(title="Grandcom Gold Signals", lifespan=lifespan)
+    # --- Shutdown ---
+    scheduler.shutdown(wait=False)
+    if _mongo_client:
+        _mongo_client.close()
+    logger.info("Gold Signals Server shut down")
 
+
+app = FastAPI(title="Grandcom Gold Signals", version="2.0.0", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# HTTP endpoints
+# ---------------------------------------------------------------------------
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "gold_signals", "pairs": list(GOLD_PAIRS.keys())}
+    """Railway health check endpoint."""
+    db = get_db()
+    mongo_ok = False
+    if db is not None:
+        try:
+            await db.command("ping")
+            mongo_ok = True
+        except Exception:
+            pass
 
-@app.get("/api/gold/signals")
-async def get_gold_signals(status: str = None, limit: int = 50):
-    query = {}
+    jobs = [
+        {"id": j.id, "next_run": str(j.next_run_time)}
+        for j in scheduler.get_jobs()
+    ]
+
+    return {
+        "status":            "ok",
+        "service":           "gold_signals",
+        "version":           "2.0.0",
+        "pairs":             list(PAIRS.keys()),
+        "telegram_channel":  TELEGRAM_CHANNEL_ID,
+        "scheduler_running": scheduler.running,
+        "scheduler_jobs":    jobs,
+        "mongo_connected":   mongo_ok,
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/signals")
+async def get_signals(status: str | None = None, limit: int = 50):
+    """Return stored signals, optionally filtered by status."""
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected", "signals": [], "count": 0}
+
+    query: dict = {}
     if status:
         query["status"] = status.upper()
-    signals = await db.gold_signals.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+    signals = (
+        await db.gold_signals
+        .find(query, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
     return {"signals": signals, "count": len(signals)}
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8002)))
