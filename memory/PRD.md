@@ -44,6 +44,11 @@ Professional Forex & Gold (XAUUSD/XAUEUR) signals system with fully automatic si
 16. **Fixed Railway deployment** — Gold server now has `try/except` fallback from emergentintegrations to litellm, ensuring it works on Railway.
 17. **Fixed SELL-only bias** — Replaced complex AI-driven direction scoring with simple trend-following: Price > MA50 = BUY, Price < MA50 = SELL. Counter-trend only at extreme RSI (>75 overbought, <25 oversold). AI now only provides confidence + analysis, not direction.
 18. **Cleaned 1064 stale ACTIVE signals** — Expired old signals that were flooding `@grandcomgold` with LOSS notifications.
+19. **CRITICAL FIX: Replaced Elite Edition with proven trend-following server** — Elite Edition had 19+ gates blocking ALL signals (G3 trigger team, session filters, VW-MACD, entropy, etc). Replaced with simple trend-following + key safety gates only.
+20. **Signal interval 240min + 6h throttle** — Prevents TScopier from opening 10+ duplicate trades from one signal (was creating massive losses via trade multiplication).
+21. **Added H4 MTF alignment** — Blocks contra-trend signals (BUY blocked if H4 bearish, SELL blocked if H4 bullish).
+22. **Added duplicate guard** — Prevents opening same pair+direction if already ACTIVE in DB.
+23. **ATR multipliers restored to conservative swing** — SL=1.5x ATR (~$45), TP1=2x ATR (~$60), TP3=5x ATR (~$150). Previous Elite Edition had SL=0.4x ATR (~$14) which was hit by normal noise.
 
 ## Deployment
 - **Emergent Preview**: Both servers running (forex on 8001, gold on 8002)

@@ -68,8 +68,9 @@ GOLD_PAIRS = {
     },
 }
 
-SIGNAL_INTERVAL_MINUTES = 2
+SIGNAL_INTERVAL_MINUTES = 240
 MIN_CONFIDENCE = 60
+THROTTLE_HOURS = 6
 
 # ============ DB ============
 client = AsyncIOMotorClient(MONGO_URL)
@@ -361,10 +362,50 @@ async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_
         logger.error(f"❌ Error sending gold signal to Telegram: {e}", exc_info=True)
 
 # ============ SIGNAL GENERATION ============
+# Throttle tracking — max 1 signal per pair per THROTTLE_HOURS
+last_signal_time: dict = {}
+
+async def is_duplicate_active(pair: str, signal_type: str) -> bool:
+    """Prevent duplicate: same pair+direction already ACTIVE"""
+    existing = await db.gold_signals.find_one({"pair": pair, "type": signal_type, "status": "ACTIVE"})
+    return existing is not None
+
+async def check_h4_trend(pair: str) -> str:
+    """H4 MTF alignment — only trade with H4 trend"""
+    try:
+        symbol = GOLD_PAIRS[pair]["twelve_data_symbol"]
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=4h&outputsize=55&apikey={TWELVE_DATA_API_KEY}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if "values" not in data:
+                    return "NEUTRAL"
+                df = pd.DataFrame(data["values"])
+                for col in ["open", "high", "low", "close"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df.sort_index(ascending=False).reset_index(drop=True)
+                if len(df) < 50:
+                    return "NEUTRAL"
+                df["ma50"] = ta.trend.SMAIndicator(df["close"], window=50).sma_indicator()
+                latest = df.iloc[-1]
+                close = float(latest["close"])
+                ma50 = float(latest["ma50"])
+                return "BULLISH" if close > ma50 else "BEARISH"
+    except Exception as e:
+        logger.warning(f"H4 check failed for {pair}: {e}")
+        return "NEUTRAL"
+
 async def generate_gold_signal(pair: str):
     try:
         params = GOLD_PAIRS[pair]
         logger.info(f"📊 Generating gold signal for {pair}")
+
+        # 1. Throttle — max 1 signal per THROTTLE_HOURS
+        last_ts = last_signal_time.get(pair)
+        if last_ts and (datetime.utcnow() - last_ts).total_seconds() / 3600 < THROTTLE_HOURS:
+            remaining = THROTTLE_HOURS - (datetime.utcnow() - last_ts).total_seconds() / 3600
+            logger.info(f"⏳ {pair} throttled — {remaining:.1f}h remaining")
+            return
 
         df = await get_price_data(pair, interval="4h", outputsize=100)
         if df is None or len(df) < 20:
@@ -375,12 +416,27 @@ async def generate_gold_signal(pair: str):
         if not indicators:
             return
 
+        # Direction is set by trend — AI cannot override
+        signal_type = indicators["signal_direction"]
+
+        # 2. H4 MTF alignment — block contra-trend signals
+        h4_trend = await check_h4_trend(pair)
+        if h4_trend == "BEARISH" and signal_type == "BUY":
+            logger.info(f"🚫 {pair} BUY blocked by H4 BEARISH")
+            return
+        if h4_trend == "BULLISH" and signal_type == "SELL":
+            logger.info(f"🚫 {pair} SELL blocked by H4 BULLISH")
+            return
+        logger.info(f"📐 {pair} H4={h4_trend} signal={signal_type} — aligned ✅")
+
+        # 3. Duplicate guard — don't open same pair+direction if already active
+        if await is_duplicate_active(pair, signal_type):
+            logger.info(f"⚠️ {pair} {signal_type} already ACTIVE — skipping")
+            return
+
         ai_analysis = await generate_ai_analysis(pair, indicators, params)
         if not ai_analysis:
             return
-
-        # Direction is set by trend — AI cannot override
-        signal_type = indicators["signal_direction"]
 
         confidence = float(ai_analysis.get("confidence", 0))
         if confidence < params["min_confidence"]:
@@ -454,6 +510,10 @@ async def generate_gold_signal(pair: str):
         )
 
         logger.info(f"✅ {pair} {signal_type} @ {entry_price} | TP: {tp_levels} | SL: {sl_price} | R:R: 1:{risk_reward} | Conf: {confidence}%")
+
+        # Record throttle timestamp
+        last_signal_time[pair] = datetime.utcnow()
+
     except Exception as e:
         logger.error(f"Error generating gold signal for {pair}: {e}")
 
