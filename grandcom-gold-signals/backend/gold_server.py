@@ -396,6 +396,10 @@ def calculate_indicators(df: pd.DataFrame, params: dict) -> dict | None:
         alignment_pct = round(groups_agree / 5 * 100, 0)
 
         # ── HOLD LOGIC ────────────────────────────────────────────
+        # Only HOLD when G1+G2 agree AND G3 is the hard opposite direction
+        # (exhaustion confirmed by both WPR and StochRSI crossing into extreme).
+        # G3=NEUTRAL (exhausted but not yet reversing) is NOT a HOLD — it is a
+        # valid pullback-exhaustion setup that we still want to trade.
         hold_reason = None
         if g1_verdict == "BUY" and g2_verdict == "BUY" and g3_verdict == "SELL":
             hold_reason = (
@@ -410,13 +414,28 @@ def calculate_indicators(df: pd.DataFrame, params: dict) -> dict | None:
                 f"Wait for bounce."
             )
 
+        # ── G3 DISAGREEMENT FLAG ──────────────────────────────────
+        # True when G3 is neutral or opposite to the G1+G2 consensus.
+        # Used downstream to apply a confidence penalty without blocking the signal.
+        g3_disagrees = False
+
         # ── FINAL DIRECTION ───────────────────────────────────────
+        # Priority 1: explicit HOLD (G3 hard-opposite to G1+G2)
         if hold_reason:
             final_direction = "HOLD"
-        elif g1_verdict == "BUY" and g2_verdict in ("BUY","NEUTRAL") and g3_verdict == "BUY":
+        # Priority 2: full agreement — all three groups aligned
+        elif g1_verdict == "BUY" and g2_verdict in ("BUY", "NEUTRAL") and g3_verdict == "BUY":
             final_direction = "BUY"
-        elif g1_verdict == "SELL" and g2_verdict in ("SELL","NEUTRAL") and g3_verdict == "SELL":
+        elif g1_verdict == "SELL" and g2_verdict in ("SELL", "NEUTRAL") and g3_verdict == "SELL":
             final_direction = "SELL"
+        # Priority 3: G1+G2 agree but G3 is neutral/exhausted — valid pullback setup,
+        # generate signal with a reduced confidence (penalty applied in AI analysis).
+        elif g1_verdict == "BUY" and g2_verdict in ("BUY", "NEUTRAL"):
+            final_direction = "BUY"
+            g3_disagrees = True
+        elif g1_verdict == "SELL" and g2_verdict in ("SELL", "NEUTRAL"):
+            final_direction = "SELL"
+            g3_disagrees = True
         else:
             final_direction = "NEUTRAL"
 
@@ -459,6 +478,7 @@ def calculate_indicators(df: pd.DataFrame, params: dict) -> dict | None:
             "alignment_pct":    alignment_pct,
             "tech_direction":   final_direction,
             "hold_reason":      hold_reason,
+            "g3_disagrees":     g3_disagrees,
             "is_choppy":        is_choppy,
             "regime":           "UPTREND" if g1_verdict=="BUY" else "DOWNTREND" if g1_verdict=="SELL" else "RANGE",
         }
@@ -674,6 +694,27 @@ R:R → TP1={round(m_tp1/m_sl,2)} | TP2={round(m_tp2/m_sl,2)} | TP3={round(m_tp3
             ai_data["analysis"] = f"[HIGH CONVICTION] {analysis}"
         if total_score < MIN_TECH_SCORE:
             ai_data["confidence"] = min(ai_data.get("confidence", 50), 49)
+
+        # ── G3 CONFIDENCE PENALTY ─────────────────────────────────
+        # When G3 (Trigger) disagrees with the G1+G2 consensus, this is a
+        # pullback-exhaustion setup — valid institutionally, but carries extra
+        # uncertainty.  Reduce AI confidence by 10% (clamped to 0) and annotate
+        # the analysis so the signal is still generated but clearly flagged.
+        # A 10% reduction keeps a typical 75-80% AI score above the 70% gate
+        # while still communicating the reduced certainty to subscribers.
+        if indicators.get("g3_disagrees"):
+            raw_conf = ai_data.get("confidence", 70)
+            penalised = max(0.0, raw_conf - 10.0)
+            ai_data["confidence"] = penalised
+            g3_note = (
+                f"[G3 NEUTRAL — Trigger exhausted, Trend+Momentum aligned. "
+                f"Confidence reduced by 10% to {penalised:.0f}%.]"
+            )
+            ai_data["analysis"] = f"{g3_note} {ai_data.get('analysis', '')}"
+            logger.info(
+                f"⚠️  {symbol} G3 disagrees — confidence penalised "
+                f"{raw_conf:.0f}% → {penalised:.0f}%"
+            )
 
         logger.info(f"🪙 {symbol} entry={entry} SL={sl_price} TP={tp_levels} Score={total_score}/100 RR={ai_data['risk_reward']}")
         return ai_data
