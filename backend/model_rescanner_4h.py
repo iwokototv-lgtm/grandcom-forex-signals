@@ -15,33 +15,59 @@ Collections written:
   - rescanner_log       : { timestamp, pair, action, reason, details }
 """
 
-import asyncio
-import logging
-import os
-import signal as _signal
+# ── Startup error capture — must come before any other import ─────────────────
+# Errors here are written to /tmp/rescanner_startup_error.log and stderr so
+# they survive ephemeral cron containers where stdout/stderr are discarded.
 import sys
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import os
+import traceback
 
-import aiohttp
-import numpy as np
-import pandas as pd
-import ta
-from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
-from telegram import Bot
-from telegram.error import RetryAfter, TelegramError
+_STARTUP_ERROR_LOG = "/tmp/rescanner_startup_error.log"
 
-# ── Environment ──────────────────────────────────────────────────────────────
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
 
-MONGO_URL             = os.environ["MONGO_URL"]
-DB_NAME               = os.environ.get("DB_NAME", "grandcom")
-TWELVE_DATA_API_KEY   = os.environ.get("TWELVE_DATA_API_KEY", "demo")
-TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID   = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+def _write_startup_error(stage: str, exc: BaseException) -> None:
+    """Persist a startup error to disk and stderr so it survives container exit."""
+    msg = (
+        f"[rescanner_4h] STARTUP FAILURE at stage '{stage}'\n"
+        f"  Exception : {type(exc).__name__}: {exc}\n"
+        f"  Traceback :\n"
+        f"{traceback.format_exc()}"
+    )
+    # stderr — visible in Railway deployment logs
+    print(msg, file=sys.stderr, flush=True)
+    # file — persists after the process exits (readable via Railway shell / exec)
+    try:
+        with open(_STARTUP_ERROR_LOG, "w") as fh:
+            fh.write(msg)
+    except OSError:
+        pass  # If /tmp is not writable there is nothing more we can do
+
+
+# ── Stage 1: stdlib imports ───────────────────────────────────────────────────
+try:
+    import asyncio
+    import logging
+    import signal as _signal
+    from datetime import datetime, timezone, timedelta
+    from pathlib import Path
+    from typing import Any, Dict, List, Optional, Tuple
+except Exception as _exc:
+    _write_startup_error("stdlib imports", _exc)
+    sys.exit(1)
+
+# ── Stage 2: third-party imports ─────────────────────────────────────────────
+try:
+    import aiohttp
+    import numpy as np
+    import pandas as pd
+    import ta
+    from dotenv import load_dotenv
+    from motor.motor_asyncio import AsyncIOMotorClient
+    from telegram import Bot
+    from telegram.error import RetryAfter, TelegramError
+except Exception as _exc:
+    _write_startup_error("third-party imports", _exc)
+    sys.exit(1)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -50,6 +76,39 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("rescanner_4h")
+
+logger.info("rescanner_4h starting up — stdlib and third-party imports OK")
+
+# ── Stage 3: environment variables ───────────────────────────────────────────
+try:
+    ROOT_DIR = Path(__file__).parent
+    load_dotenv(ROOT_DIR / ".env")
+    logger.info(f"Loaded .env from {ROOT_DIR / '.env'} (file present: {(ROOT_DIR / '.env').exists()})")
+
+    MONGO_URL = os.environ["MONGO_URL"]
+    logger.info("MONGO_URL loaded OK")
+except KeyError as _exc:
+    _write_startup_error("environment variables", _exc)
+    logger.critical(f"Missing required environment variable: {_exc}")
+    sys.exit(1)
+except Exception as _exc:
+    _write_startup_error("environment variables", _exc)
+    sys.exit(1)
+
+try:
+    DB_NAME               = os.environ.get("DB_NAME", "grandcom")
+    TWELVE_DATA_API_KEY   = os.environ.get("TWELVE_DATA_API_KEY", "demo")
+    TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHANNEL_ID   = os.environ.get("TELEGRAM_CHANNEL_ID", "@grandcomsignals")
+    logger.info(
+        f"Config: DB_NAME={DB_NAME!r} | "
+        f"TWELVE_DATA_API_KEY={'set' if TWELVE_DATA_API_KEY != 'demo' else 'demo (default)'} | "
+        f"TELEGRAM_BOT_TOKEN={'set' if TELEGRAM_BOT_TOKEN else 'not set'} | "
+        f"TELEGRAM_CHANNEL_ID={TELEGRAM_CHANNEL_ID!r}"
+    )
+except Exception as _exc:
+    _write_startup_error("optional environment variables", _exc)
+    sys.exit(1)
 
 # ── Pair universe ─────────────────────────────────────────────────────────────
 # 21 forex pairs + XAUUSD + XAUEUR = 23 total
@@ -910,11 +969,14 @@ def _handle_sigterm(signum, frame):
 if __name__ == "__main__":
     _signal.signal(_signal.SIGTERM, _handle_sigterm)
 
+    logger.info("rescanner_4h __main__ reached — all startup stages passed, launching run_rescanner()")
+
     try:
         asyncio.run(run_rescanner())
     except KeyboardInterrupt:
         logger.info("Interrupted by user — exiting")
         sys.exit(0)
     except Exception as exc:
+        _write_startup_error("run_rescanner", exc)
         logger.critical(f"Fatal error in rescanner: {exc}", exc_info=True)
         sys.exit(1)
