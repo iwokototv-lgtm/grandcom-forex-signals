@@ -31,7 +31,7 @@ logger = logging.getLogger("gold_server")
 MONGO_URL = os.environ.get("MONGO_URL")
 DB_NAME = os.environ.get("DB_NAME", "gold_signals")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_GOLD_CHANNEL_ID = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "@grandcomgold")
+TELEGRAM_GOLD_CHANNEL_ID = int(os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408"))
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY")
 
@@ -68,6 +68,17 @@ MIN_CONFIDENCE = 60
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
+# ============ BOT SINGLETON ============
+_bot: Bot | None = None
+
+def get_bot() -> Bot:
+    global _bot
+    if _bot is None:
+        if not TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+        _bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    return _bot
+
 # ============ PRICE DATA ============
 async def get_price_data(pair: str, interval: str = "1h", outputsize: int = 100):
     symbol = GOLD_PAIRS[pair]["twelve_data_symbol"]
@@ -82,7 +93,7 @@ async def get_price_data(pair: str, interval: str = "1h", outputsize: int = 100)
                 df = pd.DataFrame(data["values"])
                 for col in ["open", "high", "low", "close"]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.sort_index(ascending=False).reset_index(drop=True)
+                df = df.iloc[::-1].reset_index(drop=True)
                 return df
     except Exception as e:
         logger.error(f"Error fetching {pair}: {e}")
@@ -255,10 +266,7 @@ def sanitize_html(text: str) -> str:
 
 async def send_signal_to_telegram(pair, signal_type, entry_price, tp_levels, sl_price, confidence, risk_reward, analysis, regime="SWING"):
     try:
-        if not TELEGRAM_BOT_TOKEN:
-            logger.warning("Telegram bot token not configured")
-            return
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        bot = get_bot()
 
         signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
         action = signal_type.capitalize()
@@ -373,6 +381,27 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup validation
+    missing = []
+    if not MONGO_URL:
+        missing.append("MONGO_URL")
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not TWELVE_DATA_API_KEY:
+        missing.append("TWELVE_DATA_API_KEY")
+    if not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY / EMERGENT_LLM_KEY")
+    if missing:
+        logger.error(f"❌ Missing required environment variables: {missing}")
+    else:
+        logger.info("✅ All required environment variables present")
+        # Warm up bot singleton
+        try:
+            get_bot()
+            logger.info(f"✅ Telegram bot initialised — channel {TELEGRAM_GOLD_CHANNEL_ID}")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialise Telegram bot: {e}")
+
     scheduler.add_job(run_gold_signals, "interval", minutes=SIGNAL_INTERVAL_MINUTES, id="gold_signals")
     scheduler.start()
     logger.info(f"🥇 Gold Signals Server started — {list(GOLD_PAIRS.keys())} every {SIGNAL_INTERVAL_MINUTES}min")
@@ -385,7 +414,30 @@ app = FastAPI(title="Grandcom Gold Signals", lifespan=lifespan)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "gold_signals", "pairs": list(GOLD_PAIRS.keys())}
+    return {
+        "status": "ok",
+        "service": "gold_signals",
+        "pairs": list(GOLD_PAIRS.keys()),
+        "telegram_channel": TELEGRAM_GOLD_CHANNEL_ID,
+        "scheduler_running": scheduler.running,
+    }
+
+@app.get("/api/monitor")
+async def monitor():
+    """Monitoring endpoint — returns scheduler job info and config summary."""
+    jobs = [
+        {"id": job.id, "next_run": str(job.next_run_time)}
+        for job in scheduler.get_jobs()
+    ]
+    return {
+        "service": "gold_signals",
+        "pairs": list(GOLD_PAIRS.keys()),
+        "signal_interval_minutes": SIGNAL_INTERVAL_MINUTES,
+        "telegram_channel": TELEGRAM_GOLD_CHANNEL_ID,
+        "scheduler_running": scheduler.running,
+        "jobs": jobs,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 @app.get("/api/gold/signals")
 async def get_gold_signals(status: str = None, limit: int = 50):
