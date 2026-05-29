@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  gold-server-v3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grandcom-gold-v3
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - MONGO_URL=mongodb://mongo:27017
+      - DB_NAME=gold_signals_v3
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_GOLD_CHANNEL_ID=${TELEGRAM_GOLD_CHANNEL_ID}
+      - TWELVE_DATA_API_KEY=${TWELVE_DATA_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SIGNAL_INTERVAL_MINUTES=2
+      - MIN_CONFIDENCE=60
+      - DEFAULT_ACCOUNT_BALANCE=10000
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+      - models_data:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mongo:
+    image: mongo:7.0
+    container_name: grandcom-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  models_data:

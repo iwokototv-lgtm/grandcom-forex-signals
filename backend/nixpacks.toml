@@ -5,4 +5,4 @@ nixPkgs = ["python311"]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8001}"
+cmd = "uvicorn gold_server_v3:app --host 0.0.0.0 --port ${PORT:-8002}"
