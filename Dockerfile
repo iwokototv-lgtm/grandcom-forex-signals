@@ -37,4 +37,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8002}/api/health || exit 1
 
 # Start command
-CMD uvicorn gold_server_v3:app --host 0.0.0.0 --port ${PORT:-8002} --workers 1 --log-level info
+CMD ["sh", "-c", "uvicorn gold_server_v3:app --host 0.0.0.0 --port ${PORT:-8002} --workers 1 --log-level info"]
