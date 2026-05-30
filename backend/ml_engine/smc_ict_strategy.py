@@ -1,6 +1,6 @@
 """
-SMC/ICT Institutional Strategy
-Order Blocks, Liquidity Voids, Fair Value Gaps, and ICT concepts
+SMC/ICT Institutional Strategy v3.1
+Enhanced Order Blocks, Liquidity Voids, Fair Value Gaps, and ICT concepts
 G-Component: SMC/Institutional Structure
 """
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class SMCICTStrategy:
     """
-    Smart Money Concepts / Inner Circle Trader (ICT) Strategy.
+    Smart Money Concepts / Inner Circle Trader (ICT) Strategy v3.1.
 
     Implements full institutional order flow analysis:
     - Order Blocks (OB): Last opposing candle before strong directional move
@@ -34,7 +34,7 @@ class SMCICTStrategy:
         self.fvg_min_size_pct = 0.0003   # 0.03% minimum FVG
         self.ote_fib_low = 0.618
         self.ote_fib_high = 0.786
-        self.version = "3.0.0"
+        self.version = "3.1.0"  # Updated version
 
     # ------------------------------------------------------------------
     # Main Analysis Entry Point
@@ -96,7 +96,7 @@ class SMCICTStrategy:
             # 10. Power of 3 phase
             result["power_of_3"] = self._detect_power_of_3(df)
 
-            # 11. Composite score & bias
+            # 11. Composite score & bias (ENHANCED)
             result["smc_score"] = self._calculate_smc_score(result)
             result["smc_bias"] = self._determine_smc_bias(result)
             result["signal_quality"] = self._assess_signal_quality(result)
@@ -176,7 +176,9 @@ class SMCICTStrategy:
             structure = "RANGING"
 
         bos = current_price > last_high or current_price < last_low
-        bos_type = "BULLISH" if current_price > last_high else ("BEARISH" if current_price < last_low else None)
+        bos_type = "BULLISH" if current_price > last_high else (
+            "BEARISH" if current_price < last_low else None
+        )
         choch = (structure == "BULLISH" and bos_type == "BEARISH") or (
             structure == "BEARISH" and bos_type == "BULLISH"
         )
@@ -551,20 +553,33 @@ class SMCICTStrategy:
         }
 
     # ------------------------------------------------------------------
-    # Scoring & Bias
+    # Scoring & Bias (ENHANCED v3.1)
     # ------------------------------------------------------------------
 
     def _calculate_smc_score(self, analysis: Dict[str, Any]) -> int:
-        """Composite SMC quality score (0–10)."""
+        """
+        Enhanced SMC quality score (0–10).
+        v3.1: Increased weighting for institutional-grade signals
+        """
         score = 0
 
-        # Order Blocks (0-2)
+        # Order Blocks (0-3) - ENHANCED
         obs = analysis.get("order_blocks", [])
-        score += min(len(obs), 2)
+        if len(obs) >= 3:
+            score += 3
+        elif len(obs) >= 2:
+            score += 2
+        elif len(obs) >= 1:
+            score += 1
 
-        # FVGs (0-2)
+        # FVGs (0-3) - ENHANCED
         fvgs = analysis.get("fair_value_gaps", [])
-        score += min(len(fvgs), 2)
+        if len(fvgs) >= 3:
+            score += 3
+        elif len(fvgs) >= 2:
+            score += 2
+        elif len(fvgs) >= 1:
+            score += 1
 
         # Liquidity Sweep (0-2)
         if analysis.get("liquidity_sweep", {}).get("detected"):
@@ -584,6 +599,10 @@ class SMCICTStrategy:
 
         # OTE (0-1)
         if analysis.get("ote_zones", {}).get("in_ote"):
+            score += 1
+
+        # Breaker Blocks (0-1) - NEW
+        if analysis.get("breaker_blocks"):
             score += 1
 
         return min(score, 10)
@@ -629,23 +648,27 @@ class SMCICTStrategy:
         elif ote.get("ote_bias") == "BEARISH":
             bear += 1
 
-        if bull > bear + 2:
+        if bull > bear:
             return "BULLISH"
-        elif bear > bull + 2:
+        elif bear > bull:
             return "BEARISH"
-        return "NEUTRAL"
+        else:
+            return "NEUTRAL"
 
     def _assess_signal_quality(self, analysis: Dict[str, Any]) -> str:
-        """Classify signal quality based on SMC score."""
+        """Assess overall signal quality."""
         score = analysis.get("smc_score", 0)
+
         if score >= 8:
             return "EXCELLENT"
         elif score >= 6:
             return "GOOD"
         elif score >= 4:
             return "FAIR"
-        return "POOR"
+        else:
+            return "POOR"
 
 
 # Global instance
 smc_ict_strategy = SMCICTStrategy()
+

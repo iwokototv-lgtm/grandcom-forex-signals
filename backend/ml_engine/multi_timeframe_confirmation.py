@@ -64,7 +64,7 @@ class MultiTimeframeConfirmation:
     def __init__(self):
         self.timeframes = ["1h", "4h", "1day", "1week"]
         self.weights = TIMEFRAME_WEIGHTS
-        self.version = "3.0.0"
+        self.version = "3.0.1"  # Updated version
         self._cache: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -126,7 +126,13 @@ class MultiTimeframeConfirmation:
 
         except Exception as exc:
             logger.error(f"MTF Confirmation error [{symbol}]: {exc}", exc_info=True)
-            return {"symbol": symbol, "error": str(exc), "valid": False}
+            return {
+                "symbol": symbol,
+                "error": str(exc),
+                "valid": False,
+                "alignment_score": 0.0,
+                "dominant_direction": "NEUTRAL",
+            }
 
     def analyze_sync(self, dfs: Dict[str, pd.DataFrame], symbol: str) -> Dict[str, Any]:
         """
@@ -188,10 +194,17 @@ class MultiTimeframeConfirmation:
             df = pd.DataFrame(data["values"])
             df["datetime"] = pd.to_datetime(df["datetime"])
             df = df.sort_values("datetime").reset_index(drop=True)
+            
+            # FIX: Ensure proper data type conversion before fillna
             for col in ["open", "high", "low", "close"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            
             df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
-            return df
+            
+            # Remove any rows with NaN in OHLC
+            df = df.dropna(subset=["open", "high", "low", "close"])
+            
+            return df if len(df) > 0 else None
 
         except Exception as exc:
             logger.error(f"Fetch error [{symbol}/{timeframe}]: {exc}")
@@ -456,3 +469,4 @@ class MultiTimeframeConfirmation:
 
 # Global instance
 mtf_confirmation = MultiTimeframeConfirmation()
+
