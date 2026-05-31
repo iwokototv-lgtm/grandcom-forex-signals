@@ -2926,6 +2926,14 @@ try:
 except Exception as _sm_err:
     logger.warning(f"⚠️ Signal Management API not loaded: {_sm_err}")
 
+# Hybrid Manager System API (enterprise multi-tier approval workflow)
+try:
+    from hybrid_manager_api import router as hybrid_manager_router
+    app.include_router(hybrid_manager_router)
+    logger.info("✅ Hybrid Manager System API registered at /api/hybrid")
+except Exception as _hybrid_err:
+    logger.warning(f"⚠️ Hybrid Manager System API not loaded: {_hybrid_err}")
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"])
 
