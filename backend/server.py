@@ -2909,6 +2909,15 @@ async def auto_generate_signals():
 
 # ============ APP SETUP ============
 app.include_router(api_router)
+
+# System Manager API (role-based access control)
+try:
+    from manager_api import router as manager_router
+    app.include_router(manager_router)
+    logger.info("✅ System Manager API registered at /api/manager")
+except Exception as _mgr_err:
+    logger.warning(f"⚠️ System Manager API not loaded: {_mgr_err}")
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"])
 
