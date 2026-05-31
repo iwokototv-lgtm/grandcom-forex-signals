@@ -14,6 +14,17 @@ Endpoints:
   POST /api/manager/signals/adjust           — Adjust entry / TP levels / SL price
   GET  /api/manager/signals/history/all      — Approval history with summary stats
   GET  /api/manager/signals/stats/approval   — Per-manager and per-pair approval stats
+
+Geometry Rating:
+  Every signal returned by GET /pending and GET /{id} now includes a
+  ``geometry_rating`` block computed by ml_engine.geometry_rating.GeometryRating.
+  The block contains:
+    - overall_score (1-10): average of the four component scores
+    - recommendation: APPROVE (>=7.0) | ADJUST (5.0-6.9) | REJECT (<5.0)
+    - summary: one-line manager-facing explanation
+    - components.entry / stop_loss / risk_reward / take_profits:
+        score, label, explanation, guidelines
+    - adjustment_guidelines: consolidated list of all required adjustments
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
 
 from signal_manager import signal_manager
+from ml_engine.geometry_rating import geometry_rater
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +132,90 @@ def _handle_result(result: Dict[str, Any], not_found_on_missing: bool = True) ->
     if not_found_on_missing and "not found" in error.lower():
         raise HTTPException(status_code=404, detail=error)
     raise HTTPException(status_code=400, detail=error)
+
+
+def _attach_geometry_rating(signal: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute and attach a geometry rating to a serialised signal dict.
+
+    Reads the standard signal fields (entry_price, sl_price, tp_levels,
+    type, confidence) and any structural context stored on the signal
+    document.  Falls back gracefully when optional fields are absent.
+
+    The rating is added under the key ``geometry_rating``.
+    """
+    try:
+        entry_price = float(signal.get("entry_price", 0) or 0)
+        sl_price    = float(signal.get("sl_price",    0) or 0)
+        tp_levels   = [float(t) for t in (signal.get("tp_levels") or [])]
+        signal_type = str(signal.get("type", "BUY")).upper()
+
+        # Current price — fall back to entry if not stored
+        current_price = float(signal.get("current_price", entry_price) or entry_price)
+
+        # ATR — stored by the TP/SL engine; fall back to 0.5% of entry
+        atr = float(signal.get("atr", 0) or 0)
+        if atr <= 0:
+            atr = entry_price * 0.005
+
+        # Structural levels — stored by the TP/SL engine or SMC analysis
+        market_structure = signal.get("market_structure") or {}
+        nearest_support     = float(
+            signal.get("nearest_support")
+            or market_structure.get("support")
+            or (entry_price - atr * 1.5 if signal_type == "BUY" else entry_price - atr * 3.0)
+        )
+        nearest_resistance  = float(
+            signal.get("nearest_resistance")
+            or market_structure.get("resistance")
+            or (entry_price + atr * 3.0 if signal_type == "BUY" else entry_price + atr * 1.5)
+        )
+
+        # Optional swing points
+        swing_high = signal.get("swing_high") or market_structure.get("last_swing_high")
+        swing_low  = signal.get("swing_low")  or market_structure.get("last_swing_low")
+        swing_high = float(swing_high) if swing_high is not None else None
+        swing_low  = float(swing_low)  if swing_low  is not None else None
+
+        # Skip rating if core price data is missing or invalid
+        if entry_price <= 0 or sl_price <= 0 or not tp_levels:
+            signal["geometry_rating"] = {
+                "overall_score":  None,
+                "recommendation": "INSUFFICIENT_DATA",
+                "summary": (
+                    "Geometry rating unavailable — signal is missing entry_price, "
+                    "sl_price, or tp_levels."
+                ),
+                "components": {},
+                "adjustment_guidelines": [],
+            }
+            return signal
+
+        rating = geometry_rater.rate_signal(
+            signal_type=signal_type,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            tp_levels=tp_levels,
+            current_price=current_price,
+            atr=atr,
+            nearest_support=nearest_support,
+            nearest_resistance=nearest_resistance,
+            swing_high=swing_high,
+            swing_low=swing_low,
+        )
+        signal["geometry_rating"] = rating.to_dict()
+
+    except Exception as exc:
+        logger.warning(f"Geometry rating failed for signal {signal.get('id')}: {exc}")
+        signal["geometry_rating"] = {
+            "overall_score":  None,
+            "recommendation": "ERROR",
+            "summary": f"Geometry rating computation error: {exc}",
+            "components": {},
+            "adjustment_guidelines": [],
+        }
+
+    return signal
 
 
 # ─────────────────────────────────────────────────────────────
@@ -215,6 +311,11 @@ async def get_pending_signals(
     Managers use this endpoint to build their review queue.  Results are
     sorted newest-first.  Optional filters allow narrowing by pair or
     minimum confidence score.
+
+    Each signal in the response includes a ``geometry_rating`` block with
+    an objective 1–10 score for entry placement, stop loss placement,
+    risk/reward ratio, and TP alignment, plus an overall score and
+    APPROVE / ADJUST / REJECT recommendation.
     """
     try:
         result = await signal_manager.get_pending_signals(
@@ -223,7 +324,12 @@ async def get_pending_signals(
             pair_filter=pair,
             min_confidence=min_confidence,
         )
-        return _handle_result(result)
+        handled = _handle_result(result)
+        # Attach geometry rating to every signal in the list
+        handled["signals"] = [
+            _attach_geometry_rating(s) for s in handled.get("signals", [])
+        ]
+        return handled
     except PermissionError as exc:
         _handle_permission_error(exc)
 
@@ -306,6 +412,8 @@ async def get_signal_details(
     Return the complete signal document together with:
     - ``adjustments``: ordered list of every price-level change made by managers
     - ``review_log``:  ordered list of every review action (approve/reject/adjust)
+    - ``signal.geometry_rating``: full geometry rating breakdown (1–10 per component,
+      overall score, APPROVE/ADJUST/REJECT recommendation, and adjustment guidelines)
 
     This endpoint supports any signal status, not just pending ones.
     """
@@ -314,7 +422,11 @@ async def get_signal_details(
             requesting_manager=current_manager,
             signal_id=signal_id,
         )
-        return _handle_result(result)
+        handled = _handle_result(result)
+        # Attach geometry rating to the full signal document
+        if "signal" in handled:
+            handled["signal"] = _attach_geometry_rating(handled["signal"])
+        return handled
     except PermissionError as exc:
         _handle_permission_error(exc)
 
