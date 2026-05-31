@@ -5,7 +5,8 @@ Grandcom Gold Signals System v3.0.2
 Provides:
   - ManagerRole enum  (ADMIN, MANAGER, VIEWER)
   - SystemManager class with complete CRUD, monitoring, alerting,
-    backup control, audit trail, and dashboard capabilities
+    backup control, audit trail, dashboard capabilities, and
+    signal management integration
   - Permission matrix enforced on every operation
 """
 
@@ -54,6 +55,8 @@ ROLE_PERMISSIONS: Dict[ManagerRole, set] = {
         "audit:view",
         # Dashboard
         "dashboard:view",
+        # Signal management (approve / reject / adjust)
+        "signal:approve", "signal:reject", "signal:adjust",
     },
     ManagerRole.MANAGER: {
         # No manager CRUD (cannot add/remove/update other managers)
@@ -70,6 +73,8 @@ ROLE_PERMISSIONS: Dict[ManagerRole, set] = {
         "audit:view",
         # Dashboard
         "dashboard:view",
+        # Signal management (approve / reject / adjust)
+        "signal:approve", "signal:reject", "signal:adjust",
     },
     ManagerRole.VIEWER: {
         # Read-only
@@ -79,6 +84,7 @@ ROLE_PERMISSIONS: Dict[ManagerRole, set] = {
         "backup:history",
         "audit:view",
         "dashboard:view",
+        # Viewers can only read signals, not mutate them
     },
 }
 
@@ -1044,6 +1050,188 @@ class SystemManager:
         m.pop("_id", None)
         m.pop("password_hash", None)
         return m
+
+    # ═══════════════════════════════════════════════════════════
+    # SIGNAL MANAGEMENT INTEGRATION
+    # ═══════════════════════════════════════════════════════════
+
+    async def get_pending_signals(
+        self,
+        requesting_manager: Dict[str, Any],
+        pair: Optional[str] = None,
+        limit: int = 50,
+        min_confidence: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.get_pending_signals.
+        Requires: system:signals (all roles).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            return await _sm.get_pending_signals(
+                requesting_manager,
+                pair=pair,
+                limit=limit,
+                min_confidence=min_confidence,
+            )
+        except Exception as exc:
+            logger.error(f"get_pending_signals error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def get_signal_details(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.get_signal_details.
+        Requires: system:signals (all roles).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            return await _sm.get_signal_details(requesting_manager, signal_id)
+        except Exception as exc:
+            logger.error(f"get_signal_details error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def approve_signal(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.approve_signal.
+        Requires: signal:approve (ADMIN, MANAGER).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            result = await _sm.approve_signal(requesting_manager, signal_id, notes)
+            if result.get("success"):
+                await self._audit(
+                    "signal:approve",
+                    requesting_manager["manager_id"],
+                    requesting_manager["role"],
+                    {"signal_id": signal_id, "notes": notes},
+                )
+            return result
+        except Exception as exc:
+            logger.error(f"approve_signal error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def reject_signal(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.reject_signal.
+        Requires: signal:reject (ADMIN, MANAGER).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            result = await _sm.reject_signal(requesting_manager, signal_id, reason)
+            if result.get("success"):
+                await self._audit(
+                    "signal:reject",
+                    requesting_manager["manager_id"],
+                    requesting_manager["role"],
+                    {"signal_id": signal_id, "reason": reason},
+                )
+            return result
+        except Exception as exc:
+            logger.error(f"reject_signal error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def adjust_signal(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+        entry_price: Optional[float] = None,
+        tp_levels: Optional[List[float]] = None,
+        sl_price: Optional[float] = None,
+        adjustment_notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.adjust_signal.
+        Requires: signal:adjust (ADMIN, MANAGER).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            result = await _sm.adjust_signal(
+                requesting_manager,
+                signal_id=signal_id,
+                entry_price=entry_price,
+                tp_levels=tp_levels,
+                sl_price=sl_price,
+                adjustment_notes=adjustment_notes,
+            )
+            if result.get("success"):
+                await self._audit(
+                    "signal:adjust",
+                    requesting_manager["manager_id"],
+                    requesting_manager["role"],
+                    {
+                        "signal_id":        signal_id,
+                        "entry_price":      entry_price,
+                        "tp_levels":        tp_levels,
+                        "sl_price":         sl_price,
+                        "adjustment_notes": adjustment_notes,
+                    },
+                )
+            return result
+        except Exception as exc:
+            logger.error(f"adjust_signal error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def get_signal_history(
+        self,
+        requesting_manager: Dict[str, Any],
+        status: Optional[str] = None,
+        pair: Optional[str] = None,
+        reviewed_by: Optional[str] = None,
+        hours: int = 168,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.get_signal_history.
+        Requires: system:signals (all roles).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            return await _sm.get_signal_history(
+                requesting_manager,
+                status=status,
+                pair=pair,
+                reviewed_by=reviewed_by,
+                hours=hours,
+                limit=limit,
+            )
+        except Exception as exc:
+            logger.error(f"get_signal_history error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+    async def get_approval_stats(
+        self,
+        requesting_manager: Dict[str, Any],
+        hours: int = 168,
+        manager_id_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Proxy to SignalManager.get_approval_stats.
+        Requires: system:signals (all roles).
+        """
+        try:
+            from ml_engine.signal_manager import signal_manager as _sm
+            return await _sm.get_approval_stats(
+                requesting_manager,
+                hours=hours,
+                manager_id_filter=manager_id_filter,
+            )
+        except Exception as exc:
+            logger.error(f"get_approval_stats error: {exc}")
+            return {"success": False, "error": str(exc)}
 
 
 # ─────────────────────────────────────────────────────────────

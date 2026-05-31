@@ -2918,6 +2918,14 @@ try:
 except Exception as _mgr_err:
     logger.warning(f"⚠️ System Manager API not loaded: {_mgr_err}")
 
+# Signal Approval API (manager approval workflow)
+try:
+    from signal_approval_api import router as signal_approval_router
+    app.include_router(signal_approval_router)
+    logger.info("✅ Signal Approval API registered at /api/signals")
+except Exception as _sig_err:
+    logger.warning(f"⚠️ Signal Approval API not loaded: {_sig_err}")
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"])
 
