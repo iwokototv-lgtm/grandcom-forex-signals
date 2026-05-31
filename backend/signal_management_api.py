@@ -30,8 +30,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
 
 from signal_manager import signal_manager
+from ml_engine.geometry_rating import GeometryRating
 
 logger = logging.getLogger(__name__)
+
+# Module-level geometry rater (stateless — safe to share across requests)
+_geometry_rater = GeometryRating()
 
 # ─────────────────────────────────────────────────────────────
 # Config
@@ -107,6 +111,50 @@ async def get_current_manager(
 
 def _handle_permission_error(exc: PermissionError) -> None:
     raise HTTPException(status_code=403, detail=str(exc))
+
+
+def _compute_geometry_rating(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Compute a geometry rating for a signal document.
+
+    Extracts the required price fields from the signal dict and calls the
+    GeometryRating engine.  Returns ``None`` if the signal is missing
+    required fields or if rating fails for any reason.
+
+    Args:
+        signal: Serialised signal document (as returned by _serialize).
+
+    Returns:
+        Geometry rating dict or None.
+    """
+    try:
+        signal_type = signal.get("type") or signal.get("signal_type")
+        entry_price = signal.get("entry_price")
+        sl_price    = signal.get("sl_price")
+        tp_levels   = signal.get("tp_levels")
+
+        if not all([signal_type, entry_price, sl_price, tp_levels]):
+            return None
+        if not isinstance(tp_levels, list) or len(tp_levels) == 0:
+            return None
+
+        return _geometry_rater.rate_signal(
+            signal_type=signal_type,
+            entry_price=float(entry_price),
+            sl_price=float(sl_price),
+            tp_levels=[float(t) for t in tp_levels],
+            # Optional context — use if present in the signal document
+            atr=float(signal["atr"]) if signal.get("atr") else None,
+            support_level=(
+                float(signal["support_level"]) if signal.get("support_level") else None
+            ),
+            resistance_level=(
+                float(signal["resistance_level"]) if signal.get("resistance_level") else None
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Geometry rating failed for signal %s: %s", signal.get("id"), exc)
+        return None
 
 
 def _handle_result(result: Dict[str, Any], not_found_on_missing: bool = True) -> Dict[str, Any]:
@@ -223,7 +271,11 @@ async def get_pending_signals(
             pair_filter=pair,
             min_confidence=min_confidence,
         )
-        return _handle_result(result)
+        result = _handle_result(result)
+        # Attach geometry ratings to each signal in the list
+        for sig in result.get("signals", []):
+            sig["geometry_rating"] = _compute_geometry_rating(sig)
+        return result
     except PermissionError as exc:
         _handle_permission_error(exc)
 
@@ -260,7 +312,11 @@ async def get_signal_history(
             pair_filter=pair,
             manager_id_filter=manager_id,
         )
-        return _handle_result(result)
+        result = _handle_result(result)
+        # Attach geometry ratings to each signal in the history list
+        for sig in result.get("history", []):
+            sig["geometry_rating"] = _compute_geometry_rating(sig)
+        return result
     except PermissionError as exc:
         _handle_permission_error(exc)
 
@@ -314,7 +370,11 @@ async def get_signal_details(
             requesting_manager=current_manager,
             signal_id=signal_id,
         )
-        return _handle_result(result)
+        result = _handle_result(result)
+        # Attach geometry rating to the signal detail view
+        if result.get("signal"):
+            result["signal"]["geometry_rating"] = _compute_geometry_rating(result["signal"])
+        return result
     except PermissionError as exc:
         _handle_permission_error(exc)
 
