@@ -88,7 +88,7 @@ class TestOHLCValidation:
         """Test high < low"""
         df = pd.DataFrame({
             'open': [100.0, 101.0],
-            'high': [99.0, 103.0],  # First high < low
+            'high': [98.0, 103.0],  # First high (98) < low (99)
             'low': [99.0, 100.0],
             'close': [101.0, 102.0],
         })
