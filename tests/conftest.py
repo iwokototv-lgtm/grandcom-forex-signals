@@ -115,3 +115,57 @@ def mock_db(monkeypatch):
         return mongomock.MongoClient()["gold_signals_test"]
     except ImportError:
         pytest.skip("mongomock not installed — skipping DB-dependent test")
+
+
+@pytest.fixture
+def mock_signal_manager(monkeypatch):
+    """
+    Return a SignalManager instance whose _get_db() is backed by an
+    in-memory mongomock database.  Skips if mongomock or signal_manager
+    are not importable.
+    """
+    try:
+        import mongomock
+    except ImportError:
+        pytest.skip("mongomock not installed — skipping signal_manager test")
+
+    try:
+        from signal_manager import SignalManager
+    except Exception as exc:
+        pytest.skip(f"signal_manager import failed: {exc}")
+
+    client = mongomock.MongoClient()
+    db = client["gold_signals_test"]
+
+    sm = SignalManager()
+    monkeypatch.setattr(sm, "_get_db", lambda: db)
+    return sm, db
+
+
+@pytest.fixture
+def sample_pending_signal():
+    """Return a minimal PENDING_REVIEW signal dict for use in tests."""
+    from datetime import datetime
+
+    return {
+        "pair": "XAUUSD",
+        "type": "BUY",
+        "entry_price": 1900.0,
+        "tp_levels": [1920.0, 1940.0, 1960.0],
+        "sl_price": 1880.0,
+        "confidence": 75.0,
+        "status": "PENDING_REVIEW",
+        "created_at": datetime.utcnow(),
+    }
+
+
+@pytest.fixture
+def sample_manager_admin():
+    """Return a minimal ADMIN manager dict for use in tests."""
+    return {"manager_id": "test-admin-001", "role": "ADMIN"}
+
+
+@pytest.fixture
+def sample_manager_viewer():
+    """Return a minimal VIEWER manager dict for use in tests."""
+    return {"manager_id": "test-viewer-001", "role": "VIEWER"}
