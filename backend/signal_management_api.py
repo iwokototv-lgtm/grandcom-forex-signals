@@ -8,12 +8,21 @@ with role ADMIN or MANAGER.
 
 Endpoints:
   GET  /api/manager/signals/pending          — List signals awaiting review
-  GET  /api/manager/signals/{id}             — Full signal details + adjustment history
+  GET  /api/manager/signals/{id}             — Full signal details + geometry rating
   POST /api/manager/signals/approve          — Approve a pending signal
   POST /api/manager/signals/reject           — Reject a pending signal (reason required)
   POST /api/manager/signals/adjust           — Adjust entry / TP levels / SL price
   GET  /api/manager/signals/history/all      — Approval history with summary stats
   GET  /api/manager/signals/stats/approval   — Per-manager and per-pair approval stats
+  POST /api/manager/signals/rate             — Compute geometry rating for any signal
+
+Geometry Rating
+───────────────
+Every signal detail response now includes a ``geometry_rating`` block with:
+  - overall_score (1–10)
+  - recommendation: APPROVE (≥7.0) | ADJUST (≥5.5) | REJECT (<5.5)
+  - breakdown: entry, stop_loss, risk_reward, take_profits component scores
+  - adjustment guidelines for each component
 """
 
 from __future__ import annotations
@@ -28,8 +37,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
-
 from signal_manager import signal_manager
+from ml_engine.geometry_rating import GeometryRating, geometry_rater
+
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +201,104 @@ class AdjustSignalRequest(BaseModel):
         return v
 
 
+class RateSignalRequest(BaseModel):
+    """Request body for the standalone geometry rating endpoint."""
+    signal_type:  str   = Field(..., description="BUY or SELL")
+    entry_price:  float = Field(..., gt=0, description="Entry price")
+    sl_price:     float = Field(..., gt=0, description="Stop-loss price")
+    tp_levels:    List[float] = Field(
+        ...,
+        min_length=1,
+        max_length=5,
+        description="Take-profit levels (1–5 values, all > 0)",
+    )
+    atr:          float = Field(..., gt=0, description="Current ATR value")
+    support:      Optional[float] = Field(
+        default=None, gt=0,
+        description="Nearest support level (improves entry/SL scoring accuracy)",
+    )
+    resistance:   Optional[float] = Field(
+        default=None, gt=0,
+        description="Nearest resistance level (improves entry/SL scoring accuracy)",
+    )
+    extra_levels: Optional[List[float]] = Field(
+        default=None,
+        description="Additional structure levels for TP alignment scoring",
+    )
+    pair:         str   = Field(default="XAUUSD", description="Trading pair symbol")
+    signal_id:    Optional[str] = Field(
+        default=None,
+        description="Optional signal ID for traceability",
+    )
+
+    @field_validator("tp_levels")
+    @classmethod
+    def tp_levels_positive(cls, v: List[float]) -> List[float]:
+        for i, tp in enumerate(v):
+            if tp <= 0:
+                raise ValueError(f"tp_levels[{i}] must be > 0, got {tp}")
+        return v
+
+
+# ─────────────────────────────────────────────────────────────
+# Geometry rating helper
+# ─────────────────────────────────────────────────────────────
+
+def _compute_geometry_rating(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Compute a geometry rating for a signal document fetched from MongoDB.
+
+    Extracts the required fields from the signal dict and calls the
+    module-level ``geometry_rater`` singleton.  Returns ``None`` if the
+    signal is missing required price fields or if rating fails.
+
+    The returned dict is the JSON-serialisable form of
+    ``GeometryRatingResult.to_dict()``.
+    """
+    try:
+        entry_price = signal.get("entry_price")
+        sl_price    = signal.get("sl_price")
+        tp_levels   = signal.get("tp_levels")
+        signal_type = signal.get("type", "BUY")
+        pair        = signal.get("pair", "XAUUSD")
+        signal_id   = signal.get("id") or signal.get("signal_id")
+
+        # All three price fields are mandatory
+        if entry_price is None or sl_price is None or not tp_levels:
+            return None
+
+        # ATR: use stored value if available, otherwise estimate from SL distance
+        atr = signal.get("atr")
+        if not atr or atr <= 0:
+            atr = abs(entry_price - sl_price) * 1.5  # rough proxy
+
+        # Optional structure levels stored on the signal
+        support    = signal.get("support_level") or signal.get("support")
+        resistance = signal.get("resistance_level") or signal.get("resistance")
+
+        result = geometry_rater.rate(
+            signal_type  = signal_type,
+            entry_price  = float(entry_price),
+            sl_price     = float(sl_price),
+            tp_levels    = [float(t) for t in tp_levels],
+            atr          = float(atr),
+            support      = float(support) if support else None,
+            resistance   = float(resistance) if resistance else None,
+            pair         = pair,
+            signal_id    = str(signal_id) if signal_id else None,
+        )
+        return result.to_dict()
+
+    except Exception as exc:
+        logger.warning(f"Geometry rating failed for signal: {exc}")
+        return None
+
+
 # ─────────────────────────────────────────────────────────────
 # ENDPOINTS
 # ─────────────────────────────────────────────────────────────
+
+
 
 @router.get(
     "/pending",
@@ -293,10 +398,11 @@ async def get_approval_stats(
         _handle_permission_error(exc)
 
 
+
 @router.get(
     "/{signal_id}",
-    summary="Get full signal details including adjustment history",
-    response_description="Signal document with adjustments and review log",
+    summary="Get full signal details including geometry rating",
+    response_description="Signal document with adjustments, review log, and geometry rating",
 )
 async def get_signal_details(
     signal_id:       str,
@@ -304,8 +410,18 @@ async def get_signal_details(
 ):
     """
     Return the complete signal document together with:
-    - ``adjustments``: ordered list of every price-level change made by managers
-    - ``review_log``:  ordered list of every review action (approve/reject/adjust)
+    - ``adjustments``:     ordered list of every price-level change made by managers
+    - ``review_log``:      ordered list of every review action (approve/reject/adjust)
+    - ``geometry_rating``: objective geometry score (1–10) with per-component breakdown
+                           and an approval recommendation (APPROVE / ADJUST / REJECT)
+
+    The geometry rating evaluates four components:
+    - **Entry price** — placement relative to key support/resistance
+    - **Stop loss**   — placement beyond the structural invalidation level
+    - **Risk/Reward** — quality of the R:R ratio across all TP levels
+    - **Take profits** — alignment with market structure targets
+
+    Overall score ≥ 7.0 → APPROVE, ≥ 5.5 → ADJUST, < 5.5 → REJECT.
 
     This endpoint supports any signal status, not just pending ones.
     """
@@ -314,9 +430,24 @@ async def get_signal_details(
             requesting_manager=current_manager,
             signal_id=signal_id,
         )
-        return _handle_result(result)
+        result = _handle_result(result)
+
+        # Attach geometry rating to the signal detail response
+        signal_doc = result.get("signal", {})
+        geometry_rating = _compute_geometry_rating(signal_doc)
+        if geometry_rating is not None:
+            result["geometry_rating"] = geometry_rating
+        else:
+            result["geometry_rating"] = {
+                "error": "Geometry rating unavailable — signal is missing required price fields.",
+                "required_fields": ["entry_price", "sl_price", "tp_levels"],
+            }
+
+        return result
     except PermissionError as exc:
         _handle_permission_error(exc)
+
+
 
 
 @router.post(
@@ -408,3 +539,57 @@ async def adjust_signal(
         return _handle_result(result)
     except PermissionError as exc:
         _handle_permission_error(exc)
+
+
+@router.post(
+    "/rate",
+    summary="Compute geometry rating for a signal",
+    response_description="Geometry rating with per-component scores and recommendation",
+)
+async def rate_signal_geometry(
+    body:            RateSignalRequest,
+    current_manager: Dict = Depends(get_current_manager),
+):
+    """
+    Compute an objective geometry rating for any set of signal price levels
+    without requiring the signal to exist in the database.
+
+    This endpoint is useful for:
+    - Pre-flight checks before submitting a new signal
+    - Evaluating adjusted price levels before approving
+    - Training managers on what constitutes good geometry
+
+    The response includes:
+    - ``overall_score`` (1–10): weighted average of all four components
+    - ``recommendation``: APPROVE (≥7.0) | ADJUST (≥5.5) | REJECT (<5.5)
+    - ``summary``: one-line manager-friendly summary
+    - ``breakdown``: per-component scores with explanations and guidelines
+
+    Component weights:
+    - Risk/Reward  30 %
+    - Stop Loss    30 %
+    - Entry Price  25 %
+    - Take Profits 15 %
+    """
+    try:
+        result = geometry_rater.rate(
+            signal_type  = body.signal_type,
+            entry_price  = body.entry_price,
+            sl_price     = body.sl_price,
+            tp_levels    = body.tp_levels,
+            atr          = body.atr,
+            support      = body.support,
+            resistance   = body.resistance,
+            pair         = body.pair,
+            signal_id    = body.signal_id,
+            extra_levels = body.extra_levels,
+        )
+        return {
+            "success": True,
+            "geometry_rating": result.to_dict(),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Geometry rating error: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Geometry rating calculation failed")
