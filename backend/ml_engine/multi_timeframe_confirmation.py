@@ -64,7 +64,7 @@ class MultiTimeframeConfirmation:
     def __init__(self):
         self.timeframes = ["1h", "4h", "1day", "1week"]
         self.weights = TIMEFRAME_WEIGHTS
-        self.version = "3.0.1"  # Updated version
+        self.version = "3.0.2"  # Updated version with volume fix
         self._cache: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -195,11 +195,16 @@ class MultiTimeframeConfirmation:
             df["datetime"] = pd.to_datetime(df["datetime"])
             df = df.sort_values("datetime").reset_index(drop=True)
             
-            # FIX: Ensure proper data type conversion before fillna
+            # FIX v3.0.2: Ensure proper data type conversion before fillna
+            # Convert OHLC columns to numeric
             for col in ["open", "high", "low", "close"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
             
-            df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+            # FIX: Handle volume properly - check if column exists first
+            if "volume" in df.columns:
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+            else:
+                df["volume"] = 0
             
             # Remove any rows with NaN in OHLC
             df = df.dropna(subset=["open", "high", "low", "close"])
