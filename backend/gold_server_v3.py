@@ -612,6 +612,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# System Manager API (role-based access control)
+try:
+    from manager_api import router as manager_router
+    app.include_router(manager_router)
+    logger.info("✅ System Manager API registered at /api/manager")
+except Exception as _mgr_err:
+    logger.warning(f"⚠️ System Manager API not loaded: {_mgr_err}")
+
+# Signal Approval API (manager approval workflow)
+try:
+    from signal_approval_api import router as signal_approval_router
+    app.include_router(signal_approval_router)
+    logger.info("✅ Signal Approval API registered at /api/signals")
+except Exception as _sig_err:
+    logger.warning(f"⚠️ Signal Approval API not loaded: {_sig_err}")
+
 
 # ---------------------------------------------------------------------------
 # Endpoint 1: Health Check
