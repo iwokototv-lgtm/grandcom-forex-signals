@@ -2926,6 +2926,14 @@ try:
 except Exception as _sm_err:
     logger.warning(f"⚠️ Signal Management API not loaded: {_sm_err}")
 
+# Trade Geometry Rating API (4-component signal quality scoring)
+try:
+    from geometry_rating_api import router as geometry_router
+    app.include_router(geometry_router)
+    logger.info("✅ Trade Geometry Rating API registered at /api/manager/geometry")
+except Exception as _geo_err:
+    logger.warning(f"⚠️ Trade Geometry Rating API not loaded: {_geo_err}")
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"])
 
