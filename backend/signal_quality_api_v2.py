@@ -34,11 +34,29 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 
-from ml_engine.signal_quality_v2 import SignalQualityV2, signal_quality_v2
-from ml_engine.hybrid_indicators import HybridIndicators, hybrid_indicators
-from ml_engine.session_quality import SessionQualityDetector, session_quality_detector
-from ml_engine.volatility_metrics import VolatilityMetrics, volatility_metrics
-from ml_engine.economic_calendar import EconomicCalendar, economic_calendar
+try:
+    from ml_engine.signal_quality_v2 import SignalQualityV2, signal_quality_v2
+    from ml_engine.hybrid_indicators import HybridIndicators, hybrid_indicators
+    from ml_engine.session_quality import SessionQualityDetector, session_quality_detector
+    from ml_engine.volatility_metrics import VolatilityMetrics, volatility_metrics
+    from ml_engine.economic_calendar import EconomicCalendar, economic_calendar
+    _PHASE2_AVAILABLE = True
+except Exception as _phase2_err:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Signal Quality API V2: Phase 2 modules unavailable — %s", _phase2_err
+    )
+    SignalQualityV2 = None          # type: ignore[assignment,misc]
+    signal_quality_v2 = None        # type: ignore[assignment]
+    HybridIndicators = None         # type: ignore[assignment,misc]
+    hybrid_indicators = None        # type: ignore[assignment]
+    SessionQualityDetector = None   # type: ignore[assignment,misc]
+    session_quality_detector = None # type: ignore[assignment]
+    VolatilityMetrics = None        # type: ignore[assignment,misc]
+    volatility_metrics = None       # type: ignore[assignment]
+    EconomicCalendar = None         # type: ignore[assignment,misc]
+    economic_calendar = None        # type: ignore[assignment]
+    _PHASE2_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
