@@ -31,6 +31,12 @@ from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
 from .geometry_rating import GeometryRating, geometry_rater
 
+# ── Phase 2: Signal Quality V2 ────────────────────────────────────────────
+from .signal_quality_v2 import SignalQualityV2, signal_quality_v2
+from .hybrid_indicators import HybridIndicators, hybrid_indicators
+from .session_quality import SessionQualityDetector, session_quality_detector
+from .volatility_metrics import VolatilityMetrics, volatility_metrics
+
 __all__ = [
     # Legacy v2.0
     'FeatureEngineer',
@@ -83,4 +89,13 @@ __all__ = [
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',
+    # Phase 2: Signal Quality V2
+    'SignalQualityV2',
+    'signal_quality_v2',
+    'HybridIndicators',
+    'hybrid_indicators',
+    'SessionQualityDetector',
+    'session_quality_detector',
+    'VolatilityMetrics',
+    'volatility_metrics',
 ]

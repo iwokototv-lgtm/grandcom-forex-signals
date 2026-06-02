@@ -2926,6 +2926,14 @@ try:
 except Exception as _sm_err:
     logger.warning(f"⚠️ Signal Management API not loaded: {_sm_err}")
 
+# Signal Quality API V2 (Phase 2 enhancement)
+try:
+    from signal_quality_api_v2 import router as signal_quality_v2_router
+    app.include_router(signal_quality_v2_router)
+    logger.info("✅ Signal Quality API V2 registered at /api/signals")
+except Exception as _sqv2_err:
+    logger.warning(f"⚠️ Signal Quality API V2 not loaded: {_sqv2_err}")
+
 app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"],
     allow_methods=["*"], allow_headers=["*"])
 
