@@ -11,6 +11,15 @@ over the signal lifecycle:
   - Full audit trail of every decision
   - Approval statistics per manager
 
+Signal Quality Enhancements (v3.0.2):
+  - Integrated SignalQualityValidator for comprehensive pre-approval checks
+  - Dynamic confidence scoring (replaces static 75% fixed value)
+  - Signal expiry field (prevents indefinitely valid signals)
+  - News filter flags (JOLTS, Beige Book, NFP awareness)
+  - Session quality assessment (flags post-NY close dead zone)
+  - MTF alignment validation with confidence penalty on misalignment
+  - Hybrid enhancement indicator scores via HybridEnhancementSuite
+
 Collection layout (MongoDB):
   signals              — existing signal documents (status field extended)
   signal_review_log    — immutable audit record for every review action
@@ -34,6 +43,27 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
+
+# ── Signal Quality Enhancement imports (graceful fallback if unavailable) ──
+try:
+    from ml_engine.signal_quality_validator import (
+        SignalQualityValidator,
+        signal_quality_validator,
+    )
+    _QUALITY_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _QUALITY_VALIDATOR_AVAILABLE = False
+    logger.warning("SignalQualityValidator not available — quality checks disabled.")
+
+try:
+    from ml_engine.hybrid_enhancement_indicators import (
+        HybridEnhancementSuite,
+        hybrid_enhancement_suite,
+    )
+    _HYBRID_SUITE_AVAILABLE = True
+except ImportError:
+    _HYBRID_SUITE_AVAILABLE = False
+    logger.warning("HybridEnhancementSuite not available — hybrid scores disabled.")
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME   = os.environ.get("DB_NAME",   "gold_signals_v3")
@@ -179,6 +209,80 @@ class SignalManager:
             self._db = self._client[DB_NAME]
         return self._db
 
+    # ── Signal Quality Enrichment ─────────────────────────────
+
+    def _enrich_with_quality_metrics(
+        self,
+        signal: Dict[str, Any],
+        market_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Attach signal quality metrics to a serialised signal document.
+
+        Runs the SignalQualityValidator and (optionally) the
+        HybridEnhancementSuite against the signal, then merges the
+        results into the signal dict under the keys:
+          - ``signal_quality``   : ValidationReport.to_dict()
+          - ``hybrid_scores``    : HybridEnhancementResult.to_dict()
+
+        Falls back gracefully when either module is unavailable or
+        when the signal is missing required price fields.
+        """
+        # ── Signal Quality Validator ──────────────────────────
+        if _QUALITY_VALIDATOR_AVAILABLE:
+            try:
+                report = signal_quality_validator.validate(signal)
+                signal["signal_quality"] = report.to_dict()
+
+                # Promote key fields to top-level for easy API consumption
+                signal["dynamic_confidence"]    = report.dynamic_confidence
+                signal["signal_expiry"]         = report.expiry_utc
+                signal["session_quality"]       = report.session_quality
+                signal["news_flags"]            = report.news_flags
+                signal["regime_classification"] = report.regime_classification
+                signal["quality_passed"]        = report.passed
+                signal["quality_score"]         = report.overall_score
+
+            except Exception as exc:
+                logger.warning(
+                    f"SignalQualityValidator failed for signal "
+                    f"{signal.get('id')}: {exc}"
+                )
+                signal["signal_quality"] = {
+                    "error": str(exc),
+                    "passed": False,
+                    "overall_score": None,
+                }
+        else:
+            signal["signal_quality"] = {"available": False}
+
+        # ── Hybrid Enhancement Suite ──────────────────────────
+        if _HYBRID_SUITE_AVAILABLE and market_data:
+            try:
+                hybrid_result = hybrid_enhancement_suite.evaluate(signal, market_data)
+                signal["hybrid_scores"] = hybrid_result.to_dict()
+
+                # Promote key fields
+                signal["hybrid_confidence_label"] = hybrid_result.confidence_label
+                signal["hybrid_overall_score"]    = hybrid_result.overall_score
+                signal["recommended_position_pct"] = hybrid_result.position_size_pct
+                signal["stop_strategy"]           = hybrid_result.stop_strategy
+                signal["entry_timing"]            = hybrid_result.entry_timing
+
+            except Exception as exc:
+                logger.warning(
+                    f"HybridEnhancementSuite failed for signal "
+                    f"{signal.get('id')}: {exc}"
+                )
+                signal["hybrid_scores"] = {"error": str(exc)}
+        else:
+            signal["hybrid_scores"] = {
+                "available": _HYBRID_SUITE_AVAILABLE,
+                "note": "market_data required for hybrid scoring",
+            }
+
+        return signal
+
     # ── Audit logging ─────────────────────────────────────────
 
     async def _audit(
@@ -252,6 +356,9 @@ class SignalManager:
 
         signals = [_serialize(s) for s in raw]
 
+        # Enrich each signal with quality metrics and hybrid scores
+        signals = [self._enrich_with_quality_metrics(s) for s in signals]
+
         logger.info(
             f"📋 Manager {requesting_manager['manager_id']} listed "
             f"{len(signals)} pending signals"
@@ -302,9 +409,13 @@ class SignalManager:
         ).sort("timestamp", 1)
         review_log = [_serialize(e) async for e in log_cursor]
 
+        serialised_signal = _serialize(signal)
+        # Enrich with quality metrics and hybrid scores
+        serialised_signal = self._enrich_with_quality_metrics(serialised_signal)
+
         return {
             "success":    True,
-            "signal":     _serialize(signal),
+            "signal":     serialised_signal,
             "adjustments": adjustments,
             "review_log": review_log,
         }
@@ -366,34 +477,56 @@ class SignalManager:
         }
         await db.signals.update_one({"_id": oid}, {"$set": update})
 
+        # Run quality validation for audit record
+        quality_summary: Dict[str, Any] = {}
+        if _QUALITY_VALIDATOR_AVAILABLE:
+            try:
+                q_report = signal_quality_validator.validate(_serialize(signal))
+                quality_summary = {
+                    "quality_passed":       q_report.passed,
+                    "quality_score":        q_report.overall_score,
+                    "dynamic_confidence":   q_report.dynamic_confidence,
+                    "regime":               q_report.regime_classification,
+                    "session":              q_report.session_quality,
+                    "rr_ratio":             q_report.rr_ratio,
+                    "critical_issues":      sum(
+                        1 for i in q_report.issues if i.severity == "CRITICAL"
+                    ),
+                }
+            except Exception as exc:
+                logger.warning(f"Quality check on approve failed: {exc}")
+
         await self._audit(
             action="signal:approve",
             manager_id=requesting_manager["manager_id"],
             role=requesting_manager["role"],
             signal_id=signal_id,
             details={
-                "pair":           signal.get("pair"),
-                "type":           signal.get("type"),
-                "entry_price":    signal.get("entry_price"),
-                "confidence":     signal.get("confidence"),
-                "previous_status": current_status,
-                "notes":          notes,
+                "pair":             signal.get("pair"),
+                "type":             signal.get("type"),
+                "entry_price":      signal.get("entry_price"),
+                "confidence":       signal.get("confidence"),
+                "previous_status":  current_status,
+                "notes":            notes,
+                "quality_metrics":  quality_summary,
             },
         )
 
         logger.info(
             f"✅ Signal {signal_id} APPROVED by manager "
             f"{requesting_manager['manager_id']} "
-            f"({signal.get('pair')} {signal.get('type')})"
+            f"({signal.get('pair')} {signal.get('type')}) "
+            f"quality_passed={quality_summary.get('quality_passed', 'N/A')}"
         )
         return {
-            "success":    True,
-            "signal_id":  signal_id,
-            "new_status": "ACTIVE",
-            "approved_by": requesting_manager["manager_id"],
-            "approved_at": now.isoformat(),
-            "pair":        signal.get("pair"),
-            "type":        signal.get("type"),
+            "success":          True,
+            "signal_id":        signal_id,
+            "new_status":       "ACTIVE",
+            "approved_by":      requesting_manager["manager_id"],
+            "approved_at":      now.isoformat(),
+            "pair":             signal.get("pair"),
+            "type":             signal.get("type"),
+            "quality_metrics":  quality_summary,
         }
 
     # ═══════════════════════════════════════════════════════════

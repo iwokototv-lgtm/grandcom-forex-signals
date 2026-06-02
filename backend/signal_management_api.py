@@ -14,6 +14,8 @@ Endpoints:
   POST /api/manager/signals/adjust           — Adjust entry / TP levels / SL price
   GET  /api/manager/signals/history/all      — Approval history with summary stats
   GET  /api/manager/signals/stats/approval   — Per-manager and per-pair approval stats
+  POST /api/manager/signals/quality/check    — Run quality validation on a signal dict
+  GET  /api/manager/signals/quality/summary  — Quality metrics summary across pending signals
 
 Geometry Rating:
   Every signal returned by GET /pending and GET /{id} now includes a
@@ -25,6 +27,29 @@ Geometry Rating:
     - components.entry / stop_loss / risk_reward / take_profits:
         score, label, explanation, guidelines
     - adjustment_guidelines: consolidated list of all required adjustments
+
+Signal Quality Enhancements (v3.0.2):
+  Every signal now also includes a ``signal_quality`` block with:
+    - passed: bool — whether signal meets all quality standards
+    - overall_score: 0–100 quality score
+    - dynamic_confidence: replaces static 75% with multi-factor score
+    - expiry_utc: signal validity window (e.g. 'Valid until 02:00 UTC')
+    - session_quality: OVERLAP | LONDON | NY | ASIAN | DEAD
+    - news_flags: list of upcoming high-impact events
+    - regime_classification: BEARISH_TREND | BULLISH_TREND | RANGE | TRANSITIONAL
+    - rr_ratio: actual R:R ratio (minimum 2.0 enforced)
+    - entry_zone_pips: entry zone width in pips (minimum 10 enforced)
+    - sl_atr_multiple: SL distance as ATR multiple
+    - mtf_alignment_pct: MTF alignment percentage
+    - confidence_breakdown: per-factor confidence scores
+    - issues: list of CRITICAL | WARNING | INFO findings
+    - recommendations: actionable manager guidance
+
+  And a ``hybrid_scores`` block with all 13 hybrid indicator scores:
+    - smc_order_flow, triple_momentum, vwap_price_action, fibonacci_smc
+    - atr_bollinger, range_breakout, swing_scalp_timing, trend_mean_reversion
+    - mtf_pyramid, session_mtf_weighting, fixed_trailing_stop
+    - volatility_sizing, dynamic_confluence
 """
 
 from __future__ import annotations
@@ -42,6 +67,19 @@ from pydantic import BaseModel, Field, field_validator
 
 from signal_manager import signal_manager
 from ml_engine.geometry_rating import geometry_rater
+
+# Signal Quality Enhancement imports (graceful fallback)
+try:
+    from ml_engine.signal_quality_validator import signal_quality_validator
+    _QUALITY_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _QUALITY_VALIDATOR_AVAILABLE = False
+
+try:
+    from ml_engine.hybrid_enhancement_indicators import hybrid_enhancement_suite
+    _HYBRID_SUITE_AVAILABLE = True
+except ImportError:
+    _HYBRID_SUITE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -518,5 +556,207 @@ async def adjust_signal(
             notes=body.notes,
         )
         return _handle_result(result)
+    except PermissionError as exc:
+        _handle_permission_error(exc)
+
+
+# ─────────────────────────────────────────────────────────────
+# Signal Quality Enhancement Endpoints
+# ─────────────────────────────────────────────────────────────
+
+class QualityCheckRequest(BaseModel):
+    """Request body for the ad-hoc quality check endpoint."""
+    signal: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "Signal document to validate. Must include at minimum: "
+            "type, entry_price, sl_price, tp_levels."
+        ),
+    )
+    market_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional market data for hybrid indicator scoring. "
+            "Include: atr, rsi, macd, vwap, adx, mtf_data, session, etc."
+        ),
+    )
+
+
+@router.post(
+    "/quality/check",
+    summary="Run comprehensive signal quality validation",
+    response_description="Full quality report with all validator findings",
+)
+async def check_signal_quality(
+    body:            QualityCheckRequest,
+    current_manager: Dict = Depends(get_current_manager),
+):
+    """
+    Run the full SignalQualityValidator and (optionally) the
+    HybridEnhancementSuite against a signal document.
+
+    This endpoint is useful for:
+    - Pre-submission quality checks before a signal enters the review queue
+    - Ad-hoc validation of manually constructed signals
+    - Testing signal parameters before committing to a trade
+
+    The response includes:
+    - ``signal_quality``: Full ValidationReport with all nine validator findings
+    - ``hybrid_scores``: All 13 hybrid indicator scores (if market_data provided)
+    - ``geometry_rating``: Geometry rating (entry, SL, R:R, TP alignment)
+
+    Quality dimensions checked:
+    1. R:R validation (minimum 1:2 for swing trades)
+    2. Regime classification (BEARISH_TREND vs RANGE)
+    3. Entry zone width (minimum 10 pips)
+    4. Dynamic confidence scoring (MTF + SMC + momentum + session + news)
+    5. SL structural anchoring (ATR multiple quantification)
+    6. Session quality (flags post-NY close dead zone)
+    7. MTF alignment (confidence penalty on misalignment)
+    8. Signal expiry (prevents indefinitely valid signals)
+    9. News filter (JOLTS, Beige Book, NFP awareness)
+    """
+    signal_dict = body.signal
+    response: Dict[str, Any] = {"success": True, "signal": signal_dict}
+
+    # ── Signal Quality Validation ─────────────────────────────
+    if _QUALITY_VALIDATOR_AVAILABLE:
+        try:
+            report = signal_quality_validator.validate(signal_dict)
+            response["signal_quality"] = report.to_dict()
+        except Exception as exc:
+            logger.warning(f"Quality check failed: {exc}")
+            response["signal_quality"] = {"error": str(exc)}
+    else:
+        response["signal_quality"] = {
+            "available": False,
+            "message": "SignalQualityValidator module not loaded.",
+        }
+
+    # ── Hybrid Enhancement Scoring ────────────────────────────
+    if _HYBRID_SUITE_AVAILABLE and body.market_data:
+        try:
+            hybrid_result = hybrid_enhancement_suite.evaluate(
+                signal_dict, body.market_data
+            )
+            response["hybrid_scores"] = hybrid_result.to_dict()
+        except Exception as exc:
+            logger.warning(f"Hybrid scoring failed: {exc}")
+            response["hybrid_scores"] = {"error": str(exc)}
+    else:
+        response["hybrid_scores"] = {
+            "available": _HYBRID_SUITE_AVAILABLE,
+            "note": "Provide market_data for hybrid indicator scoring.",
+        }
+
+    # ── Geometry Rating ───────────────────────────────────────
+    response["signal"] = _attach_geometry_rating(signal_dict)
+
+    return response
+
+
+@router.get(
+    "/quality/summary",
+    summary="Quality metrics summary across all pending signals",
+    response_description="Aggregated quality statistics for the pending review queue",
+)
+async def get_quality_summary(
+    current_manager: Dict = Depends(get_current_manager),
+):
+    """
+    Return aggregated signal quality statistics across all signals
+    currently in ``PENDING_REVIEW`` status.
+
+    Provides a dashboard-level view of the review queue quality:
+    - How many signals pass/fail quality checks
+    - Distribution of dynamic confidence scores
+    - Session quality breakdown
+    - Regime classification distribution
+    - News flag counts
+    - Average R:R ratio across pending signals
+
+    This helps managers prioritise their review queue — high-quality
+    signals can be fast-tracked while low-quality signals need adjustment.
+    """
+    try:
+        # Fetch all pending signals
+        result = await signal_manager.get_pending_signals(
+            requesting_manager=current_manager,
+            limit=200,
+        )
+        handled = _handle_result(result)
+        signals = handled.get("signals", [])
+
+        if not signals:
+            return {
+                "success": True,
+                "total_pending": 0,
+                "quality_summary": {},
+                "message": "No pending signals in queue.",
+            }
+
+        # Aggregate quality metrics
+        passed_count    = 0
+        failed_count    = 0
+        confidence_sum  = 0.0
+        rr_sum          = 0.0
+        session_counts: Dict[str, int] = {}
+        regime_counts:  Dict[str, int] = {}
+        news_flag_count = 0
+        critical_count  = 0
+
+        for sig in signals:
+            quality = sig.get("signal_quality", {})
+            if quality.get("passed"):
+                passed_count += 1
+            else:
+                failed_count += 1
+
+            confidence_sum += float(sig.get("dynamic_confidence", 75.0) or 75.0)
+            rr_sum         += float(quality.get("rr_ratio", 0.0) or 0.0)
+
+            session = sig.get("session_quality", "UNKNOWN")
+            session_counts[session] = session_counts.get(session, 0) + 1
+
+            regime = sig.get("regime_classification", "UNKNOWN")
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
+
+            news_flags = sig.get("news_flags", [])
+            if news_flags:
+                news_flag_count += 1
+
+            critical_count += quality.get("critical_count", 0)
+
+        total = len(signals)
+        avg_confidence = confidence_sum / total if total > 0 else 0.0
+        avg_rr         = rr_sum / total if total > 0 else 0.0
+
+        return {
+            "success":       True,
+            "total_pending": total,
+            "quality_summary": {
+                "passed":           passed_count,
+                "failed":           failed_count,
+                "pass_rate_pct":    round(passed_count / total * 100, 1) if total > 0 else 0.0,
+                "avg_confidence":   round(avg_confidence, 1),
+                "avg_rr_ratio":     round(avg_rr, 3),
+                "with_news_flags":  news_flag_count,
+                "total_critical_issues": critical_count,
+                "session_distribution": session_counts,
+                "regime_distribution":  regime_counts,
+                "quality_threshold":    75.0,
+                "meets_threshold_pct":  round(
+                    sum(
+                        1 for s in signals
+                        if float(s.get("dynamic_confidence", 0) or 0) >= 75.0
+                    ) / total * 100, 1
+                ) if total > 0 else 0.0,
+            },
+            "enhancement_modules": {
+                "signal_quality_validator": _QUALITY_VALIDATOR_AVAILABLE,
+                "hybrid_enhancement_suite": _HYBRID_SUITE_AVAILABLE,
+            },
+        }
+
     except PermissionError as exc:
         _handle_permission_error(exc)
