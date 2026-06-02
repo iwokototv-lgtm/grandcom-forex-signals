@@ -32,10 +32,29 @@ from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v
 from .geometry_rating import GeometryRating, geometry_rater
 
 # ── Phase 2: Signal Quality V2 ────────────────────────────────────────────
-from .signal_quality_v2 import SignalQualityV2, signal_quality_v2
-from .hybrid_indicators import HybridIndicators, hybrid_indicators
-from .session_quality import SessionQualityDetector, session_quality_detector
-from .volatility_metrics import VolatilityMetrics, volatility_metrics
+# Imported with graceful degradation so that a broken Phase 2 module never
+# prevents the core package (and its tests) from loading.
+try:
+    from .signal_quality_v2 import SignalQualityV2, signal_quality_v2
+    from .hybrid_indicators import HybridIndicators, hybrid_indicators
+    from .session_quality import SessionQualityDetector, session_quality_detector
+    from .volatility_metrics import VolatilityMetrics, volatility_metrics
+    _PHASE2_AVAILABLE = True
+except Exception as _phase2_err:  # pragma: no cover
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Phase 2 Signal Quality V2 modules failed to import — "
+        "quality scoring disabled. Error: %s", _phase2_err
+    )
+    SignalQualityV2 = None          # type: ignore[assignment,misc]
+    signal_quality_v2 = None        # type: ignore[assignment]
+    HybridIndicators = None         # type: ignore[assignment,misc]
+    hybrid_indicators = None        # type: ignore[assignment]
+    SessionQualityDetector = None   # type: ignore[assignment,misc]
+    session_quality_detector = None # type: ignore[assignment]
+    VolatilityMetrics = None        # type: ignore[assignment,misc]
+    volatility_metrics = None       # type: ignore[assignment]
+    _PHASE2_AVAILABLE = False
 
 __all__ = [
     # Legacy v2.0

@@ -4,12 +4,22 @@ High-impact event filtering and pre/post-event risk management
 """
 
 import asyncio
-import aiohttp
-import pandas as pd
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta, timezone
 import logging
 import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+try:
+    import aiohttp as _aiohttp
+    _HAS_AIOHTTP = True
+except ImportError:  # pragma: no cover
+    _aiohttp = None  # type: ignore[assignment]
+    _HAS_AIOHTTP = False
+
+try:
+    import pandas as _pd  # noqa: F401 — imported for type hints only
+except ImportError:  # pragma: no cover
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +154,14 @@ class EconomicCalendar:
 
     async def _fetch_events(self) -> List[Dict]:
         """Fetch economic calendar from ForexFactory or configured URL."""
+        if not _HAS_AIOHTTP:
+            logger.warning("aiohttp not available — economic calendar fetch skipped.")
+            return []
         try:
-            async with aiohttp.ClientSession() as session:
+            async with _aiohttp.ClientSession() as session:
                 async with session.get(
                     CALENDAR_URL,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=_aiohttp.ClientTimeout(total=10),
                     headers={"User-Agent": "GoldSignalsBot/3.0"},
                 ) as resp:
                     if resp.status != 200:
