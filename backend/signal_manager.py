@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME   = os.environ.get("DB_NAME",   "gold_signals_v3")
+
+# ── Phase 2: Signal Quality V2 integration ────────────────────────────────
+try:
+    from ml_engine.signal_quality_v2 import SignalQualityV2, signal_quality_v2
+    from ml_engine.economic_calendar import economic_calendar
+    _HAS_QUALITY_V2 = True
+except ImportError:
+    _HAS_QUALITY_V2 = False
+    logger.warning("SignalQualityV2 not available — quality scoring disabled.")
 
 # Roles that are allowed to perform signal review actions
 SIGNAL_REVIEW_ROLES = {"ADMIN", "MANAGER"}
@@ -830,6 +839,315 @@ class SignalManager:
             },
             "per_manager": per_manager,
             "per_pair":    per_pair,
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    # PHASE 2: QUALITY SCORING
+    # ═══════════════════════════════════════════════════════════
+
+    async def score_signal_quality(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Run Phase 2 quality assessment on a signal.
+
+        Evaluates R:R, regime, entry band, dynamic confidence, SL anchoring,
+        ATR, session quality, expiry, and news filter.
+
+        Returns the full SignalQualityV2Result and persists the quality score
+        to the signal document for use in the approval workflow.
+        """
+        _check_review_permission(requesting_manager)
+
+        if not _HAS_QUALITY_V2:
+            return {"success": False, "error": "SignalQualityV2 not available."}
+
+        db = self._get_db()
+
+        try:
+            oid = _oid(signal_id)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        signal = await db.signals.find_one({"_id": oid})
+        if not signal:
+            return {"success": False, "error": f"Signal '{signal_id}' not found"}
+
+        # Build quality assessment parameters
+        try:
+            news_events: List[Dict[str, Any]] = []
+            try:
+                news_check = await economic_calendar.is_safe_to_trade(
+                    symbol=signal.get("pair", "XAUUSD")
+                )
+                news_events = news_check.get("upcoming_events", [])
+            except Exception:
+                pass
+
+            created_at = signal.get("created_at", datetime.utcnow())
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            result = signal_quality_v2.assess(
+                signal_id=signal_id,
+                symbol=signal.get("pair", "XAUUSD"),
+                signal_type=signal.get("type", "BUY"),
+                entry_price=float(signal.get("entry_price", 0.0)),
+                sl_price=float(signal.get("sl_price", 0.0)),
+                tp_levels=[float(t) for t in signal.get("tp_levels", [])],
+                current_price=float(signal.get("current_price", signal.get("entry_price", 0.0))),
+                atr=float(signal.get("atr", signal.get("atr_value", 12.0))),
+                swing_high=float(signal.get("swing_high", 0.0)),
+                swing_low=float(signal.get("swing_low", 0.0)),
+                nearest_resistance=float(signal.get("nearest_resistance", signal.get("resistance", 0.0))),
+                nearest_support=float(signal.get("nearest_support", signal.get("support", 0.0))),
+                adx=float(signal.get("adx", 25.0)),
+                rsi=float(signal.get("rsi", 50.0)),
+                mtf_alignment=signal.get("mtf_alignment", {}),
+                smc_score=float(signal.get("smc_score", 5.0)),
+                created_at=created_at,
+                account_balance=float(signal.get("account_balance", 10_000.0)),
+                news_events=news_events,
+                macd_signal=signal.get("macd_signal"),
+                stoch_rsi=signal.get("stoch_rsi"),
+                trade_type=signal.get("trade_type", "SWING"),
+            )
+
+            quality_data = result.to_dict()
+
+            # Persist quality score to signal document
+            await db.signals.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "quality_v2":          quality_data,
+                    "quality_score_v2":    result.overall_score,
+                    "quality_recommendation_v2": result.recommendation,
+                    "dynamic_confidence":  result.confidence.total_score,
+                    "quality_scored_at":   datetime.utcnow(),
+                }},
+            )
+
+            await self._audit(
+                action="signal:quality_score",
+                manager_id=requesting_manager["manager_id"],
+                role=requesting_manager["role"],
+                signal_id=signal_id,
+                details={
+                    "overall_score":    result.overall_score,
+                    "recommendation":   result.recommendation,
+                    "rr_ratio":         result.risk_reward.ratio,
+                    "confidence":       result.confidence.total_score,
+                    "regime":           result.regime.regime,
+                    "session":          result.session.session,
+                    "news_safe":        result.news_filter.safe_to_trade,
+                    "is_expired":       result.expiry.is_expired,
+                },
+            )
+
+            logger.info(
+                f"📊 Signal {signal_id} quality scored: "
+                f"{result.overall_score:.1f}/100 → {result.recommendation}"
+            )
+
+            return {
+                "success":    True,
+                "signal_id":  signal_id,
+                "quality":    quality_data,
+                "version":    "2.0.0",
+            }
+
+        except Exception as exc:
+            logger.error(f"Quality scoring error for {signal_id}: {exc}", exc_info=True)
+            return {"success": False, "error": str(exc)}
+
+    async def check_signal_expiry(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Check if a signal has expired and auto-reject if so.
+
+        SWING signals expire after 24 hours.
+        SCALP signals expire after 4 hours.
+        """
+        _check_review_permission(requesting_manager)
+
+        if not _HAS_QUALITY_V2:
+            return {"success": False, "error": "SignalQualityV2 not available."}
+
+        db = self._get_db()
+
+        try:
+            oid = _oid(signal_id)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        signal = await db.signals.find_one({"_id": oid})
+        if not signal:
+            return {"success": False, "error": f"Signal '{signal_id}' not found"}
+
+        created_at = signal.get("created_at", datetime.utcnow())
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        trade_type = signal.get("trade_type", "SWING")
+        expiry = signal_quality_v2.calculate_expiry(
+            created_at=created_at,
+            trade_type=trade_type,
+        )
+
+        if expiry.is_expired and signal.get("status") == "PENDING_REVIEW":
+            # Auto-reject expired signals
+            await db.signals.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "status":           "REJECTED",
+                    "rejected_by":      "SYSTEM_EXPIRY",
+                    "rejected_at":      datetime.utcnow(),
+                    "rejection_reason": f"Signal expired at {expiry.expires_at}",
+                    "review_status":    "REJECTED",
+                }},
+            )
+            logger.info(f"⏰ Signal {signal_id} auto-rejected: expired at {expiry.expires_at}")
+
+        return {
+            "success":    True,
+            "signal_id":  signal_id,
+            "expiry": {
+                "expires_at":        expiry.expires_at,
+                "hours_valid":       expiry.hours_valid,
+                "is_expired":        expiry.is_expired,
+                "minutes_remaining": round(expiry.minutes_remaining, 1),
+                "trade_type":        expiry.trade_type,
+                "status":            "EXPIRED" if expiry.is_expired else "VALID",
+            },
+            "auto_rejected": expiry.is_expired and signal.get("status") == "PENDING_REVIEW",
+        }
+
+    async def recalculate_confidence(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+        updated_mtf: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Recalculate signal confidence when MTF alignment changes.
+
+        Called when a timeframe drops alignment (e.g., M15 flips direction).
+        Updates the signal's dynamic_confidence field in the database.
+        """
+        _check_review_permission(requesting_manager)
+
+        if not _HAS_QUALITY_V2:
+            return {"success": False, "error": "SignalQualityV2 not available."}
+
+        db = self._get_db()
+
+        try:
+            oid = _oid(signal_id)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        signal = await db.signals.find_one({"_id": oid})
+        if not signal:
+            return {"success": False, "error": f"Signal '{signal_id}' not found"}
+
+        original_confidence = float(signal.get("dynamic_confidence", signal.get("confidence", 75.0)))
+        original_mtf = signal.get("mtf_alignment", {})
+
+        result = signal_quality_v2.recalculate_mtf_confidence(
+            original_confidence=original_confidence,
+            original_mtf=original_mtf,
+            updated_mtf=updated_mtf,
+        )
+
+        # Update signal with new confidence and MTF
+        await db.signals.update_one(
+            {"_id": oid},
+            {"$set": {
+                "dynamic_confidence":  result["new_confidence"],
+                "mtf_alignment":       updated_mtf,
+                "confidence_updated_at": datetime.utcnow(),
+            }},
+        )
+
+        await self._audit(
+            action="signal:confidence_recalculate",
+            manager_id=requesting_manager["manager_id"],
+            role=requesting_manager["role"],
+            signal_id=signal_id,
+            details=result,
+        )
+
+        logger.info(
+            f"🔄 Signal {signal_id} confidence recalculated: "
+            f"{original_confidence:.1f}% → {result['new_confidence']:.1f}%"
+        )
+
+        return {
+            "success":   True,
+            "signal_id": signal_id,
+            "data":      result,
+            "version":   "2.0.0",
+        }
+
+    async def check_news_impact(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Check news impact for a signal and update its news_safe flag.
+
+        Blocks approval if a high-impact news event is within the blackout window.
+        """
+        _check_review_permission(requesting_manager)
+
+        if not _HAS_QUALITY_V2:
+            return {"success": False, "error": "SignalQualityV2 not available."}
+
+        db = self._get_db()
+
+        try:
+            oid = _oid(signal_id)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        signal = await db.signals.find_one({"_id": oid})
+        if not signal:
+            return {"success": False, "error": f"Signal '{signal_id}' not found"}
+
+        symbol = signal.get("pair", "XAUUSD")
+
+        try:
+            news_check = await economic_calendar.is_safe_to_trade(symbol=symbol)
+        except Exception as exc:
+            return {"success": False, "error": f"Calendar check failed: {exc}"}
+
+        safe = news_check.get("safe_to_trade", True)
+
+        # Update signal with news safety flag
+        await db.signals.update_one(
+            {"_id": oid},
+            {"$set": {
+                "news_safe":       safe,
+                "news_checked_at": datetime.utcnow(),
+                "news_events":     news_check.get("blocking_events", []),
+            }},
+        )
+
+        return {
+            "success":   True,
+            "signal_id": signal_id,
+            "data":      news_check,
+            "version":   "2.0.0",
         }
 
 
