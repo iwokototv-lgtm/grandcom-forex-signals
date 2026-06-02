@@ -30,6 +30,8 @@ from .portfolio_manager import PortfolioManager, portfolio_manager
 from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
 from .geometry_rating import GeometryRating, geometry_rater
+from .signal_quality_validator import SignalQualityValidator, signal_quality_validator
+from .hybrid_enhancement_indicators import HybridEnhancementIndicators
 
 __all__ = [
     # Legacy v2.0
@@ -83,4 +85,8 @@ __all__ = [
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',
+    # Signal Quality Validation (v3.0.2)
+    'SignalQualityValidator',
+    'signal_quality_validator',
+    'HybridEnhancementIndicators',
 ]

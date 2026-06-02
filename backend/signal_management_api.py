@@ -25,6 +25,23 @@ Geometry Rating:
     - components.entry / stop_loss / risk_reward / take_profits:
         score, label, explanation, guidelines
     - adjustment_guidelines: consolidated list of all required adjustments
+
+Signal Quality Validation:
+  Every signal passed through the approve endpoint is now validated by
+  ml_engine.signal_quality_validator.SignalQualityValidator before approval.
+  The quality block contains:
+    - quality_score (0-100): composite score across 10 quality checks
+    - confidence_score: dynamic confidence (MTF + SMC + momentum + session + news)
+    - grade: A / B / C / D / F
+    - regime: inferred market regime
+    - session_quality: HIGH / MEDIUM / LOW / DEAD_ZONE
+    - expiry: signal validity window (e.g. 'Valid until 02:00 UTC')
+    - news_flags: high-impact news events detected
+    - enhancement_scores: 13 hybrid indicator scores
+    - recommendations: list of improvement suggestions
+    - warnings: critical quality issues
+  Signals scoring below 40 (grade F) are flagged for mandatory adjustment.
+  Signals scoring 40–54 (grade D) generate warnings but can still be approved.
 """
 
 from __future__ import annotations
@@ -42,6 +59,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from signal_manager import signal_manager
 from ml_engine.geometry_rating import geometry_rater
+from ml_engine.signal_quality_validator import signal_quality_validator
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +236,38 @@ def _attach_geometry_rating(signal: Dict[str, Any]) -> Dict[str, Any]:
     return signal
 
 
+def _attach_quality_validation(signal: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Run signal quality validation and attach the result under the key
+    ``quality_validation``.
+
+    Reads all available signal fields and passes them to the
+    SignalQualityValidator.  Falls back gracefully on any error.
+
+    The result includes:
+      - quality_score (0–100)
+      - confidence_score (dynamic)
+      - grade (A/B/C/D/F)
+      - regime, session_quality, expiry, news_flags
+      - enhancement_scores (13 hybrid indicators)
+      - recommendations, warnings
+    """
+    try:
+        validation = signal_quality_validator.validate(signal)
+        signal["quality_validation"] = validation.to_dict()
+    except Exception as exc:
+        logger.warning(
+            f"Signal quality validation failed for signal {signal.get('id')}: {exc}"
+        )
+        signal["quality_validation"] = {
+            "passed": None,
+            "quality_score": None,
+            "grade": "UNKNOWN",
+            "error": f"Quality validation error: {exc}",
+        }
+    return signal
+
+
 # ─────────────────────────────────────────────────────────────
 # Pydantic request models
 # ─────────────────────────────────────────────────────────────
@@ -325,9 +375,10 @@ async def get_pending_signals(
             min_confidence=min_confidence,
         )
         handled = _handle_result(result)
-        # Attach geometry rating to every signal in the list
+        # Attach geometry rating and quality validation to every signal in the list
         handled["signals"] = [
-            _attach_geometry_rating(s) for s in handled.get("signals", [])
+            _attach_quality_validation(_attach_geometry_rating(s))
+            for s in handled.get("signals", [])
         ]
         return handled
     except PermissionError as exc:
@@ -414,6 +465,9 @@ async def get_signal_details(
     - ``review_log``:  ordered list of every review action (approve/reject/adjust)
     - ``signal.geometry_rating``: full geometry rating breakdown (1–10 per component,
       overall score, APPROVE/ADJUST/REJECT recommendation, and adjustment guidelines)
+    - ``signal.quality_validation``: comprehensive quality validation result including
+      quality_score, confidence_score, grade, regime, session_quality, expiry,
+      news_flags, enhancement_scores (13 hybrid indicators), recommendations, warnings
 
     This endpoint supports any signal status, not just pending ones.
     """
@@ -423,9 +477,11 @@ async def get_signal_details(
             signal_id=signal_id,
         )
         handled = _handle_result(result)
-        # Attach geometry rating to the full signal document
+        # Attach geometry rating and quality validation to the full signal document
         if "signal" in handled:
-            handled["signal"] = _attach_geometry_rating(handled["signal"])
+            handled["signal"] = _attach_quality_validation(
+                _attach_geometry_rating(handled["signal"])
+            )
         return handled
     except PermissionError as exc:
         _handle_permission_error(exc)
@@ -446,6 +502,11 @@ async def approve_signal(
     On success the signal status is changed to ``ACTIVE`` and it enters
     the live trading queue.  The approval is recorded in the audit log
     with the manager's ID, timestamp, and any notes provided.
+
+    The response includes a ``quality_metrics`` block with the signal's
+    quality score, grade, and any recommendations from the quality validator.
+    Signals with grade F (score < 40) are flagged with a ``quality_warning``
+    in the response but are not blocked — the manager retains final authority.
     """
     try:
         result = await signal_manager.approve_signal(
