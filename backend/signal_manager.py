@@ -12,14 +12,25 @@ over the signal lifecycle:
   - Approval statistics per manager
 
 Collection layout (MongoDB):
-  signals              — existing signal documents (status field extended)
-  signal_review_log    — immutable audit record for every review action
-  signal_adjustments   — history of price-level adjustments
+  signals                — existing signal documents (status field extended)
+  signal_review_log      — immutable audit record for every review action
+  signal_adjustments     — history of price-level adjustments
+  signal_quality_metrics — quality validation snapshots per signal
 
 Signal status lifecycle:
   PENDING_REVIEW  → APPROVED  (sent to trading, status becomes ACTIVE)
   PENDING_REVIEW  → REJECTED  (removed from trading queue)
   PENDING_REVIEW  → ADJUSTED  → APPROVED / REJECTED
+
+Quality Validation (v3.0.2):
+  Every approve_signal() call now runs SignalQualityValidator against the
+  signal document.  The quality result is:
+    - Stored in signal_quality_metrics collection
+    - Embedded in the signal document under quality_metrics
+    - Included in the approval audit log
+    - Returned in the approve_signal() response
+  Signals with grade F (score < 40) generate a quality_warning in the
+  response but are not blocked — managers retain final authority.
 """
 
 from __future__ import annotations
@@ -34,6 +45,21 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
+
+# Lazy import to avoid circular dependencies at module load time
+_signal_quality_validator = None
+
+
+def _get_quality_validator():
+    """Lazy-load the signal quality validator singleton."""
+    global _signal_quality_validator
+    if _signal_quality_validator is None:
+        try:
+            from ml_engine.signal_quality_validator import signal_quality_validator
+            _signal_quality_validator = signal_quality_validator
+        except Exception as exc:
+            logger.warning(f"Could not load SignalQualityValidator: {exc}")
+    return _signal_quality_validator
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME   = os.environ.get("DB_NAME",   "gold_signals_v3")
@@ -356,14 +382,62 @@ class SignalManager:
                 ),
             }
 
+        # ── Run signal quality validation ─────────────────────
+        quality_metrics: Dict[str, Any] = {}
+        quality_warning: Optional[str]  = None
+        try:
+            validator = _get_quality_validator()
+            if validator is not None:
+                serialised_signal = _serialize(signal)
+                validation = validator.validate(serialised_signal)
+                quality_metrics = validation.to_dict()
+
+                # Persist quality metrics to dedicated collection
+                await db.signal_quality_metrics.insert_one({
+                    "signal_id":      signal_id,
+                    "recorded_at":    datetime.utcnow(),
+                    "action":         "approve",
+                    "manager_id":     requesting_manager["manager_id"],
+                    **quality_metrics,
+                })
+
+                # Flag low-quality signals (grade F) with a warning
+                if validation.grade == "F":
+                    quality_warning = (
+                        f"⚠️  Signal quality grade F "
+                        f"(score={validation.quality_score:.1f}/100). "
+                        f"Recommendations: {'; '.join(validation.recommendations[:3])}"
+                    )
+                    logger.warning(
+                        f"Low-quality signal {signal_id} approved by "
+                        f"{requesting_manager['manager_id']}: "
+                        f"score={validation.quality_score:.1f} grade=F"
+                    )
+        except Exception as exc:
+            logger.warning(f"Quality validation during approval failed: {exc}")
+
         now = datetime.utcnow()
-        update = {
+        update: Dict[str, Any] = {
             "status":          "ACTIVE",
             "approved_by":     requesting_manager["manager_id"],
             "approved_at":     now,
             "manager_notes":   notes or "",
             "review_status":   "APPROVED",
         }
+        # Embed quality metrics snapshot in the signal document
+        if quality_metrics:
+            update["quality_metrics"] = {
+                "quality_score":    quality_metrics.get("quality_score"),
+                "confidence_score": quality_metrics.get("confidence_score"),
+                "grade":            quality_metrics.get("grade"),
+                "regime":           quality_metrics.get("regime"),
+                "session_quality":  quality_metrics.get("session_quality"),
+                "expiry":           quality_metrics.get("expiry"),
+                "news_flags":       quality_metrics.get("news_flags", []),
+                "recommendations":  quality_metrics.get("recommendations", []),
+                "recorded_at":      now.isoformat(),
+            }
+
         await db.signals.update_one({"_id": oid}, {"$set": update})
 
         await self._audit(
@@ -372,21 +446,26 @@ class SignalManager:
             role=requesting_manager["role"],
             signal_id=signal_id,
             details={
-                "pair":           signal.get("pair"),
-                "type":           signal.get("type"),
-                "entry_price":    signal.get("entry_price"),
-                "confidence":     signal.get("confidence"),
-                "previous_status": current_status,
-                "notes":          notes,
+                "pair":             signal.get("pair"),
+                "type":             signal.get("type"),
+                "entry_price":      signal.get("entry_price"),
+                "confidence":       signal.get("confidence"),
+                "previous_status":  current_status,
+                "notes":            notes,
+                "quality_score":    quality_metrics.get("quality_score"),
+                "quality_grade":    quality_metrics.get("grade"),
+                "quality_warning":  quality_warning,
             },
         )
 
         logger.info(
             f"✅ Signal {signal_id} APPROVED by manager "
             f"{requesting_manager['manager_id']} "
-            f"({signal.get('pair')} {signal.get('type')})"
+            f"({signal.get('pair')} {signal.get('type')}) "
+            f"quality={quality_metrics.get('grade', 'N/A')}"
         )
-        return {
+
+        response: Dict[str, Any] = {
             "success":    True,
             "signal_id":  signal_id,
             "new_status": "ACTIVE",
@@ -395,6 +474,21 @@ class SignalManager:
             "pair":        signal.get("pair"),
             "type":        signal.get("type"),
         }
+        if quality_metrics:
+            response["quality_metrics"] = {
+                "quality_score":    quality_metrics.get("quality_score"),
+                "confidence_score": quality_metrics.get("confidence_score"),
+                "grade":            quality_metrics.get("grade"),
+                "regime":           quality_metrics.get("regime"),
+                "session_quality":  quality_metrics.get("session_quality"),
+                "expiry":           quality_metrics.get("expiry"),
+                "news_flags":       quality_metrics.get("news_flags", []),
+                "recommendations":  quality_metrics.get("recommendations", []),
+            }
+        if quality_warning:
+            response["quality_warning"] = quality_warning
+
+        return response
 
     # ═══════════════════════════════════════════════════════════
     # REJECT SIGNAL
