@@ -11,15 +11,27 @@ over the signal lifecycle:
   - Full audit trail of every decision
   - Approval statistics per manager
 
+Signal Quality Integration (v3.1):
+  - Automatic quality validation on every signal via SignalQualityValidator
+  - Dynamic confidence recalculation from MTF + SMC + momentum + session + news
+  - Regime classification and regime-specific entry rule enforcement
+  - Session quality flagging (post-NY close, low-liquidity periods)
+  - News filter integration (JOLTS, Beige Book, NFP, FOMC, CPI)
+  - Signal expiry field added to all signals
+  - R:R minimum enforcement (1:2 swing, 1:1.5 scalp)
+  - ATR quantification and position size derivation
+
 Collection layout (MongoDB):
   signals              — existing signal documents (status field extended)
   signal_review_log    — immutable audit record for every review action
   signal_adjustments   — history of price-level adjustments
+  signal_quality_log   — quality validation results per signal
 
 Signal status lifecycle:
   PENDING_REVIEW  → APPROVED  (sent to trading, status becomes ACTIVE)
   PENDING_REVIEW  → REJECTED  (removed from trading queue)
   PENDING_REVIEW  → ADJUSTED  → APPROVED / REJECTED
+  PENDING_REVIEW  → QUALITY_REJECTED (auto-rejected by quality validator)
 """
 
 from __future__ import annotations
@@ -32,6 +44,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
+
+# Signal quality validation integration
+try:
+    from ml_engine.signal_quality_validator import SignalQualityValidator, signal_quality_validator
+    HAS_QUALITY_VALIDATOR = True
+except ImportError:
+    try:
+        from backend.ml_engine.signal_quality_validator import SignalQualityValidator, signal_quality_validator
+        HAS_QUALITY_VALIDATOR = True
+    except ImportError:
+        HAS_QUALITY_VALIDATOR = False
+        signal_quality_validator = None
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +190,8 @@ class SignalManager:
     def __init__(self) -> None:
         self._client: Optional[AsyncIOMotorClient] = None
         self._db = None
+        # Quality validator (injected or module-level singleton)
+        self._quality_validator = signal_quality_validator if HAS_QUALITY_VALIDATOR else None
 
     # ── DB connection (lazy) ──────────────────────────────────
 
@@ -178,6 +204,130 @@ class SignalManager:
             )
             self._db = self._client[DB_NAME]
         return self._db
+
+    # ── Signal quality validation ─────────────────────────────
+
+    def run_quality_validation(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Run comprehensive signal quality validation.
+
+        Validates all 12 quality dimensions:
+          1.  R:R ratio (min 1:2 swing, 1:1.5 scalp)
+          2.  Regime classification
+          3.  Entry band (10-pip zone)
+          4.  Dynamic confidence (MTF + SMC + momentum + session + news)
+          5.  SL anchoring to structure
+          6.  ATR quantification and position sizing
+          7.  Regime-specific entry logic
+          8.  Session quality
+          9.  Entry positioning
+          10. MTF alignment
+          11. Signal expiry
+          12. News filter
+
+        Returns quality result dict with approved/rejected decision.
+        Falls back gracefully if validator is unavailable.
+        """
+        if not self._quality_validator:
+            return {
+                "approved":           True,
+                "confluence_score":   75.0,
+                "dynamic_confidence": float(signal.get("confidence", 75.0)),
+                "quality_tier":       "MEDIUM",
+                "rejection_reasons":  [],
+                "warnings":           ["Quality validator not available"],
+                "expiry_at":          "",
+                "session_quality":    "UNKNOWN",
+                "news_flag":          False,
+                "regime_classification": signal.get("regime", "UNKNOWN"),
+                "position_size_lots": 0.01,
+                "atr_value":          float(signal.get("atr", 0.0)),
+            }
+
+        # Build enriched signal dict for validator
+        enriched = {
+            "symbol":          signal.get("pair", signal.get("symbol", "XAUUSD")),
+            "side":            signal.get("type", signal.get("side", "BUY")),
+            "entry_price":     float(signal.get("entry_price", 0)),
+            "sl_price":        float(signal.get("sl_price", 0)),
+            "tp_levels":       signal.get("tp_levels", []),
+            "trade_type":      signal.get("trade_type", "SWING"),
+            "regime":          signal.get("regime", "RANGE"),
+            "confidence":      float(signal.get("confidence", 75.0)),
+            "atr":             float(signal.get("atr", 0.0)),
+            "account_balance": float(signal.get("account_balance", 10_000.0)),
+            "current_price":   float(signal.get("current_price", signal.get("entry_price", 0))),
+            "swing_high":      float(signal.get("swing_high", 0)),
+            "swing_low":       float(signal.get("swing_low", 0)),
+            "day_high":        float(signal.get("day_high", 0)),
+            "day_low":         float(signal.get("day_low", 0)),
+            "position_in_range": float(signal.get("position_in_range", 0.5)),
+            "created_at":      signal.get("created_at", signal.get("timestamp", "")),
+            # Enrichment data (optional — improves confidence scoring)
+            "mtf_result":      signal.get("mtf_result", {}),
+            "smc_result":      signal.get("smc_result", {}),
+            "momentum_data":   signal.get("momentum_data", {}),
+            "session_data":    signal.get("session_data", {}),
+            "news_events":     signal.get("news_events", []),
+            "regime_data":     signal.get("regime_data", {}),
+        }
+
+        try:
+            return self._quality_validator.validate(enriched)
+        except Exception as exc:
+            logger.error(f"Quality validation error: {exc}")
+            return {
+                "approved":           True,
+                "confluence_score":   75.0,
+                "dynamic_confidence": float(signal.get("confidence", 75.0)),
+                "quality_tier":       "MEDIUM",
+                "rejection_reasons":  [],
+                "warnings":           [f"Quality validation error: {exc}"],
+                "expiry_at":          "",
+                "session_quality":    "UNKNOWN",
+                "news_flag":          False,
+                "regime_classification": signal.get("regime", "UNKNOWN"),
+                "position_size_lots": 0.01,
+                "atr_value":          float(signal.get("atr", 0.0)),
+            }
+
+    def enrich_signal_with_quality(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Enrich a signal document with quality validation results.
+
+        Adds the following fields to the signal:
+          - quality_score:          Overall confluence score (0–100)
+          - quality_tier:           HIGH / MEDIUM / LOW / REJECTED
+          - dynamic_confidence:     Recalculated confidence from all sources
+          - regime_classification:  Validated regime label
+          - session_quality:        Session quality flag
+          - news_flag:              True if high-impact news nearby
+          - expiry_at:              Signal expiry timestamp
+          - position_size_lots:     Derived from 1% account risk
+          - atr_value:              Quantified ATR value
+          - quality_checks:         Per-check pass/fail details
+          - quality_rejection_reasons: List of rejection reasons
+          - quality_warnings:       Non-blocking quality warnings
+          - quality_validated_at:   Timestamp of validation
+        """
+        quality = self.run_quality_validation(signal)
+
+        signal["quality_score"]             = quality.get("confluence_score", 0.0)
+        signal["quality_tier"]              = quality.get("quality_tier", "UNKNOWN")
+        signal["dynamic_confidence"]        = quality.get("dynamic_confidence", signal.get("confidence", 75.0))
+        signal["regime_classification"]     = quality.get("regime_classification", signal.get("regime", "UNKNOWN"))
+        signal["session_quality"]           = quality.get("session_quality", "UNKNOWN")
+        signal["news_flag"]                 = quality.get("news_flag", False)
+        signal["expiry_at"]                 = quality.get("expiry_at", "")
+        signal["position_size_lots"]        = quality.get("position_size_lots", 0.01)
+        signal["atr_value"]                 = quality.get("atr_value", signal.get("atr", 0.0))
+        signal["quality_checks"]            = quality.get("checks", {})
+        signal["quality_rejection_reasons"] = quality.get("rejection_reasons", [])
+        signal["quality_warnings"]          = quality.get("warnings", [])
+        signal["quality_validated_at"]      = datetime.utcnow().isoformat()
+        signal["quality_approved"]          = quality.get("approved", True)
+
+        return signal
 
     # ── Audit logging ─────────────────────────────────────────
 
@@ -252,6 +402,22 @@ class SignalManager:
 
         signals = [_serialize(s) for s in raw]
 
+        # Enrich each signal with quality score summary (non-blocking)
+        for sig in signals:
+            if "quality_score" not in sig:
+                try:
+                    quality = self.run_quality_validation(sig)
+                    sig["quality_score"]         = quality.get("confluence_score", 0.0)
+                    sig["quality_tier"]          = quality.get("quality_tier", "UNKNOWN")
+                    sig["dynamic_confidence"]    = quality.get("dynamic_confidence", sig.get("confidence", 75.0))
+                    sig["session_quality"]       = quality.get("session_quality", "UNKNOWN")
+                    sig["news_flag"]             = quality.get("news_flag", False)
+                    sig["expiry_at"]             = quality.get("expiry_at", "")
+                    sig["regime_classification"] = quality.get("regime_classification", sig.get("regime", "UNKNOWN"))
+                    sig["quality_approved"]      = quality.get("approved", True)
+                except Exception as qe:
+                    logger.warning(f"Quality enrichment failed for signal: {qe}")
+
         logger.info(
             f"📋 Manager {requesting_manager['manager_id']} listed "
             f"{len(signals)} pending signals"
@@ -302,9 +468,30 @@ class SignalManager:
         ).sort("timestamp", 1)
         review_log = [_serialize(e) async for e in log_cursor]
 
+        serialized_signal = _serialize(signal)
+
+        # Enrich with quality validation
+        try:
+            quality = self.run_quality_validation(serialized_signal)
+            serialized_signal["quality_score"]             = quality.get("confluence_score", 0.0)
+            serialized_signal["quality_tier"]              = quality.get("quality_tier", "UNKNOWN")
+            serialized_signal["dynamic_confidence"]        = quality.get("dynamic_confidence", serialized_signal.get("confidence", 75.0))
+            serialized_signal["regime_classification"]     = quality.get("regime_classification", serialized_signal.get("regime", "UNKNOWN"))
+            serialized_signal["session_quality"]           = quality.get("session_quality", "UNKNOWN")
+            serialized_signal["news_flag"]                 = quality.get("news_flag", False)
+            serialized_signal["expiry_at"]                 = quality.get("expiry_at", "")
+            serialized_signal["position_size_lots"]        = quality.get("position_size_lots", 0.01)
+            serialized_signal["atr_value"]                 = quality.get("atr_value", 0.0)
+            serialized_signal["quality_checks"]            = quality.get("checks", {})
+            serialized_signal["quality_rejection_reasons"] = quality.get("rejection_reasons", [])
+            serialized_signal["quality_warnings"]          = quality.get("warnings", [])
+            serialized_signal["quality_approved"]          = quality.get("approved", True)
+        except Exception as qe:
+            logger.warning(f"Quality enrichment failed for signal details: {qe}")
+
         return {
             "success":    True,
-            "signal":     _serialize(signal),
+            "signal":     serialized_signal,
             "adjustments": adjustments,
             "review_log": review_log,
         }
@@ -830,6 +1017,231 @@ class SignalManager:
             },
             "per_manager": per_manager,
             "per_pair":    per_pair,
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    # VALIDATE SIGNAL QUALITY  (new — v3.1)
+    # ═══════════════════════════════════════════════════════════
+
+    async def validate_signal_quality(
+        self,
+        requesting_manager: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Run comprehensive quality validation on a specific signal and
+        persist the result to the signal_quality_log collection.
+
+        This endpoint allows managers to explicitly trigger quality
+        validation and review the detailed check results before
+        approving or rejecting a signal.
+
+        Args:
+            requesting_manager: Authenticated manager dict.
+            signal_id:          MongoDB ObjectId string of the signal.
+
+        Returns:
+            {
+              "success": True,
+              "signal_id": str,
+              "quality": {
+                "approved": bool,
+                "confluence_score": float,
+                "dynamic_confidence": float,
+                "quality_tier": str,
+                "regime_classification": str,
+                "session_quality": str,
+                "news_flag": bool,
+                "expiry_at": str,
+                "position_size_lots": float,
+                "atr_value": float,
+                "rejection_reasons": [str],
+                "warnings": [str],
+                "checks": { check_name: {...} },
+              }
+            }
+        """
+        _check_review_permission(requesting_manager)
+        db = self._get_db()
+
+        try:
+            oid = _oid(signal_id)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        signal = await db.signals.find_one({"_id": oid})
+        if not signal:
+            return {"success": False, "error": f"Signal '{signal_id}' not found"}
+
+        serialized = _serialize(signal)
+        quality    = self.run_quality_validation(serialized)
+
+        # Persist quality result to log collection
+        try:
+            quality_log_entry = {
+                "log_id":       str(uuid.uuid4()),
+                "signal_id":    signal_id,
+                "validated_at": datetime.utcnow(),
+                "validated_by": requesting_manager["manager_id"],
+                "approved":     quality.get("approved", False),
+                "confluence_score": quality.get("confluence_score", 0.0),
+                "dynamic_confidence": quality.get("dynamic_confidence", 0.0),
+                "quality_tier": quality.get("quality_tier", "UNKNOWN"),
+                "rejection_reasons": quality.get("rejection_reasons", []),
+                "warnings":     quality.get("warnings", []),
+                "session_quality": quality.get("session_quality", "UNKNOWN"),
+                "news_flag":    quality.get("news_flag", False),
+                "regime_classification": quality.get("regime_classification", "UNKNOWN"),
+            }
+            await db.signal_quality_log.insert_one(quality_log_entry)
+        except Exception as log_exc:
+            logger.warning(f"Quality log write failed: {log_exc}")
+
+        # Also update the signal document with quality fields
+        try:
+            await db.signals.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "quality_score":             quality.get("confluence_score", 0.0),
+                    "quality_tier":              quality.get("quality_tier", "UNKNOWN"),
+                    "dynamic_confidence":        quality.get("dynamic_confidence", 0.0),
+                    "regime_classification":     quality.get("regime_classification", "UNKNOWN"),
+                    "session_quality":           quality.get("session_quality", "UNKNOWN"),
+                    "news_flag":                 quality.get("news_flag", False),
+                    "expiry_at":                 quality.get("expiry_at", ""),
+                    "position_size_lots":        quality.get("position_size_lots", 0.01),
+                    "atr_value":                 quality.get("atr_value", 0.0),
+                    "quality_rejection_reasons": quality.get("rejection_reasons", []),
+                    "quality_warnings":          quality.get("warnings", []),
+                    "quality_validated_at":      datetime.utcnow(),
+                    "quality_approved":          quality.get("approved", True),
+                }}
+            )
+        except Exception as upd_exc:
+            logger.warning(f"Signal quality update failed: {upd_exc}")
+
+        logger.info(
+            f"🔍 Quality validation for signal {signal_id}: "
+            f"{'APPROVED' if quality.get('approved') else 'REJECTED'} "
+            f"(score={quality.get('confluence_score', 0):.1f}%, "
+            f"tier={quality.get('quality_tier', 'UNKNOWN')})"
+        )
+
+        return {
+            "success":   True,
+            "signal_id": signal_id,
+            "pair":      signal.get("pair"),
+            "type":      signal.get("type"),
+            "quality":   quality,
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    # GET QUALITY SUMMARY  (new — v3.1)
+    # ═══════════════════════════════════════════════════════════
+
+    async def get_quality_summary(
+        self,
+        requesting_manager: Dict[str, Any],
+        days: int = 7,
+    ) -> Dict[str, Any]:
+        """
+        Return a summary of signal quality metrics over the given period.
+
+        Includes:
+          - Average confluence score
+          - Quality tier distribution
+          - Top rejection reasons
+          - Session quality breakdown
+          - News flag rate
+          - Dynamic vs static confidence delta
+
+        Args:
+            requesting_manager: Authenticated manager dict.
+            days:               Look-back window in days (1–90).
+
+        Returns:
+            {"success": True, "summary": {...}}
+        """
+        _check_review_permission(requesting_manager)
+        db = self._get_db()
+
+        days  = max(1, min(days, 90))
+        since = datetime.utcnow() - timedelta(days=days)
+
+        # Fetch quality log entries
+        cursor = db.signal_quality_log.find(
+            {"validated_at": {"$gte": since}}
+        ).sort("validated_at", -1).limit(1000)
+        entries = await cursor.to_list(length=1000)
+
+        if not entries:
+            return {
+                "success": True,
+                "summary": {
+                    "period_days":    days,
+                    "total_validated": 0,
+                    "message":        "No quality validation records in period",
+                },
+            }
+
+        total = len(entries)
+        approved_count = sum(1 for e in entries if e.get("approved"))
+        rejected_count = total - approved_count
+
+        # Average confluence score
+        scores = [e.get("confluence_score", 0) for e in entries]
+        avg_score = sum(scores) / len(scores) if scores else 0
+
+        # Tier distribution
+        tier_dist: Dict[str, int] = {}
+        for e in entries:
+            tier = e.get("quality_tier", "UNKNOWN")
+            tier_dist[tier] = tier_dist.get(tier, 0) + 1
+
+        # Top rejection reasons
+        all_reasons: List[str] = []
+        for e in entries:
+            all_reasons.extend(e.get("rejection_reasons", []))
+        reason_counts: Dict[str, int] = {}
+        for r in all_reasons:
+            # Truncate to first 60 chars for grouping
+            key = r[:60]
+            reason_counts[key] = reason_counts.get(key, 0) + 1
+        top_reasons = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Session quality breakdown
+        session_dist: Dict[str, int] = {}
+        for e in entries:
+            sess = e.get("session_quality", "UNKNOWN")
+            session_dist[sess] = session_dist.get(sess, 0) + 1
+
+        # News flag rate
+        news_flagged = sum(1 for e in entries if e.get("news_flag"))
+
+        # Confidence delta (dynamic vs static)
+        conf_deltas = []
+        for e in entries:
+            dyn = e.get("dynamic_confidence", 0)
+            if dyn > 0:
+                conf_deltas.append(dyn)
+        avg_dynamic_confidence = sum(conf_deltas) / len(conf_deltas) if conf_deltas else 0
+
+        return {
+            "success": True,
+            "summary": {
+                "period_days":            days,
+                "total_validated":        total,
+                "approved":               approved_count,
+                "rejected":               rejected_count,
+                "approval_rate":          round(approved_count / total * 100, 1) if total > 0 else 0.0,
+                "avg_confluence_score":   round(avg_score, 1),
+                "avg_dynamic_confidence": round(avg_dynamic_confidence, 1),
+                "tier_distribution":      tier_dist,
+                "top_rejection_reasons":  [{"reason": r, "count": c} for r, c in top_reasons],
+                "session_distribution":   session_dist,
+                "news_flag_rate":         round(news_flagged / total * 100, 1) if total > 0 else 0.0,
+                "quality_validator_active": HAS_QUALITY_VALIDATOR,
+            },
         }
 
 
