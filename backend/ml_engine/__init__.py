@@ -31,6 +31,42 @@ from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
 from .geometry_rating import GeometryRating, geometry_rater
 
+# ── v3.0.2 Signal Quality Enhancement modules ─────────────────────────────
+from .signal_quality_validator import (
+    SignalQualityValidator,
+    signal_quality_validator,
+    RiskRewardValidator,
+    RegimeValidator,
+    EntryValidator,
+    ConfidenceCalculator,
+    SLValidator,
+    SessionValidator,
+    MTFValidator,
+    SignalExpiryValidator,
+    NewsFilterValidator,
+    ValidationReport,
+    ValidationIssue,
+)
+from .hybrid_enhancement_indicators import (
+    HybridEnhancementSuite,
+    hybrid_enhancement_suite,
+    SMCOrderFlowIndicator,
+    TripleMomentumIndicator,
+    VWAPPriceActionIndicator,
+    FibonacciSMCConfluence,
+    ATRBollingerBandsIndicator,
+    RangeBreakoutFilter,
+    SwingScalpEntryTiming,
+    TrendMeanReversionHybrid,
+    MTFPyramidBreakdown,
+    SessionBasedMTFWeighting,
+    FixedTrailingStopHybrid,
+    VolatilityAdjustedSizing,
+    DynamicConfluenceScore,
+    HybridEnhancementResult,
+    IndicatorResult,
+)
+
 __all__ = [
     # Legacy v2.0
     'FeatureEngineer',
@@ -83,4 +119,36 @@ __all__ = [
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',
+    # v3.0.2 Signal Quality Enhancement
+    'SignalQualityValidator',
+    'signal_quality_validator',
+    'RiskRewardValidator',
+    'RegimeValidator',
+    'EntryValidator',
+    'ConfidenceCalculator',
+    'SLValidator',
+    'SessionValidator',
+    'MTFValidator',
+    'SignalExpiryValidator',
+    'NewsFilterValidator',
+    'ValidationReport',
+    'ValidationIssue',
+    # v3.0.2 Hybrid Enhancement Indicators
+    'HybridEnhancementSuite',
+    'hybrid_enhancement_suite',
+    'SMCOrderFlowIndicator',
+    'TripleMomentumIndicator',
+    'VWAPPriceActionIndicator',
+    'FibonacciSMCConfluence',
+    'ATRBollingerBandsIndicator',
+    'RangeBreakoutFilter',
+    'SwingScalpEntryTiming',
+    'TrendMeanReversionHybrid',
+    'MTFPyramidBreakdown',
+    'SessionBasedMTFWeighting',
+    'FixedTrailingStopHybrid',
+    'VolatilityAdjustedSizing',
+    'DynamicConfluenceScore',
+    'HybridEnhancementResult',
+    'IndicatorResult',
 ]
