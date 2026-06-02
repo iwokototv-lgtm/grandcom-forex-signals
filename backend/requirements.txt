@@ -25,3 +25,7 @@ ta==0.11.0
 pandas>=2.2.3
 aiohttp>=3.9.0
 joblib>=1.4.0
+# Signal Quality Enhancement (v3.1)
+# Economic calendar and news filter support
+# (aiohttp already included above — used for ForexFactory calendar fetch)
+# No additional pip packages required; all quality logic is pure Python + numpy/pandas

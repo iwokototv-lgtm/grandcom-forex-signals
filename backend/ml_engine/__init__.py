@@ -31,6 +31,26 @@ from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
 from .geometry_rating import GeometryRating, geometry_rater
 
+# ── v3.1 Signal Quality Enhancement modules ───────────────────────────────
+from .signal_quality_validator import SignalQualityValidator, signal_quality_validator
+from .hybrid_indicators import (
+    HybridIndicators,
+    hybrid_indicators,
+    SMCOrderFlowIndicator,
+    TripleMomentumIndicator,
+    VWAPPriceActionIndicator,
+    FibonacciSMCIndicator,
+    ATRBollingerIndicator,
+    RangeBreakoutFilter,
+    SwingScalpEntryIndicator,
+    TrendMeanReversionIndicator,
+    MTFPyramidIndicator,
+    SessionMTFWeightingIndicator,
+    FixedTrailingStopIndicator,
+    VolatilityPositionSizingIndicator,
+    DynamicConfluenceScore,
+)
+
 __all__ = [
     # Legacy v2.0
     'FeatureEngineer',
@@ -83,4 +103,22 @@ __all__ = [
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',
+    # v3.1 Signal Quality Enhancement
+    'SignalQualityValidator',
+    'signal_quality_validator',
+    'HybridIndicators',
+    'hybrid_indicators',
+    'SMCOrderFlowIndicator',
+    'TripleMomentumIndicator',
+    'VWAPPriceActionIndicator',
+    'FibonacciSMCIndicator',
+    'ATRBollingerIndicator',
+    'RangeBreakoutFilter',
+    'SwingScalpEntryIndicator',
+    'TrendMeanReversionIndicator',
+    'MTFPyramidIndicator',
+    'SessionMTFWeightingIndicator',
+    'FixedTrailingStopIndicator',
+    'VolatilityPositionSizingIndicator',
+    'DynamicConfluenceScore',
 ]
