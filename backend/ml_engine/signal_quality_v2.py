@@ -48,9 +48,27 @@ TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
 # ATR multiple for SL — tighter, creates ~1:1 R:R base
 SL_ATR_MULTIPLIER  = 0.64  # SL distance = 0.64x ATR (~9.59 pips at typical 15 ATR)
 
+# Dynamic SL multipliers per volatility regime
+SL_MULTIPLIER_SQUEEZE   = 0.4   # Tight SL in low-volatility squeeze (~6 pips at 15 ATR)
+SL_MULTIPLIER_NORMAL    = 0.64  # Medium SL in normal conditions (~9.59 pips at 15 ATR)
+SL_MULTIPLIER_EXPANDING = 0.8   # Wider SL in high-volatility expansion (~12 pips at 15 ATR)
+
+# Confidence-based SL adjustment (applied on top of regime multiplier)
+SL_CONFIDENCE_ADJUSTMENT = 0.1  # ±0.1 tighter/wider based on confidence
+
 # ATR multiples for SL anchoring (legacy structure-based buffer, kept for reference)
 SL_ATR_BUFFER_MIN  = 0.15  # Minimum ATR buffer beyond structure
 SL_ATR_BUFFER_MAX  = 0.50  # Maximum ATR buffer beyond structure
+
+# Volatility regime labels
+VOLATILITY_REGIME_SQUEEZE   = "SQUEEZE"    # BB width < 20th percentile, low ATR
+VOLATILITY_REGIME_NORMAL    = "NORMAL"     # BB width in middle range, normal ATR
+VOLATILITY_REGIME_EXPANDING = "EXPANDING"  # BB width > 80th percentile, high ATR
+
+# BB percentile thresholds for regime detection
+BB_SQUEEZE_PERCENTILE   = 20  # Below this → SQUEEZE
+BB_EXPANDING_PERCENTILE = 80  # Above this → EXPANDING
+BB_LOOKBACK_PERIODS     = 50  # Periods used to compute BB width percentile
 
 # Confidence thresholds
 CONFIDENCE_HIGH    = 80.0
@@ -462,6 +480,9 @@ class SignalQualityV2:
             rr_result=rr_result,
         )
 
+        # ── 6b. Volatility Regime Detection ───────────────────
+        volatility_regime = self.detect_volatility_regime(atr=atr)
+
         # ── 7. SL Anchoring ───────────────────────────────────
         sl_result = self.anchor_sl_to_structure(
             signal_type=sig_type,
@@ -470,6 +491,8 @@ class SignalQualityV2:
             swing_high=swing_high,
             swing_low=swing_low,
             atr=atr,
+            volatility_regime=volatility_regime,
+            confidence_score=confidence_result.total_score,
         )
 
         # ── 8. ATR Quantification ─────────────────────────────
@@ -1013,51 +1036,176 @@ class SignalQualityV2:
     # 5. SL ANCHORING TO STRUCTURE
     # ═══════════════════════════════════════════════════════════
 
+    def detect_volatility_regime(
+        self,
+        atr:        float,
+        bb_widths:  Optional[List[float]] = None,
+        atr_series: Optional[List[float]] = None,
+    ) -> str:
+        """
+        Detect the current volatility regime using Bollinger Band width and ATR.
+
+        Classification (percentile-based when historical data is available):
+          SQUEEZE   : BB width < 20th percentile OR ATR in lowest quartile
+          EXPANDING : BB width > 80th percentile OR ATR in highest quartile
+          NORMAL    : BB width in middle range, ATR normal
+
+        When no historical series is provided, falls back to ATR-only heuristics
+        calibrated for XAUUSD 1H (typical ATR ≈ 10–20).
+
+        Returns:
+            "SQUEEZE" | "NORMAL" | "EXPANDING"
+        """
+        # ── Percentile-based detection (preferred) ────────────
+        if bb_widths and len(bb_widths) >= BB_LOOKBACK_PERIODS:
+            widths = np.array(bb_widths[-BB_LOOKBACK_PERIODS:], dtype=float)
+            current_width = widths[-1]
+            p20 = float(np.percentile(widths, BB_SQUEEZE_PERCENTILE))
+            p80 = float(np.percentile(widths, BB_EXPANDING_PERCENTILE))
+
+            if current_width <= p20:
+                return VOLATILITY_REGIME_SQUEEZE
+            elif current_width >= p80:
+                return VOLATILITY_REGIME_EXPANDING
+            else:
+                return VOLATILITY_REGIME_NORMAL
+
+        # ── ATR-series percentile fallback ────────────────────
+        if atr_series and len(atr_series) >= BB_LOOKBACK_PERIODS:
+            series = np.array(atr_series[-BB_LOOKBACK_PERIODS:], dtype=float)
+            current_atr = series[-1]
+            p20 = float(np.percentile(series, BB_SQUEEZE_PERCENTILE))
+            p80 = float(np.percentile(series, BB_EXPANDING_PERCENTILE))
+
+            if current_atr <= p20:
+                return VOLATILITY_REGIME_SQUEEZE
+            elif current_atr >= p80:
+                return VOLATILITY_REGIME_EXPANDING
+            else:
+                return VOLATILITY_REGIME_NORMAL
+
+        # ── ATR scalar heuristic (XAUUSD 1H calibrated) ───────
+        # Typical 1H ATR for gold: ~10 (low) to ~25 (high)
+        if atr < 10.0:
+            return VOLATILITY_REGIME_SQUEEZE
+        elif atr > 20.0:
+            return VOLATILITY_REGIME_EXPANDING
+        else:
+            return VOLATILITY_REGIME_NORMAL
+
+    def calculate_dynamic_sl_multiplier(
+        self,
+        volatility_regime: str,
+        confidence_score:  float,
+    ) -> float:
+        """
+        Calculate a dynamic SL ATR multiplier based on volatility regime and
+        signal confidence.
+
+        Base multipliers by regime:
+          SQUEEZE   → 0.4  (tight SL — low volatility, small moves)
+          NORMAL    → 0.64 (medium SL — balanced conditions)
+          EXPANDING → 0.8  (wider SL — high volatility, larger swings)
+
+        Confidence adjustment (±SL_CONFIDENCE_ADJUSTMENT = ±0.1):
+          HIGH confidence (≥80)   → subtract 0.1 (tighter, more conviction)
+          LOW confidence  (<65)   → add    0.1 (wider, less conviction)
+          MEDIUM confidence       → no adjustment
+
+        Final multiplier is clamped to [0.3, 0.9] to prevent extreme values.
+
+        Examples:
+          SQUEEZE   + HIGH confidence  → 0.4 − 0.1 = 0.30
+          NORMAL    + MEDIUM confidence → 0.64 + 0.0 = 0.64
+          EXPANDING + LOW confidence   → 0.8 + 0.1 = 0.90
+        """
+        regime_map = {
+            VOLATILITY_REGIME_SQUEEZE:   SL_MULTIPLIER_SQUEEZE,
+            VOLATILITY_REGIME_NORMAL:    SL_MULTIPLIER_NORMAL,
+            VOLATILITY_REGIME_EXPANDING: SL_MULTIPLIER_EXPANDING,
+        }
+        base = regime_map.get(volatility_regime.upper(), SL_MULTIPLIER_NORMAL)
+
+        # Confidence adjustment
+        if confidence_score >= CONFIDENCE_HIGH:
+            adjustment = -SL_CONFIDENCE_ADJUSTMENT   # Tighter — high conviction
+        elif confidence_score < CONFIDENCE_MEDIUM:
+            adjustment = +SL_CONFIDENCE_ADJUSTMENT   # Wider — lower conviction
+        else:
+            adjustment = 0.0
+
+        multiplier = base + adjustment
+
+        # Clamp to safe range
+        multiplier = round(max(0.3, min(0.9, multiplier)), 2)
+
+        logger.debug(
+            f"Dynamic SL multiplier: regime={volatility_regime} "
+            f"confidence={confidence_score:.1f} base={base} "
+            f"adj={adjustment:+.1f} final={multiplier}"
+        )
+        return multiplier
+
     def anchor_sl_to_structure(
         self,
-        signal_type: str,
-        entry_price: float,
-        sl_price:    float,
-        swing_high:  float,
-        swing_low:   float,
-        atr:         float,
+        signal_type:       str,
+        entry_price:       float,
+        sl_price:          float,
+        swing_high:        float,
+        swing_low:         float,
+        atr:               float,
+        volatility_regime: str = VOLATILITY_REGIME_NORMAL,
+        confidence_score:  float = 65.0,
     ) -> SLAnchorResult:
         """
-        Validate and suggest SL anchored to entry price using ATR-based distance.
+        Validate and suggest SL anchored to entry price using a dynamic
+        ATR-based distance that adapts to the current volatility regime.
 
-        BUY : ideal SL = entry - (ATR * SL_ATR_MULTIPLIER)
-        SELL: ideal SL = entry + (ATR * SL_ATR_MULTIPLIER)
+        BUY : ideal SL = entry - (ATR × dynamic_multiplier)
+        SELL: ideal SL = entry + (ATR × dynamic_multiplier)
 
-        SL_ATR_MULTIPLIER = 0.5 produces tight, 1H-appropriate stops that
-        create a ~1:1 base R:R with TP1 (also 0.5x ATR from entry).
+        Dynamic multiplier by regime:
+          SQUEEZE   (low vol)  → 0.4x ATR  (~6 pips at 15 ATR)
+          NORMAL               → 0.64x ATR (~9.59 pips at 15 ATR)
+          EXPANDING (high vol) → 0.8x ATR  (~12 pips at 15 ATR)
+
+        Confidence adjustment: HIGH → −0.1 (tighter), LOW → +0.1 (wider).
         """
         direction = signal_type.upper()
-        buffer = SL_ATR_MULTIPLIER  # 0.5x ATR
+        dynamic_multiplier = self.calculate_dynamic_sl_multiplier(
+            volatility_regime=volatility_regime,
+            confidence_score=confidence_score,
+        )
 
         if direction == "BUY":
             anchor_level = swing_low
-            ideal_sl = entry_price - (atr * buffer)
+            ideal_sl = entry_price - (atr * dynamic_multiplier)
             is_structural = sl_price <= entry_price
         else:
             anchor_level = swing_high
-            ideal_sl = entry_price + (atr * buffer)
+            ideal_sl = entry_price + (atr * dynamic_multiplier)
             is_structural = sl_price >= entry_price
 
         distance_pips = abs(entry_price - sl_price) / PIP_VALUE_GOLD
-        atr_buffer_price = atr * buffer
+        atr_buffer_price = atr * dynamic_multiplier
+        ideal_pips = atr_buffer_price / PIP_VALUE_GOLD
 
         if is_structural:
             rec = (
                 f"✓ SL at {sl_price:.2f} is on the correct side of entry "
-                f"({entry_price:.2f}). ATR-based ideal SL: {ideal_sl:.2f} "
-                f"({SL_ATR_MULTIPLIER}x ATR = {atr_buffer_price:.2f} from entry)."
+                f"({entry_price:.2f}). "
+                f"Regime: {volatility_regime} | Confidence: {confidence_score:.0f}% → "
+                f"dynamic multiplier {dynamic_multiplier}x ATR. "
+                f"Ideal SL: {ideal_sl:.2f} ({ideal_pips:.1f} pips from entry)."
             )
         else:
             rec = (
                 f"⚠ SL at {sl_price:.2f} is on the WRONG side of entry "
                 f"({entry_price:.2f}). "
+                f"Regime: {volatility_regime} | Confidence: {confidence_score:.0f}% → "
+                f"dynamic multiplier {dynamic_multiplier}x ATR. "
                 f"Recommended SL: {ideal_sl:.2f} "
-                f"(entry ± {atr_buffer_price:.2f}, i.e. {SL_ATR_MULTIPLIER}x ATR)."
+                f"(entry ± {atr_buffer_price:.2f}, i.e. {ideal_pips:.1f} pips)."
             )
 
         return SLAnchorResult(

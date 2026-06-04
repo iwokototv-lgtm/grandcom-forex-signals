@@ -878,8 +878,19 @@ class HybridIndicators:
         """
         ATR + Bollinger Bands for volatility sizing and squeeze detection.
 
-        BB Squeeze = BB width < 1 ATR → breakout imminent.
+        Volatility regime is classified using BB width percentiles over the
+        last 50 periods (configurable via BB_LOOKBACK_PERIODS):
+          SQUEEZE   : current BB width ≤ 20th percentile (low volatility)
+          EXPANDING : current BB width ≥ 80th percentile (high volatility)
+          NORMAL    : BB width in middle range (balanced conditions)
+
+        Falls back to ATR-relative thresholds when insufficient history exists.
+        BB Squeeze flag is also set when BB width < 1 ATR (breakout imminent).
         """
+        BB_LOOKBACK_PERIODS = 50  # Periods for percentile calculation
+        BB_SQUEEZE_PCT      = 20  # Percentile below which → SQUEEZE
+        BB_EXPANDING_PCT    = 80  # Percentile above which → EXPANDING
+
         if len(df) < BB_PERIOD + 5:
             return ATRBBResult(
                 atr=atr, atr_pips=atr / PIP_VALUE_GOLD,
@@ -895,10 +906,16 @@ class HybridIndicators:
             )
 
         close = df["close"].astype(float)
-        bb_mid = float(close.rolling(BB_PERIOD).mean().iloc[-1])
-        bb_std = float(close.rolling(BB_PERIOD).std().iloc[-1])
-        bb_upper = bb_mid + BB_STD * bb_std
-        bb_lower = bb_mid - BB_STD * bb_std
+        bb_mid_series = close.rolling(BB_PERIOD).mean()
+        bb_std_series = close.rolling(BB_PERIOD).std()
+        bb_upper_series = bb_mid_series + BB_STD * bb_std_series
+        bb_lower_series = bb_mid_series - BB_STD * bb_std_series
+        bb_width_series = (bb_upper_series - bb_lower_series).dropna()
+
+        bb_mid   = float(bb_mid_series.iloc[-1])
+        bb_std_v = float(bb_std_series.iloc[-1])
+        bb_upper = float(bb_upper_series.iloc[-1])
+        bb_lower = float(bb_lower_series.iloc[-1])
         bb_width = bb_upper - bb_lower
 
         atr_pips = atr / PIP_VALUE_GOLD
@@ -907,22 +924,35 @@ class HybridIndicators:
         # Price position relative to BB
         if current_price > bb_upper:
             price_vs_bb = "ABOVE_UPPER"
-        elif current_price > bb_mid + bb_std * 0.5:
+        elif current_price > bb_mid + bb_std_v * 0.5:
             price_vs_bb = "NEAR_UPPER"
         elif current_price < bb_lower:
             price_vs_bb = "BELOW_LOWER"
-        elif current_price < bb_mid - bb_std * 0.5:
+        elif current_price < bb_mid - bb_std_v * 0.5:
             price_vs_bb = "NEAR_LOWER"
         else:
             price_vs_bb = "MIDDLE"
 
-        # Volatility regime
-        if bb_squeeze:
-            vol_regime = "SQUEEZE"
-        elif bb_width > atr * 3:
-            vol_regime = "EXPANDING"
+        # ── Percentile-based volatility regime detection ──────
+        if len(bb_width_series) >= BB_LOOKBACK_PERIODS:
+            recent_widths = bb_width_series.iloc[-BB_LOOKBACK_PERIODS:].values
+            p20 = float(np.percentile(recent_widths, BB_SQUEEZE_PCT))
+            p80 = float(np.percentile(recent_widths, BB_EXPANDING_PCT))
+
+            if bb_width <= p20:
+                vol_regime = "SQUEEZE"
+            elif bb_width >= p80:
+                vol_regime = "EXPANDING"
+            else:
+                vol_regime = "NORMAL"
         else:
-            vol_regime = "NORMAL"
+            # Fallback: ATR-relative thresholds
+            if bb_squeeze:
+                vol_regime = "SQUEEZE"
+            elif bb_width > atr * 3:
+                vol_regime = "EXPANDING"
+            else:
+                vol_regime = "NORMAL"
 
         # Score
         if vol_regime == "SQUEEZE":
@@ -935,7 +965,8 @@ class HybridIndicators:
         rec = (
             f"ATR: {atr:.2f} ({atr_pips:.0f} pips). "
             f"BB: [{bb_lower:.2f}–{bb_upper:.2f}], width={bb_width:.2f}. "
-            f"Regime: {vol_regime}. "
+            f"Regime: {vol_regime} "
+            f"({'percentile-based' if len(bb_width_series) >= BB_LOOKBACK_PERIODS else 'ATR-fallback'}). "
             f"Price: {price_vs_bb}. "
             f"{'⚡ Squeeze — breakout imminent.' if bb_squeeze else ''}"
         )
