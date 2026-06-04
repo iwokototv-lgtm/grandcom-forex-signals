@@ -59,18 +59,18 @@ PAIRS = {
     "XAUUSD": {
         "symbol": "XAU/USD",
         "decimals": 2,
-        "atr_sl": 1.5,
-        "atr_tp1": 2.0,
-        "atr_tp2": 3.5,
-        "atr_tp3": 5.0,
+        "atr_sl": 0.5,    # Tighter SL: 0.5x ATR (was 1.5x) — 1H scalp/swing
+        "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
+        "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
+        "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
     },
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
-        "atr_sl": 1.5,
-        "atr_tp1": 2.0,
-        "atr_tp2": 3.5,
-        "atr_tp3": 5.0,
+        "atr_sl": 0.5,    # Tighter SL: 0.5x ATR (was 1.5x) — 1H scalp/swing
+        "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
+        "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
+        "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
     },
 }
 
