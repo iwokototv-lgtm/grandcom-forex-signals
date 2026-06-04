@@ -69,31 +69,41 @@ class HybridTPSLEngine:
             atr = self._calculate_atr(df)
             result["atr"] = round(atr, 5)
 
-            # 2. Apply volatility regime weighting
-            atr_weighted = self._apply_volatility_weighting(atr, volatility_regime)
-            result["atr_weighted"] = round(atr_weighted, 5)
-            result["volatility_regime"] = volatility_regime
+            # 2. Detect volatility regime from price data (overrides caller-supplied value)
+            detected_regime = self._detect_volatility_regime(df, atr)
+            result["volatility_regime"] = detected_regime
+            result["volatility_regime_input"] = volatility_regime  # preserve original
 
-            # 3. Find market structure levels
+            # 3. Apply volatility regime weighting to ATR
+            atr_weighted = self._apply_volatility_weighting(atr, detected_regime)
+            result["atr_weighted"] = round(atr_weighted, 5)
+
+            # 4. Find market structure levels
             structure = self._find_market_structure(df, direction)
             result["market_structure"] = structure
 
-            # 4. Find liquidity zones
+            # 5. Find liquidity zones
             liquidity = self._find_liquidity_zones(df, smc_analysis, direction)
             result["liquidity_zones"] = liquidity
 
-            # 5. Calculate SL with market structure alignment
+            # 6. Calculate SL with dynamic regime-aware multiplier
             sl_price = self._calculate_sl(
                 entry_price,
                 direction,
                 atr_weighted,
                 structure,
                 liquidity,
+                volatility_regime=detected_regime,
+                confidence=confidence,
             )
             result["sl_price"] = round(sl_price, 5)
             result["sl_distance"] = round(abs(entry_price - sl_price), 5)
+            result["sl_atr_multiplier"] = self._calculate_dynamic_sl_multiplier(
+                volatility_regime=detected_regime,
+                confidence=confidence,
+            )
 
-            # 6. Calculate TP levels with liquidity alignment
+            # 7. Calculate TP levels with liquidity alignment
             tp_levels = self._calculate_tp_levels(
                 entry_price,
                 direction,
@@ -104,7 +114,7 @@ class HybridTPSLEngine:
             )
             result["tp_levels"] = [round(tp, 5) for tp in tp_levels]
 
-            # 7. Calculate dynamic R:R ratios
+            # 8. Calculate dynamic R:R ratios
             rr_ratios = self._calculate_rr_ratios(
                 entry_price,
                 sl_price,
@@ -114,7 +124,7 @@ class HybridTPSLEngine:
             )
             result["rr_ratios"] = [round(rr, 2) for rr in rr_ratios]
 
-            # 8. Quality assessment
+            # 9. Quality assessment
             result["quality_score"] = self._assess_quality(
                 structure,
                 liquidity,
@@ -125,13 +135,29 @@ class HybridTPSLEngine:
             logger.info(
                 f"TP/SL [{symbol}/{direction}]: SL={result['sl_price']} "
                 f"TP={result['tp_levels']} R:R={result['rr_ratios']} "
-                f"Quality={result['quality_score']}/10"
+                f"Quality={result['quality_score']}/10 "
+                f"Regime={detected_regime} SL_mult={result['sl_atr_multiplier']}"
             )
             return result
 
         except Exception as exc:
             logger.error(f"TP/SL calculation error: {exc}", exc_info=True)
             return {"error": str(exc), "valid": False}
+
+    # Dynamic SL multipliers per volatility regime
+    SL_MULTIPLIER_SQUEEZE   = 0.4   # Tight SL in low-volatility squeeze (~6 pips at 15 ATR)
+    SL_MULTIPLIER_NORMAL    = 0.64  # Medium SL in normal conditions (~9.59 pips at 15 ATR)
+    SL_MULTIPLIER_EXPANDING = 0.8   # Wider SL in high-volatility expansion (~12 pips at 15 ATR)
+
+    # Confidence-based SL adjustment (applied on top of regime multiplier)
+    SL_CONFIDENCE_ADJUSTMENT = 0.1  # ±0.1 tighter/wider based on confidence
+
+    # BB percentile thresholds for regime detection
+    BB_SQUEEZE_PERCENTILE   = 20  # Below this → SQUEEZE
+    BB_EXPANDING_PERCENTILE = 80  # Above this → EXPANDING
+    BB_LOOKBACK_PERIODS     = 50  # Periods used to compute BB width percentile
+    BB_PERIOD               = 20  # Bollinger Band calculation period
+    BB_STD                  = 2.0 # Bollinger Band standard deviation multiplier
 
     # ------------------------------------------------------------------
     # ATR Calculation & Weighting
@@ -281,12 +307,111 @@ class HybridTPSLEngine:
         return zones
 
     # ------------------------------------------------------------------
+    # Volatility Regime Detection
+    # ------------------------------------------------------------------
+
+    def _detect_volatility_regime(
+        self,
+        df: pd.DataFrame,
+        atr: float,
+    ) -> str:
+        """
+        Detect the current volatility regime using Bollinger Band width
+        percentiles and ATR.
+
+        Classification:
+          SQUEEZE   : BB width < 20th percentile (low volatility, tight range)
+          EXPANDING : BB width > 80th percentile (high volatility, wide range)
+          NORMAL    : BB width in middle range (balanced conditions)
+
+        Falls back to ATR-only heuristics when insufficient data is available.
+
+        Returns:
+            "SQUEEZE" | "NORMAL" | "EXPANDING"
+        """
+        if len(df) >= self.BB_PERIOD + self.BB_LOOKBACK_PERIODS:
+            close = df["close"].astype(float)
+            bb_mid = close.rolling(self.BB_PERIOD).mean()
+            bb_std = close.rolling(self.BB_PERIOD).std()
+            bb_upper = bb_mid + self.BB_STD * bb_std
+            bb_lower = bb_mid - self.BB_STD * bb_std
+            bb_widths = (bb_upper - bb_lower).dropna()
+
+            if len(bb_widths) >= self.BB_LOOKBACK_PERIODS:
+                recent_widths = bb_widths.iloc[-self.BB_LOOKBACK_PERIODS:].values
+                current_width = float(bb_widths.iloc[-1])
+                p20 = float(np.percentile(recent_widths, self.BB_SQUEEZE_PERCENTILE))
+                p80 = float(np.percentile(recent_widths, self.BB_EXPANDING_PERCENTILE))
+
+                if current_width <= p20:
+                    return "SQUEEZE"
+                elif current_width >= p80:
+                    return "EXPANDING"
+                else:
+                    return "NORMAL"
+
+        # ATR scalar heuristic fallback (XAUUSD 1H calibrated)
+        # Typical 1H ATR for gold: ~10 (low) to ~25 (high)
+        if atr < 10.0:
+            return "SQUEEZE"
+        elif atr > 20.0:
+            return "EXPANDING"
+        else:
+            return "NORMAL"
+
+    def _calculate_dynamic_sl_multiplier(
+        self,
+        volatility_regime: str,
+        confidence: float,
+    ) -> float:
+        """
+        Calculate a dynamic SL ATR multiplier based on volatility regime and
+        signal confidence (0–1 scale).
+
+        Base multipliers by regime:
+          SQUEEZE   → 0.4  (tight SL — low volatility, small moves)
+          NORMAL    → 0.64 (medium SL — balanced conditions)
+          EXPANDING → 0.8  (wider SL — high volatility, larger swings)
+
+        Confidence adjustment (±SL_CONFIDENCE_ADJUSTMENT = ±0.1):
+          HIGH confidence (≥0.8) → subtract 0.1 (tighter, more conviction)
+          LOW confidence  (<0.5) → add    0.1 (wider, less conviction)
+          MEDIUM confidence      → no adjustment
+
+        Final multiplier is clamped to [0.3, 0.9] to prevent extreme values.
+
+        Examples:
+          SQUEEZE   + HIGH confidence  → 0.4 − 0.1 = 0.30
+          NORMAL    + MEDIUM confidence → 0.64 + 0.0 = 0.64
+          EXPANDING + LOW confidence   → 0.8 + 0.1 = 0.90
+        """
+        regime_map = {
+            "SQUEEZE":   self.SL_MULTIPLIER_SQUEEZE,
+            "NORMAL":    self.SL_MULTIPLIER_NORMAL,
+            "EXPANDING": self.SL_MULTIPLIER_EXPANDING,
+        }
+        base = regime_map.get(volatility_regime.upper(), self.SL_MULTIPLIER_NORMAL)
+
+        # Confidence adjustment (confidence is 0–1 in tp_sl_engine)
+        if confidence >= 0.8:
+            adjustment = -self.SL_CONFIDENCE_ADJUSTMENT   # Tighter — high conviction
+        elif confidence < 0.5:
+            adjustment = +self.SL_CONFIDENCE_ADJUSTMENT   # Wider — lower conviction
+        else:
+            adjustment = 0.0
+
+        multiplier = base + adjustment
+
+        # Clamp to safe range
+        return round(max(0.3, min(0.9, multiplier)), 2)
+
+    # ------------------------------------------------------------------
     # SL Calculation
     # ------------------------------------------------------------------
 
     # ATR multipliers for TP/SL — tighter levels for 1H scalp/swing on gold
     TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
-    SL_ATR_MULTIPLIER  = 0.64              # SL distance (~9.59 pips at typical 15 ATR)
+    SL_ATR_MULTIPLIER  = 0.64              # SL distance (~9.59 pips at typical 15 ATR, legacy)
 
     def _calculate_sl(
         self,
@@ -295,16 +420,26 @@ class HybridTPSLEngine:
         atr_weighted: float,
         structure: Dict,
         liquidity: Dict,
+        volatility_regime: str = "NORMAL",
+        confidence: float = 0.5,
     ) -> float:
         """
-        Calculate SL using ATR-based distance from entry (0.64x ATR).
+        Calculate SL using a dynamic ATR-based distance from entry.
 
-        Produces 1H-appropriate stops (~9.59 pips at typical 15 ATR) that
-        give more room than TP1 (0.5x ATR), improving R:R on TP2/TP3.
+        The SL multiplier adapts to the current volatility regime:
+          SQUEEZE   (low vol)  → 0.4x ATR  (~6 pips at 15 ATR)
+          NORMAL               → 0.64x ATR (~9.59 pips at 15 ATR)
+          EXPANDING (high vol) → 0.8x ATR  (~12 pips at 15 ATR)
+
+        Confidence further tightens (high) or widens (low) the stop by ±0.1.
         Structure and liquidity levels are used only as a floor/ceiling to
         avoid placing SL inside a known support/resistance zone.
         """
-        sl_distance = atr_weighted * self.SL_ATR_MULTIPLIER
+        dynamic_multiplier = self._calculate_dynamic_sl_multiplier(
+            volatility_regime=volatility_regime,
+            confidence=confidence,
+        )
+        sl_distance = atr_weighted * dynamic_multiplier
 
         if direction.upper() == "BUY":
             base_sl = entry_price - sl_distance
