@@ -46,7 +46,7 @@ PIP_VALUE_GOLD     = 0.10  # 1 pip = $0.10 for XAUUSD
 TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
 
 # ATR multiple for SL — tighter, creates ~1:1 R:R base
-SL_ATR_MULTIPLIER  = 0.5   # SL distance = 0.5x ATR (was structure-based 0.15–0.50)
+SL_ATR_MULTIPLIER  = 0.64  # SL distance = 0.64x ATR (~9.59 pips at typical 15 ATR)
 
 # ATR multiples for SL anchoring (legacy structure-based buffer, kept for reference)
 SL_ATR_BUFFER_MIN  = 0.15  # Minimum ATR buffer beyond structure

@@ -286,7 +286,7 @@ class HybridTPSLEngine:
 
     # ATR multipliers for TP/SL — tighter levels for 1H scalp/swing on gold
     TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
-    SL_ATR_MULTIPLIER  = 0.5               # SL distance (was 1.0x ATR)
+    SL_ATR_MULTIPLIER  = 0.64              # SL distance (~9.59 pips at typical 15 ATR)
 
     def _calculate_sl(
         self,
@@ -297,12 +297,12 @@ class HybridTPSLEngine:
         liquidity: Dict,
     ) -> float:
         """
-        Calculate SL using ATR-based distance from entry (0.5x ATR).
+        Calculate SL using ATR-based distance from entry (0.64x ATR).
 
-        Produces tight, 1H-appropriate stops that create a ~1:1 base R:R
-        with TP1 (also 0.5x ATR from entry). Structure and liquidity levels
-        are used only as a floor/ceiling to avoid placing SL inside a known
-        support/resistance zone.
+        Produces 1H-appropriate stops (~9.59 pips at typical 15 ATR) that
+        give more room than TP1 (0.5x ATR), improving R:R on TP2/TP3.
+        Structure and liquidity levels are used only as a floor/ceiling to
+        avoid placing SL inside a known support/resistance zone.
         """
         sl_distance = atr_weighted * self.SL_ATR_MULTIPLIER
 
@@ -342,7 +342,7 @@ class HybridTPSLEngine:
 
         These tighter multiples are appropriate for 1H scalp/swing trades on
         gold pairs and produce R:R ratios of ~1:1, ~1:1.5, and ~1:2 relative
-        to the 0.5x ATR stop loss.  Structure and liquidity levels are used
+        to the 0.64x ATR stop loss.  Structure and liquidity levels are used
         only as a cap to avoid targeting beyond the nearest S/R zone.
         """
         multipliers = self.TP_ATR_MULTIPLIERS  # [0.5, 0.75, 1.0]
