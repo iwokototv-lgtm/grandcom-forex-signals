@@ -32,17 +32,23 @@ logger = logging.getLogger(__name__)
 # Constants
 # ─────────────────────────────────────────────────────────────
 
-# R:R thresholds
-RR_MINIMUM_SWING   = 2.0   # Minimum for swing trades
-RR_MINIMUM_SCALP   = 1.5   # Minimum for scalp trades
-RR_TARGET_SWING    = 2.5   # Target R:R for swing trades
-RR_EXCELLENT       = 3.0   # Excellent R:R
+# R:R thresholds — tightened for 1H scalp/swing on gold pairs
+RR_MINIMUM_SWING   = 1.2   # Minimum for swing trades (was 2.0)
+RR_MINIMUM_SCALP   = 1.0   # Minimum for scalp trades (was 1.5)
+RR_TARGET_SWING    = 1.5   # Target R:R for swing trades (was 2.5)
+RR_EXCELLENT       = 2.0   # Excellent R:R (was 3.0)
 
 # Entry band (pips)
 ENTRY_BAND_PIPS    = 10.0  # 10-pip entry zone
 PIP_VALUE_GOLD     = 0.10  # 1 pip = $0.10 for XAUUSD
 
-# ATR multiples for SL anchoring
+# ATR multiples for TP levels — tighter for 1H scalp/swing
+TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
+
+# ATR multiple for SL — tighter, creates ~1:1 R:R base
+SL_ATR_MULTIPLIER  = 0.5   # SL distance = 0.5x ATR (was structure-based 0.15–0.50)
+
+# ATR multiples for SL anchoring (legacy structure-based buffer, kept for reference)
 SL_ATR_BUFFER_MIN  = 0.15  # Minimum ATR buffer beyond structure
 SL_ATR_BUFFER_MAX  = 0.50  # Maximum ATR buffer beyond structure
 
@@ -1017,39 +1023,41 @@ class SignalQualityV2:
         atr:         float,
     ) -> SLAnchorResult:
         """
-        Validate and suggest SL anchored to swing high/low + ATR buffer.
+        Validate and suggest SL anchored to entry price using ATR-based distance.
 
-        BUY : SL = swing_low - (ATR * buffer)
-        SELL: SL = swing_high + (ATR * buffer)
+        BUY : ideal SL = entry - (ATR * SL_ATR_MULTIPLIER)
+        SELL: ideal SL = entry + (ATR * SL_ATR_MULTIPLIER)
+
+        SL_ATR_MULTIPLIER = 0.5 produces tight, 1H-appropriate stops that
+        create a ~1:1 base R:R with TP1 (also 0.5x ATR from entry).
         """
         direction = signal_type.upper()
-        buffer = SL_ATR_BUFFER_MIN + (SL_ATR_BUFFER_MAX - SL_ATR_BUFFER_MIN) * 0.5  # 0.325 ATR
+        buffer = SL_ATR_MULTIPLIER  # 0.5x ATR
 
         if direction == "BUY":
             anchor_level = swing_low
-            ideal_sl = swing_low - (atr * buffer)
-            is_structural = sl_price <= swing_low
+            ideal_sl = entry_price - (atr * buffer)
+            is_structural = sl_price <= entry_price
         else:
             anchor_level = swing_high
-            ideal_sl = swing_high + (atr * buffer)
-            is_structural = sl_price >= swing_high
+            ideal_sl = entry_price + (atr * buffer)
+            is_structural = sl_price >= entry_price
 
         distance_pips = abs(entry_price - sl_price) / PIP_VALUE_GOLD
         atr_buffer_price = atr * buffer
 
         if is_structural:
             rec = (
-                f"✓ SL at {sl_price:.2f} is anchored beyond "
-                f"{'swing low' if direction == 'BUY' else 'swing high'} "
-                f"({anchor_level:.2f}) — structural protection confirmed."
+                f"✓ SL at {sl_price:.2f} is on the correct side of entry "
+                f"({entry_price:.2f}). ATR-based ideal SL: {ideal_sl:.2f} "
+                f"({SL_ATR_MULTIPLIER}x ATR = {atr_buffer_price:.2f} from entry)."
             )
         else:
             rec = (
-                f"⚠ SL at {sl_price:.2f} is NOT beyond "
-                f"{'swing low' if direction == 'BUY' else 'swing high'} "
-                f"({anchor_level:.2f}). "
+                f"⚠ SL at {sl_price:.2f} is on the WRONG side of entry "
+                f"({entry_price:.2f}). "
                 f"Recommended SL: {ideal_sl:.2f} "
-                f"({anchor_level:.2f} ± {atr_buffer_price:.2f} ATR buffer)."
+                f"(entry ± {atr_buffer_price:.2f}, i.e. {SL_ATR_MULTIPLIER}x ATR)."
             )
 
         return SLAnchorResult(

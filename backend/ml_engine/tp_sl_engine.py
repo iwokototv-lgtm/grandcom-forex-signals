@@ -284,6 +284,10 @@ class HybridTPSLEngine:
     # SL Calculation
     # ------------------------------------------------------------------
 
+    # ATR multipliers for TP/SL — tighter levels for 1H scalp/swing on gold
+    TP_ATR_MULTIPLIERS = [0.5, 0.75, 1.0]  # TP1, TP2, TP3 (was 2.0, 3.5, 5.0)
+    SL_ATR_MULTIPLIER  = 0.5               # SL distance (was 1.0x ATR)
+
     def _calculate_sl(
         self,
         entry_price: float,
@@ -293,39 +297,30 @@ class HybridTPSLEngine:
         liquidity: Dict,
     ) -> float:
         """
-        Calculate SL with market structure + liquidity alignment.
+        Calculate SL using ATR-based distance from entry (0.5x ATR).
+
+        Produces tight, 1H-appropriate stops that create a ~1:1 base R:R
+        with TP1 (also 0.5x ATR from entry). Structure and liquidity levels
+        are used only as a floor/ceiling to avoid placing SL inside a known
+        support/resistance zone.
         """
+        sl_distance = atr_weighted * self.SL_ATR_MULTIPLIER
+
         if direction.upper() == "BUY":
-            # Base SL: entry - ATR
-            base_sl = entry_price - atr_weighted
+            base_sl = entry_price - sl_distance
 
-            # Align with support level
+            # Don't place SL above a known support (would be inside structure)
             support = structure.get("support", base_sl)
-            sl_price = min(base_sl, support)  # Use lower of the two
-
-            # Check liquidity clusters
-            clusters = liquidity.get("liquidity_clusters", [])
-            if clusters:
-                # Use lowest cluster as additional support
-                lowest_cluster = min(clusters)
-                sl_price = min(sl_price, lowest_cluster)
+            sl_price = min(base_sl, support)
 
             return sl_price
 
         else:  # SELL
-            # Base SL: entry + ATR
-            base_sl = entry_price + atr_weighted
+            base_sl = entry_price + sl_distance
 
-            # Align with resistance level
+            # Don't place SL below a known resistance (would be inside structure)
             resistance = structure.get("resistance", base_sl)
-            sl_price = max(base_sl, resistance)  # Use higher of the two
-
-            # Check liquidity clusters
-            clusters = liquidity.get("liquidity_clusters", [])
-            if clusters:
-                # Use highest cluster as additional resistance
-                highest_cluster = max(clusters)
-                sl_price = max(sl_price, highest_cluster)
+            sl_price = max(base_sl, resistance)
 
             return sl_price
 
@@ -343,45 +338,38 @@ class HybridTPSLEngine:
         confidence: float,
     ) -> List[float]:
         """
-        Calculate TP levels aligned with resistance/support + liquidity.
+        Calculate TP levels using ATR multiples of 0.5x, 0.75x, and 1.0x.
+
+        These tighter multiples are appropriate for 1H scalp/swing trades on
+        gold pairs and produce R:R ratios of ~1:1, ~1:1.5, and ~1:2 relative
+        to the 0.5x ATR stop loss.  Structure and liquidity levels are used
+        only as a cap to avoid targeting beyond the nearest S/R zone.
         """
-        risk = abs(entry_price - (entry_price - atr_weighted if direction.upper() == "BUY" else entry_price + atr_weighted))
+        multipliers = self.TP_ATR_MULTIPLIERS  # [0.5, 0.75, 1.0]
 
         if direction.upper() == "BUY":
-            # TP1: 2R (aligned with first resistance)
-            tp1_base = entry_price + risk * 2.0
-            resistance = structure.get("resistance", tp1_base)
-            tp1 = max(tp1_base, resistance * 0.99)  # Slightly below resistance
+            tp1_base = entry_price + atr_weighted * multipliers[0]
+            tp2_base = entry_price + atr_weighted * multipliers[1]
+            tp3_base = entry_price + atr_weighted * multipliers[2]
 
-            # TP2: 3.5R (aligned with liquidity cluster)
-            tp2_base = entry_price + risk * 3.5
-            clusters = liquidity.get("liquidity_clusters", [])
-            if clusters:
-                tp2 = max(tp2_base, max([c for c in clusters if c > entry_price]))
-            else:
-                tp2 = tp2_base
-
-            # TP3: 5R (extended target)
-            tp3 = entry_price + risk * 5.0
+            # Cap TP levels at nearest resistance so we don't target through S/R
+            resistance = structure.get("resistance", tp3_base)
+            tp1 = min(tp1_base, resistance * 0.999)
+            tp2 = min(tp2_base, resistance * 0.999)
+            tp3 = min(tp3_base, resistance * 0.999)
 
             return [tp1, tp2, tp3]
 
         else:  # SELL
-            # TP1: 2R (aligned with first support)
-            tp1_base = entry_price - risk * 2.0
-            support = structure.get("support", tp1_base)
-            tp1 = min(tp1_base, support * 1.01)  # Slightly above support
+            tp1_base = entry_price - atr_weighted * multipliers[0]
+            tp2_base = entry_price - atr_weighted * multipliers[1]
+            tp3_base = entry_price - atr_weighted * multipliers[2]
 
-            # TP2: 3.5R (aligned with liquidity cluster)
-            tp2_base = entry_price - risk * 3.5
-            clusters = liquidity.get("liquidity_clusters", [])
-            if clusters:
-                tp2 = min(tp2_base, min([c for c in clusters if c < entry_price]))
-            else:
-                tp2 = tp2_base
-
-            # TP3: 5R (extended target)
-            tp3 = entry_price - risk * 5.0
+            # Floor TP levels at nearest support so we don't target through S/R
+            support = structure.get("support", tp3_base)
+            tp1 = max(tp1_base, support * 1.001)
+            tp2 = max(tp2_base, support * 1.001)
+            tp3 = max(tp3_base, support * 1.001)
 
             return [tp1, tp2, tp3]
 
@@ -450,11 +438,11 @@ class HybridTPSLEngine:
         elif confidence >= 0.5:
             score += 1
 
-        # R:R quality (0-2)
+        # R:R quality (0-2) — thresholds aligned with 1H scalp/swing targets
         avg_rr = np.mean(rr_ratios) if rr_ratios else 0
-        if avg_rr >= 2.0:
+        if avg_rr >= 1.2:
             score += 2
-        elif avg_rr >= 1.5:
+        elif avg_rr >= 1.0:
             score += 1
 
         return min(score, 10)
