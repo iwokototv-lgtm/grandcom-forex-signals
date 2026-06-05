@@ -983,7 +983,7 @@ REGIME_STRATEGY = {
 # ── Per-strategy timeframes ────────────────────────────────────
 STRATEGY_TIMEFRAME = {
     "SWING":    "4h",    # Gold and trending pairs: 4H for reliable swings
-    "BREAKOUT": "1h",    # Breakout: 1H is fast enough
+    "BREAKOUT": "4h",    # Breakout: 4H for higher-quality breakout signals
     "SCALP":    "15min", # Scalp: 15-min candles (not used by default)
 }
 
@@ -1358,10 +1358,10 @@ async def generate_signal_for_pair(pair: str) -> Optional[Signal]:
             return None
 
         # ── Strategy-aware timeframe selection ───────────────────
-        # Gold (SWING) → 4H candles  |  Forex → 1H  |  Scalp → 15min
+        # Gold (SWING) → 4H candles  |  Forex → 4H  |  Scalp → 15min
         pair_strategy  = params.get("strategy", "SWING" if pair in GOLD_PAIRS else "SWING")
         pair_timeframe = params.get("timeframe",
-                            STRATEGY_TIMEFRAME.get(pair_strategy, "1h"))
+                            STRATEGY_TIMEFRAME.get(pair_strategy, "4h"))
         min_candles    = params.get("min_candles", 50)
         fetch_size     = max(100, min_candles + 20)  # always fetch enough for indicators
 
@@ -1860,7 +1860,7 @@ async def get_ml_stats(current_user: dict = Depends(get_current_user)):
 @api_router.get("/ml/regime/{symbol}")
 async def get_current_regime(symbol: str, current_user: dict = Depends(get_current_user)):
     try:
-        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        df = await get_price_data(symbol, interval="4h", outputsize=100)
         if df is None or len(df) < 50:
             raise HTTPException(status_code=400, detail="Insufficient data")
         features = signal_optimizer.feature_engineer.extract_features(df, symbol)
@@ -1997,7 +1997,7 @@ async def get_smc_analysis(symbol: str, current_user: dict = Depends(get_current
         symbol = symbol.upper()
         if symbol not in PAIR_PARAMETERS:
             raise HTTPException(status_code=400, detail=f"Invalid symbol")
-        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        df = await get_price_data(symbol, interval="4h", outputsize=100)
         if df is None or len(df) < 50:
             raise HTTPException(status_code=400, detail="Insufficient data")
         analysis = smc_analyzer.analyze(df, symbol)
@@ -2021,7 +2021,7 @@ async def get_full_analysis(symbol: str, current_user: dict = Depends(get_curren
         symbol = symbol.upper()
         if symbol not in PAIR_PARAMETERS:
             raise HTTPException(status_code=400, detail="Invalid symbol")
-        df = await get_price_data(symbol, interval="1h", outputsize=100)
+        df = await get_price_data(symbol, interval="4h", outputsize=100)
         if df is None or len(df) < 50:
             raise HTTPException(status_code=400, detail="Insufficient data")
         results = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
@@ -2188,7 +2188,7 @@ class BacktestRequest(BaseModel):
     pair: str = "ALL"
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    timeframe: str = "1h"
+    timeframe: str = "4h"
     use_pair_parameters: bool = True
     tp1_pips: Optional[float] = None
     tp2_pips: Optional[float] = None
