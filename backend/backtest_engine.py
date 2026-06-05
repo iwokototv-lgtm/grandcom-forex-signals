@@ -57,7 +57,7 @@ class BacktestConfig:
     pair: str
     start_date: datetime
     end_date: datetime
-    timeframe: str = "1h"  # 1h, 4h, 1day
+    timeframe: str = "4h"  # 1h, 4h, 1day
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.02  # 2% risk per trade
     tp1_pips: float = 5.0
@@ -188,7 +188,7 @@ class BacktestEngine:
         pair: str,
         start_date: datetime,
         end_date: datetime,
-        interval: str = "1h"
+        interval: str = "4h"
     ) -> Optional[pd.DataFrame]:
         """
         Fetch historical OHLCV data from Twelve Data API.
