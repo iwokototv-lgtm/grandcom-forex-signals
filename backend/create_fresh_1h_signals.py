@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-async def create_fresh_4h_signals():
+async def create_fresh_1h_signals():
     mongo_url = os.environ['MONGO_URL']
     client = AsyncIOMotorClient(mongo_url)
     db = client[os.environ['DB_NAME']]
@@ -128,4 +128,4 @@ async def create_fresh_4h_signals():
     client.close()
 
 if __name__ == "__main__":
-    asyncio.run(create_fresh_4h_signals())
+    asyncio.run(create_fresh_1h_signals())
