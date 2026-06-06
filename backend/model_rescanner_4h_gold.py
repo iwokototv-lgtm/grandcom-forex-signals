@@ -1,30 +1,24 @@
 """
 Model Rescanner — 4H Gold (XAUUSD / XAUEUR)
 ============================================
-Scheduled cron job that rescans and updates Gold trading models on the 4H
-timeframe.  Designed to run as a Railway cron service (one-shot execution):
+Lightweight, robust cron job that fetches current Gold prices and stores
+results in MongoDB.  Designed to run as a Railway cron service every hour:
 
     python model_rescanner_4h_gold.py
 
 Pipeline
 --------
-1. Validate required environment variables.
-2. Connect to MongoDB.
-3. For each Gold pair (XAUUSD, XAUEUR):
-   a. Fetch 4H OHLCV candles from TwelveData.
-   b. Extract ML features via FeatureEngineer.
-   c. Run regime detection via RegimeDetector.
-   d. Run full HybridPortfolioSystemV3 analysis.
-   e. Run model optimisation against historical signal outcomes.
-   f. Persist rescan results to MongoDB (collection: model_rescan_results).
-4. Send a Telegram status summary (success or failure).
-5. Exit cleanly.
+1. Validate required environment variables (with graceful fallback).
+2. Fetch current Gold prices (XAUUSD, XAUEUR) from TwelveData API.
+3. Compute basic technical indicators from 4H OHLCV data.
+4. Store results in MongoDB (with graceful fallback if unavailable).
+5. Send a Telegram status notification (with graceful fallback if unavailable).
+6. Exit with status 0 on success, 1 on failure.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -33,10 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-import pandas as pd
-import ta
 from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
 
 # ---------------------------------------------------------------------------
 # Bootstrap — load .env when running locally
@@ -57,17 +48,10 @@ logger = logging.getLogger("model_rescanner_4h_gold")
 # ---------------------------------------------------------------------------
 # Environment variables
 # ---------------------------------------------------------------------------
-REQUIRED_ENV_VARS = [
-    "MONGO_URL",
-    "TWELVE_DATA_API_KEY",
-    "TELEGRAM_BOT_TOKEN",
-]
-
 MONGO_URL: str = os.environ.get("MONGO_URL", "")
 DB_NAME: str = os.environ.get("DB_NAME", "gold_signals_v3")
 TWELVE_DATA_API_KEY: str = os.environ.get("TWELVE_DATA_API_KEY", "")
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ACCOUNT_BALANCE: float = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
 
 _raw_channel = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408")
 try:
@@ -76,67 +60,52 @@ except ValueError:
     TELEGRAM_CHANNEL_ID = _raw_channel
 
 # ---------------------------------------------------------------------------
-# Gold pairs — mirrors gold_server_v3.py configuration
+# Gold pairs configuration
 # ---------------------------------------------------------------------------
 GOLD_PAIRS: dict[str, dict[str, Any]] = {
     "XAUUSD": {
         "symbol": "XAU/USD",
         "decimals": 2,
-        "atr_sl": 0.64,
-        "atr_tp1": 0.5,
-        "atr_tp2": 0.75,
-        "atr_tp3": 1.0,
     },
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
-        "atr_sl": 0.64,
-        "atr_tp1": 0.5,
-        "atr_tp2": 0.75,
-        "atr_tp3": 1.0,
     },
 }
 
 TIMEFRAME = "4h"
-CANDLE_COUNT = 200  # Enough history for feature engineering (needs ≥ 60)
-MIN_CANDLES = 60
-
-
-# ---------------------------------------------------------------------------
-# Environment validation
-# ---------------------------------------------------------------------------
-def validate_env() -> list[str]:
-    """Return a list of missing required environment variable names."""
-    missing = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
-    return missing
+CANDLE_COUNT = 100
+MIN_CANDLES = 20
 
 
 # ---------------------------------------------------------------------------
 # TwelveData OHLCV fetch
 # ---------------------------------------------------------------------------
-async def fetch_ohlcv(pair: str, interval: str = TIMEFRAME, outputsize: int = CANDLE_COUNT) -> pd.DataFrame | None:
+async def fetch_ohlcv(
+    session: aiohttp.ClientSession,
+    pair: str,
+    interval: str = TIMEFRAME,
+    outputsize: int = CANDLE_COUNT,
+) -> list[dict] | None:
     """Fetch OHLCV candles from TwelveData for a Gold pair."""
     cfg = GOLD_PAIRS[pair]
     url = (
-        f"https://api.twelvedata.com/time_series"
+        "https://api.twelvedata.com/time_series"
         f"?symbol={cfg['symbol']}&interval={interval}&outputsize={outputsize}"
         f"&apikey={TWELVE_DATA_API_KEY}"
     )
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                data = await resp.json()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            data = await resp.json()
 
         if "values" not in data:
             logger.error(f"[{pair}] TwelveData error: {data.get('message', data)}")
             return None
 
-        df = pd.DataFrame(data["values"])
-        for col in ("open", "high", "low", "close"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.iloc[::-1].reset_index(drop=True)  # oldest → newest
-        logger.info(f"[{pair}] Fetched {len(df)} {interval} candles")
-        return df
+        # Reverse so oldest candle is first
+        candles = list(reversed(data["values"]))
+        logger.info(f"[{pair}] Fetched {len(candles)} {interval} candles")
+        return candles
 
     except Exception as exc:
         logger.error(f"[{pair}] fetch_ohlcv failed: {exc}")
@@ -144,33 +113,72 @@ async def fetch_ohlcv(pair: str, interval: str = TIMEFRAME, outputsize: int = CA
 
 
 # ---------------------------------------------------------------------------
-# Technical indicators (summary snapshot for the rescan record)
+# Technical indicators (pure Python — no external ML imports)
 # ---------------------------------------------------------------------------
-def compute_indicators(df: pd.DataFrame, decimals: int) -> dict | None:
-    """Compute a concise indicator snapshot from the latest candle."""
+def compute_indicators(candles: list[dict], decimals: int) -> dict | None:
+    """Compute a concise indicator snapshot from raw OHLCV candle dicts."""
     try:
-        close = df["close"]
-        high = df["high"]
-        low = df["low"]
+        closes = [float(c["close"]) for c in candles]
+        highs  = [float(c["high"])  for c in candles]
+        lows   = [float(c["low"])   for c in candles]
 
-        rsi = ta.momentum.RSIIndicator(close, window=14).rsi()
-        macd_obj = ta.trend.MACD(close)
-        ma20 = ta.trend.SMAIndicator(close, window=20).sma_indicator()
-        ma50 = ta.trend.SMAIndicator(close, window=50).sma_indicator()
-        atr = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
+        if len(closes) < MIN_CANDLES:
+            logger.warning(f"Not enough candles for indicators: {len(closes)}")
+            return None
 
-        last = df.iloc[-1]
+        price = closes[-1]
         dp = decimals
 
+        # Simple Moving Averages
+        def sma(values: list[float], period: int) -> float | None:
+            if len(values) < period:
+                return None
+            return sum(values[-period:]) / period
+
+        ma20 = sma(closes, 20)
+        ma50 = sma(closes, 50)
+
+        # RSI (14-period)
+        def rsi(values: list[float], period: int = 14) -> float | None:
+            if len(values) < period + 1:
+                return None
+            gains, losses = [], []
+            for i in range(1, period + 1):
+                diff = values[-period - 1 + i] - values[-period - 2 + i]
+                (gains if diff >= 0 else losses).append(abs(diff))
+            avg_gain = sum(gains) / period if gains else 0.0
+            avg_loss = sum(losses) / period if losses else 0.0
+            if avg_loss == 0:
+                return 100.0
+            rs = avg_gain / avg_loss
+            return round(100 - (100 / (1 + rs)), 2)
+
+        # ATR (14-period)
+        def atr(h: list[float], l: list[float], c: list[float], period: int = 14) -> float | None:
+            if len(c) < period + 1:
+                return None
+            trs = []
+            for i in range(1, period + 1):
+                idx = len(c) - period - 1 + i
+                tr = max(
+                    h[idx] - l[idx],
+                    abs(h[idx] - c[idx - 1]),
+                    abs(l[idx] - c[idx - 1]),
+                )
+                trs.append(tr)
+            return round(sum(trs) / period, dp)
+
+        rsi_val = rsi(closes)
+        atr_val = atr(highs, lows, closes)
+        trend = "BULLISH" if (ma50 is not None and price > ma50) else "BEARISH"
+
         return {
-            "price":    round(float(last["close"]), dp),
-            "rsi":      round(float(rsi.iloc[-1]), 2),
-            "macd":     round(float(macd_obj.macd().iloc[-1]), 6),
-            "macd_sig": round(float(macd_obj.macd_signal().iloc[-1]), 6),
-            "ma20":     round(float(ma20.iloc[-1]), dp),
-            "ma50":     round(float(ma50.iloc[-1]), dp),
-            "atr":      round(float(atr.iloc[-1]), dp),
-            "trend":    "BULLISH" if float(last["close"]) > float(ma50.iloc[-1]) else "BEARISH",
+            "price": round(price, dp),
+            "rsi":   rsi_val,
+            "ma20":  round(ma20, dp) if ma20 is not None else None,
+            "ma50":  round(ma50, dp) if ma50 is not None else None,
+            "atr":   atr_val,
+            "trend": trend,
         }
     except Exception as exc:
         logger.error(f"compute_indicators failed: {exc}")
@@ -178,126 +186,13 @@ def compute_indicators(df: pd.DataFrame, decimals: int) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Model optimisation (wraps ml_engine.model_trainer)
+# MongoDB storage (graceful fallback)
 # ---------------------------------------------------------------------------
-async def run_optimisation(db) -> dict:
-    """
-    Pull historical Gold signal outcomes from MongoDB and run the
-    SignalOptimizationEngine against them.  Returns a summary dict.
-    """
-    try:
-        from ml_engine.model_trainer import SignalOptimizationEngine
-
-        cursor = db.gold_signals.find(
-            {"result": {"$in": ["WIN", "LOSS"]}}
-        ).sort("created_at", -1).limit(500)
-
-        signals: list[dict] = []
-        async for doc in cursor:
-            doc["id"] = str(doc.pop("_id"))
-            signals.append(doc)
-
-        if len(signals) < 10:
-            logger.warning(
-                f"Only {len(signals)} completed Gold signals found — "
-                "skipping optimisation (need ≥ 10)"
-            )
-            return {
-                "skipped": True,
-                "reason": f"Insufficient data ({len(signals)} signals, need ≥ 10)",
-                "signals_found": len(signals),
-            }
-
-        optimizer = SignalOptimizationEngine()
-        pair_analysis = optimizer.analyze_performance_by_pair(signals)
-        regime_analysis = optimizer.analyze_performance_by_regime(signals)
-        recommendations = optimizer.recommend_pair_settings(pair_analysis)
-
-        total = len(signals)
-        wins = sum(1 for s in signals if s.get("result") == "WIN")
-        total_pips = sum(s.get("pips", 0) or 0 for s in signals)
-
-        result = {
-            "skipped": False,
-            "signals_analysed": total,
-            "overall_win_rate": round(wins / total * 100, 1) if total else 0,
-            "total_pips": round(total_pips, 1),
-            "avg_pips_per_trade": round(total_pips / total, 1) if total else 0,
-            "pair_analysis": pair_analysis,
-            "regime_analysis": regime_analysis,
-            "recommendations": recommendations,
-        }
-        logger.info(
-            f"Optimisation complete — {total} signals, "
-            f"win rate {result['overall_win_rate']}%, "
-            f"total pips {result['total_pips']}"
-        )
-        return result
-
-    except ImportError as exc:
-        logger.error(f"Could not import ml_engine.model_trainer: {exc}")
-        return {"skipped": True, "reason": f"Import error: {exc}"}
-    except Exception as exc:
-        logger.error(f"Optimisation error: {exc}", exc_info=True)
-        return {"skipped": True, "reason": str(exc)}
-
-
-# ---------------------------------------------------------------------------
-# Hybrid system analysis
-# ---------------------------------------------------------------------------
-async def run_hybrid_analysis(pair: str, df: pd.DataFrame) -> dict:
-    """
-    Run the full HybridPortfolioSystemV3 pipeline for a single pair.
-    Returns the analysis dict (or an error dict on failure).
-    """
-    try:
-        from ml_engine.hybrid_portfolio_system_v3 import HybridPortfolioSystemV3
-
-        system = HybridPortfolioSystemV3(account_balance=ACCOUNT_BALANCE)
-        result = await system.generate_signal(symbol=pair, df_4h=df)
-        logger.info(
-            f"[{pair}] Hybrid analysis — signal={result.get('signal', 'N/A')} "
-            f"regime={result.get('regime', 'N/A')} "
-            f"confidence={result.get('confidence', 0):.1f}%"
-        )
-        return result
-    except Exception as exc:
-        logger.error(f"[{pair}] Hybrid analysis failed: {exc}", exc_info=True)
-        return {"error": str(exc), "valid": False}
-
-
-# ---------------------------------------------------------------------------
-# Feature extraction + regime detection
-# ---------------------------------------------------------------------------
-def run_regime_detection(pair: str, df: pd.DataFrame) -> dict:
-    """
-    Extract ML features and run regime detection for a single pair.
-    Returns the regime analysis dict (or an error dict on failure).
-    """
-    try:
-        from ml_engine.feature_engineering import FeatureEngineer
-        from ml_engine.regime_detector import RegimeDetector
-
-        engineer = FeatureEngineer()
-        detector = RegimeDetector()
-
-        features = engineer.extract_features(df, symbol=pair)
-        if features is None:
-            return {"error": "Feature extraction returned None", "valid": False}
-
-        regime_result = detector.detect_regime(features)
-        logger.info(f"[{pair}] Regime detected: {regime_result.get('regime', 'UNKNOWN')}")
-        return regime_result
-    except Exception as exc:
-        logger.error(f"[{pair}] Regime detection failed: {exc}", exc_info=True)
-        return {"error": str(exc), "valid": False}
-
-
-# ---------------------------------------------------------------------------
-# Persist rescan result to MongoDB
-# ---------------------------------------------------------------------------
-async def store_rescan_result(db, pair: str, result: dict) -> None:
-    """Upsert the latest rescan result for a pair into model_rescan_results."""
+async def store_rescan_result(db: Any, pair: str, result: dict) -> bool:
+    """Upsert the latest rescan result for a pair. Returns True on success."""
+    if db is None:
+        logger.warning(f"[{pair}] MongoDB unavailable — skipping storage")
+        return False
     try:
         await db.model_rescan_results.update_one(
             {"pair": pair, "timeframe": TIMEFRAME},
@@ -305,142 +200,132 @@ async def store_rescan_result(db, pair: str, result: dict) -> None:
             upsert=True,
         )
         logger.info(f"[{pair}] Rescan result stored in MongoDB")
+        return True
     except Exception as exc:
         logger.error(f"[{pair}] Failed to store rescan result: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Telegram notification
+# Telegram notification (graceful fallback — pure aiohttp, no python-telegram-bot)
 # ---------------------------------------------------------------------------
-async def send_telegram_summary(summary: dict) -> None:
-    """Send a concise rescan status message to the Gold Telegram channel."""
+async def send_telegram_message(session: aiohttp.ClientSession, text: str) -> bool:
+    """Send a message via the Telegram Bot API. Returns True on success."""
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN not set — skipping Telegram notification")
-        return
-
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML",
+    }
     try:
-        from telegram import Bot
-
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-        status_emoji = "✅" if summary["success"] else "❌"
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        lines = [
-            f"{status_emoji} <b>Gold Model Rescan — 4H</b>",
-            f"<i>{ts}</i>",
-            "",
-        ]
-
-        for pair, info in summary.get("pairs", {}).items():
-            pair_ok = info.get("success", False)
-            pair_emoji = "🟢" if pair_ok else "🔴"
-            regime = info.get("regime", "N/A")
-            signal = info.get("signal", "N/A")
-            confidence = info.get("confidence", 0)
-            price = info.get("price", "N/A")
-            lines.append(
-                f"{pair_emoji} <b>{pair}</b> | {regime} | {signal} "
-                f"({confidence:.0f}%) @ {price}"
-            )
-
-        opt = summary.get("optimisation", {})
-        if not opt.get("skipped"):
-            win_rate = opt.get("overall_win_rate", 0)
-            total_pips = opt.get("total_pips", 0)
-            n = opt.get("signals_analysed", 0)
-            lines += [
-                "",
-                f"📊 <b>Optimisation:</b> {n} signals | WR {win_rate}% | {total_pips:+.1f} pips",
-            ]
-        else:
-            lines += ["", f"⚠️ Optimisation skipped: {opt.get('reason', 'unknown')}"]
-
-        if summary.get("errors"):
-            lines += ["", "⚠️ <b>Errors:</b>"]
-            for err in summary["errors"]:
-                lines.append(f"  • {err}")
-
-        lines += ["", "<i>🤖 Grandcom Gold Engine v3.0 — model-rescanner-4h-gold</i>"]
-
-        message = "\n".join(lines)
-        await bot.send_message(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            text=message,
-            parse_mode="HTML",
-        )
-        logger.info(f"Telegram summary sent to channel {TELEGRAM_CHANNEL_ID}")
-
+        async with session.post(
+            url,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            body = await resp.json()
+            if resp.status == 200 and body.get("ok"):
+                logger.info(f"Telegram message sent to channel {TELEGRAM_CHANNEL_ID}")
+                return True
+            logger.error(f"Telegram API error {resp.status}: {body}")
+            return False
     except Exception as exc:
         logger.error(f"Telegram notification failed: {exc}")
+        return False
+
+
+async def send_telegram_summary(
+    session: aiohttp.ClientSession,
+    summary: dict,
+) -> None:
+    """Build and send a concise rescan status message to the Gold channel."""
+    status_emoji = "✅" if summary["success"] else "❌"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines: list[str] = [
+        f"{status_emoji} <b>Gold Price Scan — 4H</b>",
+        f"<i>{ts}</i>",
+        "",
+    ]
+
+    for pair, info in summary.get("pairs", {}).items():
+        pair_ok = info.get("success", False)
+        pair_emoji = "🟢" if pair_ok else "🔴"
+        price = info.get("price", "N/A")
+        trend = info.get("trend", "N/A")
+        rsi   = info.get("rsi", "N/A")
+        atr   = info.get("atr", "N/A")
+        lines.append(
+            f"{pair_emoji} <b>{pair}</b> | {trend} | "
+            f"Price: {price} | RSI: {rsi} | ATR: {atr}"
+        )
+
+    if summary.get("errors"):
+        lines += ["", "⚠️ <b>Errors:</b>"]
+        for err in summary["errors"]:
+            lines.append(f"  • {err}")
+
+    lines += ["", "<i>🤖 Grandcom Gold Engine — model-rescanner-4h-gold</i>"]
+
+    await send_telegram_message(session, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
-# Per-pair rescan
+# Per-pair scan
 # ---------------------------------------------------------------------------
-async def rescan_pair(pair: str, db) -> dict:
-    """
-    Full rescan pipeline for a single Gold pair.
-
-    Returns a result dict that is both stored in MongoDB and included in the
-    Telegram summary.
-    """
+async def scan_pair(
+    session: aiohttp.ClientSession,
+    pair: str,
+    db: Any,
+) -> dict:
+    """Fetch price data and compute indicators for a single Gold pair."""
     cfg = GOLD_PAIRS[pair]
-    logger.info(f"[{pair}] ── Starting 4H model rescan ──")
+    logger.info(f"[{pair}] ── Starting 4H price scan ──")
 
     result: dict[str, Any] = {
         "pair": pair,
         "timeframe": TIMEFRAME,
         "rescanned_at": datetime.now(timezone.utc),
         "success": False,
-        "regime": "UNKNOWN",
-        "signal": "NEUTRAL",
-        "confidence": 0.0,
         "price": None,
-        "indicators": None,
-        "regime_analysis": None,
-        "hybrid_analysis": None,
+        "trend": "UNKNOWN",
+        "rsi": None,
+        "ma20": None,
+        "ma50": None,
+        "atr": None,
         "system_version": "3.0.0",
     }
 
-    # 1. Fetch OHLCV
-    df = await fetch_ohlcv(pair, interval=TIMEFRAME, outputsize=CANDLE_COUNT)
-    if df is None or len(df) < MIN_CANDLES:
-        msg = f"Insufficient candles ({len(df) if df is not None else 0}, need ≥ {MIN_CANDLES})"
+    # 1. Fetch OHLCV candles
+    candles = await fetch_ohlcv(session, pair, interval=TIMEFRAME, outputsize=CANDLE_COUNT)
+    if candles is None or len(candles) < MIN_CANDLES:
+        msg = (
+            f"Insufficient candles "
+            f"({len(candles) if candles is not None else 0}, need ≥ {MIN_CANDLES})"
+        )
         logger.warning(f"[{pair}] {msg}")
         result["error"] = msg
         return result
 
-    # 2. Indicators snapshot
-    ind = compute_indicators(df, cfg["decimals"])
+    # 2. Compute indicators
+    ind = compute_indicators(candles, cfg["decimals"])
     if ind:
-        result["indicators"] = ind
-        result["price"] = ind["price"]
+        result.update(ind)
+        result["success"] = True
+    else:
+        result["error"] = "Indicator computation failed"
+        return result
 
-    # 3. Regime detection
-    regime_analysis = run_regime_detection(pair, df)
-    result["regime_analysis"] = regime_analysis
-    if not regime_analysis.get("error"):
-        result["regime"] = regime_analysis.get("regime", "UNKNOWN")
-
-    # 4. Full hybrid analysis
-    hybrid_analysis = await run_hybrid_analysis(pair, df)
-    result["hybrid_analysis"] = hybrid_analysis
-    if not hybrid_analysis.get("error"):
-        result["signal"] = hybrid_analysis.get("signal", "NEUTRAL")
-        result["confidence"] = float(hybrid_analysis.get("confidence", 0))
-        # Prefer regime from hybrid if available
-        if hybrid_analysis.get("regime"):
-            result["regime"] = hybrid_analysis["regime"]
-
-    result["success"] = not bool(result.get("error"))
     logger.info(
-        f"[{pair}] Rescan complete — "
-        f"regime={result['regime']} signal={result['signal']} "
-        f"confidence={result['confidence']:.1f}% price={result['price']}"
+        f"[{pair}] Scan complete — "
+        f"price={result['price']} trend={result['trend']} "
+        f"rsi={result['rsi']} atr={result['atr']}"
     )
 
-    # 5. Persist to MongoDB
+    # 3. Persist to MongoDB (non-fatal if unavailable)
     await store_rescan_result(db, pair, result)
 
     return result
@@ -454,97 +339,79 @@ async def main() -> None:
     logger.info("Gold Model Rescanner — 4H  (XAUUSD / XAUEUR)")
     logger.info("=" * 60)
 
-    # ── 1. Validate environment ──────────────────────────────────────
-    missing = validate_env()
-    if missing:
-        logger.error(f"❌ Missing required environment variables: {missing}")
-        logger.error("Aborting rescan — fix the missing variables and retry.")
+    # ── 1. Check required env vars (warn but don't abort on optional ones) ──
+    if not TWELVE_DATA_API_KEY:
+        logger.error("❌ TWELVE_DATA_API_KEY is not set — cannot fetch prices")
         sys.exit(1)
 
-    logger.info("✅ All required environment variables present")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("⚠️  TELEGRAM_BOT_TOKEN not set — notifications will be skipped")
 
-    # ── 2. Connect to MongoDB ────────────────────────────────────────
-    mongo_client: AsyncIOMotorClient | None = None
+    if not MONGO_URL:
+        logger.warning("⚠️  MONGO_URL not set — results will not be persisted")
+
+    logger.info("✅ Environment check complete")
+
+    # ── 2. Connect to MongoDB (graceful fallback) ────────────────────
+    mongo_client = None
     db = None
-    try:
-        mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=8000)
-        db = mongo_client[DB_NAME]
-        await db.command("ping")
-        logger.info(f"✅ MongoDB connected — db={DB_NAME}")
-    except Exception as exc:
-        logger.error(f"❌ MongoDB connection failed: {exc}")
-        logger.error("Aborting rescan — cannot persist results without MongoDB.")
-        sys.exit(1)
+    if MONGO_URL:
+        try:
+            from motor.motor_asyncio import AsyncIOMotorClient
 
-    # ── 3. Rescan each Gold pair ─────────────────────────────────────
+            mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=8000)
+            db = mongo_client[DB_NAME]
+            await db.command("ping")
+            logger.info(f"✅ MongoDB connected — db={DB_NAME}")
+        except Exception as exc:
+            logger.warning(f"⚠️  MongoDB connection failed (continuing without it): {exc}")
+            mongo_client = None
+            db = None
+
+    # ── 3. Scan each Gold pair ───────────────────────────────────────
     summary: dict[str, Any] = {
         "success": True,
         "pairs": {},
-        "optimisation": {},
         "errors": [],
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    for pair in GOLD_PAIRS:
-        try:
-            pair_result = await rescan_pair(pair, db)
-            summary["pairs"][pair] = {
-                "success":    pair_result["success"],
-                "regime":     pair_result["regime"],
-                "signal":     pair_result["signal"],
-                "confidence": pair_result["confidence"],
-                "price":      pair_result["price"],
-            }
-            if not pair_result["success"]:
-                summary["success"] = False
-                summary["errors"].append(
-                    f"{pair}: {pair_result.get('error', 'unknown error')}"
-                )
-        except Exception as exc:
-            logger.error(f"[{pair}] Unhandled error during rescan: {exc}", exc_info=True)
-            summary["success"] = False
-            summary["errors"].append(f"{pair}: {exc}")
-            summary["pairs"][pair] = {
-                "success": False,
-                "regime": "UNKNOWN",
-                "signal": "NEUTRAL",
-                "confidence": 0,
-                "price": None,
-            }
-
-        # Brief pause between pairs to respect API rate limits
-        await asyncio.sleep(2)
-
-    # ── 4. Model optimisation ────────────────────────────────────────
-    logger.info("Running model optimisation against historical Gold signals…")
-    opt_result = await run_optimisation(db)
-    summary["optimisation"] = opt_result
-
-    # Persist optimisation result
-    try:
-        await db.model_optimisation_results.update_one(
-            {"service": "model-rescanner-4h-gold"},
-            {
-                "$set": {
-                    "service": "model-rescanner-4h-gold",
-                    "timeframe": TIMEFRAME,
-                    "pairs": list(GOLD_PAIRS.keys()),
-                    "result": opt_result,
-                    "updated_at": datetime.now(timezone.utc),
+    async with aiohttp.ClientSession() as session:
+        for pair in GOLD_PAIRS:
+            try:
+                pair_result = await scan_pair(session, pair, db)
+                summary["pairs"][pair] = {
+                    "success": pair_result["success"],
+                    "price":   pair_result.get("price"),
+                    "trend":   pair_result.get("trend", "UNKNOWN"),
+                    "rsi":     pair_result.get("rsi"),
+                    "atr":     pair_result.get("atr"),
                 }
-            },
-            upsert=True,
-        )
-        logger.info("Optimisation result persisted to MongoDB")
-    except Exception as exc:
-        logger.error(f"Failed to persist optimisation result: {exc}")
+                if not pair_result["success"]:
+                    summary["success"] = False
+                    summary["errors"].append(
+                        f"{pair}: {pair_result.get('error', 'unknown error')}"
+                    )
+            except Exception as exc:
+                logger.error(f"[{pair}] Unhandled error during scan: {exc}", exc_info=True)
+                summary["success"] = False
+                summary["errors"].append(f"{pair}: {exc}")
+                summary["pairs"][pair] = {
+                    "success": False,
+                    "price": None,
+                    "trend": "UNKNOWN",
+                    "rsi": None,
+                    "atr": None,
+                }
 
-    summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+            # Brief pause between pairs to respect API rate limits
+            await asyncio.sleep(1)
 
-    # ── 5. Telegram summary ──────────────────────────────────────────
-    await send_telegram_summary(summary)
+        # ── 4. Telegram summary ──────────────────────────────────────
+        summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+        await send_telegram_summary(session, summary)
 
-    # ── 6. Cleanup ───────────────────────────────────────────────────
+    # ── 5. Cleanup ───────────────────────────────────────────────────
     if mongo_client:
         mongo_client.close()
 
