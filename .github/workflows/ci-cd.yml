@@ -74,6 +74,7 @@ jobs:
     needs: [security, build]
     runs-on: ubuntu-latest
     if: always()
+    continue-on-error: true
 
     steps:
     - name: Send Telegram notification
