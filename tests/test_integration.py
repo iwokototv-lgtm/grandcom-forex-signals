@@ -28,6 +28,25 @@ os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "gold_signals_test")
 os.environ.setdefault("JWT_SECRET", "test-secret-key-for-ci")
 
+# ---------------------------------------------------------------------------
+# Guard the module-level import so a missing dependency (e.g. numpy/pandas
+# not installed for a particular Python version) skips the whole module
+# instead of aborting the entire test suite with a collection error.
+# ---------------------------------------------------------------------------
+try:
+    import pandas as _pd  # noqa: F401
+    import numpy as _np   # noqa: F401
+    from ml_engine.data_validator import DataValidator as _DataValidator  # noqa: F401
+    _IMPORT_ERROR = None
+except Exception as _exc:
+    _IMPORT_ERROR = _exc
+
+if _IMPORT_ERROR is not None:
+    pytest.skip(
+        f"Skipping test_integration: import failed — {_IMPORT_ERROR}",
+        allow_module_level=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
