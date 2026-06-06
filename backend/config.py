@@ -4,7 +4,7 @@ Institutional Multi-Strategy Hybrid Portfolio System v3.0
 """
 
 import os
-from typing import Optional
+from typing import Optional, Union
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,7 +31,7 @@ FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _raw_channel = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408")
 try:
-    TELEGRAM_CHANNEL_ID: int | str = int(_raw_channel)
+    TELEGRAM_CHANNEL_ID: Union[int, str] = int(_raw_channel)
 except ValueError:
     TELEGRAM_CHANNEL_ID = _raw_channel
 
