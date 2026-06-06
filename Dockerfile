@@ -30,11 +30,12 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 8002
+EXPOSE 8080
 
-# Health check
+# Health check - use proper format
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8002}/api/health || exit 1
+    CMD curl -f http://localhost:8080/api/health || exit 1
 
 # Start command
-CMD ["sh", "-c", "uvicorn gold_server_v3:app --host 0.0.0.0 --port ${PORT:-8002} --workers 1 --log-level info"]
+CMD ["uvicorn", "gold_server_v3:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--log-level", "info"]
+
