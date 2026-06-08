@@ -2262,7 +2262,7 @@ class BacktestRequest(BaseModel):
     pair: str = "ALL"
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    timeframe: str = "1h"
+    timeframe: str = "4h"
     use_pair_parameters: bool = True
     tp1_pips: Optional[float] = None
     tp2_pips: Optional[float] = None
