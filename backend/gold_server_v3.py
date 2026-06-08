@@ -60,17 +60,17 @@ PAIRS = {
         "symbol": "XAU/USD",
         "decimals": 2,
         "atr_sl": 0.97,   # SL: 0.97x ATR (~14.59 pips at typical 15 ATR) — 4H swing
-        "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
-        "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
-        "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
+        "atr_tp1": 0.33,  # TP1: 0.33x ATR (~5.0 pips at typical 15 ATR) — quick exit
+        "atr_tp2": 0.67,  # TP2: 0.67x ATR (~10.0 pips at typical 15 ATR) — mid target
+        "atr_tp3": 1.0,   # TP3: 1.0x ATR (~15.0 pips at typical 15 ATR) — full target
     },
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
         "atr_sl": 0.97,   # SL: 0.97x ATR (~14.59 pips at typical 15 ATR) — 4H swing
-        "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
-        "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
-        "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
+        "atr_tp1": 0.33,  # TP1: 0.33x ATR (~5.0 pips at typical 15 ATR) — quick exit
+        "atr_tp2": 0.67,  # TP2: 0.67x ATR (~10.0 pips at typical 15 ATR) — mid target
+        "atr_tp3": 1.0,   # TP3: 1.0x ATR (~15.0 pips at typical 15 ATR) — full target
     },
 }
 
