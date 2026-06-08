@@ -59,7 +59,7 @@ PAIRS = {
     "XAUUSD": {
         "symbol": "XAU/USD",
         "decimals": 2,
-        "atr_sl": 0.64,   # SL: 0.64x ATR (~9.59 pips at typical 15 ATR) — 4H swing
+        "atr_sl": 0.97,   # SL: 0.97x ATR (~14.59 pips at typical 15 ATR) — 4H swing
         "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
         "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
         "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
@@ -67,7 +67,7 @@ PAIRS = {
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
-        "atr_sl": 0.64,   # SL: 0.64x ATR (~9.59 pips at typical 15 ATR) — 4H swing
+        "atr_sl": 0.97,   # SL: 0.97x ATR (~14.59 pips at typical 15 ATR) — 4H swing
         "atr_tp1": 0.5,   # TP1: 0.5x ATR (was 2.0x) — ~1:1 R:R
         "atr_tp2": 0.75,  # TP2: 0.75x ATR (was 3.5x) — ~1:1.5 R:R
         "atr_tp3": 1.0,   # TP3: 1.0x ATR (was 5.0x) — ~1:2 R:R
