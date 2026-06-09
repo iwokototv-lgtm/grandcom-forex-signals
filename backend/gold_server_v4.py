@@ -2,6 +2,29 @@
 Grandcom Gold Signals Server v4.0 — Balanced Edition
 Institutional Multi-Strategy Hybrid Portfolio System with Advanced Risk Management
 
+EXECUTION MODEL — READ BEFORE DEPLOYING
+----------------------------------------
+This server is a SIGNAL GENERATOR, not an order executor.  It does not call
+any broker API.  The execution pipeline is:
+
+  gold_server_v4  →  writes signals/SL/TP  →  MongoDB  →  Broker / Follower
+                                                           (executes orders)
+
+trade_manager is called with real-time prices to evaluate BE/TS/partial logic
+and write updated SL/TP values to MongoDB.  The broker or copy-trade follower
+must read those values and apply them to live market orders.
+
+PRICE SOURCE — IMPORTANT
+------------------------
+The trade management loop (run_trade_management_loop) currently fetches prices
+via fetch_ohlcv(interval="4h"), which returns the CLOSE OF THE MOST RECENT 4H
+CANDLE from TwelveData.  This is NOT a real-time quote feed.  Between candle
+closes the price can be up to 4 hours stale.  For production SL/TP accuracy,
+replace this with a real-time quote source (broker WebSocket, etc.).
+
+See backend/TRADE_EXECUTION_MODEL.md for the full architecture diagram,
+latency analysis, spike risk, and production checklist.
+
 V4.0 Balanced Option C Features:
   ✅ Breakeven Stop-Loss  — Moves SL to entry after TP1 hit (+0.5R activation)
   ✅ Trailing Stop        — Follows price by 1 ATR; activates after TP1 hit
@@ -1461,11 +1484,31 @@ async def run_trade_management_loop() -> None:
     """
     V4.1 Trade management loop — runs every 2 minutes.
 
-    Fetches current prices for all active pairs and processes:
+    Fetches current prices for all active pairs and delegates to
+    TradeManager.run_management_cycle, which writes updated SL/TP values to
+    MongoDB.  This function does NOT execute orders at a broker.
+
+    PRICE SOURCE (⚠ stale — see note below):
+      Prices are fetched via fetch_ohlcv(interval="4h", outputsize=5) and
+      extracted as ind["price"] = last["close"] of the most recent 4H candle
+      from TwelveData.  This is the close of the last *completed* candle, not
+      a real-time tick.  Between candle closes the value can be up to 4 hours
+      stale.  A fast intracandle spike can breach a stop level without being
+      detected here.
+
+      To fix: replace the fetch_ohlcv call below with a real-time quote source
+      (e.g. broker WebSocket or a dedicated /quote endpoint).
+
+    SPIKE RISK MITIGATION:
+      The broker must enforce hard SL/TP orders independently of this loop.
+      MongoDB values are advisory; the broker is the execution authority.
+      See backend/TRADE_EXECUTION_MODEL.md §3 for full details.
+
+    Processes per cycle:
       - Breakeven activation (price reached +0.5R)
       - Trailing stop updates (after TP1 hit)
       - Partial profit closes (TP1/TP2/TP3)
-      - SL hit detection → close as LOSS
+      - SL hit detection → mark as LOSS in MongoDB
     """
     if not _TRADE_MANAGER_AVAILABLE:
         return
@@ -1479,7 +1522,14 @@ async def run_trade_management_loop() -> None:
     if db is None:
         return
 
-    # Fetch current prices for all pairs that have open trades
+    # Fetch current prices for all pairs that have open trades.
+    #
+    # ⚠ PRICE STALENESS WARNING:
+    #   fetch_ohlcv returns the close of the most recent 4H candle from
+    #   TwelveData (ind["price"] = last["close"]).  This is NOT a real-time
+    #   quote — it can be up to 4 hours stale between candle closes.
+    #   For production accuracy, replace this block with a real-time quote
+    #   feed (broker WebSocket or dedicated quote endpoint).
     active_pairs = {t.get("pair") for t in open_trades if t.get("pair")}
     current_prices: dict[str, float] = {}
 
@@ -1489,6 +1539,7 @@ async def run_trade_management_loop() -> None:
             if df is not None and len(df) > 0:
                 ind = compute_indicators(df, PAIRS[pair]["decimals"])
                 if ind:
+                    # ind["price"] is last["close"] of the 4H candle — stale
                     current_prices[pair] = ind["price"]
         except Exception as exc:
             logger.warning(f"[{pair}] Trade management: price fetch failed: {exc}")
