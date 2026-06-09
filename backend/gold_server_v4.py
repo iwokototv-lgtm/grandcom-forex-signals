@@ -70,6 +70,14 @@ try:
 except ImportError:
     _TRADE_MANAGER_AVAILABLE = False
 
+try:
+    from signal_deduplicator import SignalDeduplicator
+    _DEDUPLICATOR_AVAILABLE = True
+except ImportError:
+    _DEDUPLICATOR_AVAILABLE = False
+    logger_bootstrap = logging.getLogger("gold_server_v4")
+    logger_bootstrap.warning("signal_deduplicator not available — deduplication disabled")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -136,14 +144,15 @@ DATA_FRESHNESS_MAX_AGE_SECONDS = int(os.environ.get("DATA_FRESHNESS_MAX_AGE_SECO
 
 # V4.1 Runtime Metrics (in-memory counters, reset on restart)
 _v4_metrics: dict[str, int] = {
-    "signals_generated":    0,
+    "signals_generated":          0,
     "signals_suppressed_candle":  0,   # Suppressed: candle still forming
     "signals_suppressed_stale":   0,   # Suppressed: stale data
-    "trades_opened":        0,
-    "be_activations":       0,
-    "ts_updates":           0,
-    "partial_closes":       0,
-    "trade_closes":         0,
+    "signals_suppressed_dedupe":  0,   # Suppressed: duplicate within same 4H candle
+    "trades_opened":              0,
+    "be_activations":             0,
+    "ts_updates":                 0,
+    "partial_closes":             0,
+    "trade_closes":               0,
 }
 
 # ---------------------------------------------------------------------------
@@ -381,6 +390,16 @@ _win_rate_tracker = WinRateTracker()
 
 def get_win_rate_tracker() -> WinRateTracker:
     return _win_rate_tracker
+
+
+# ---------------------------------------------------------------------------
+# Signal Deduplicator — module-level singleton (db injected at startup)
+# ---------------------------------------------------------------------------
+_deduplicator: "SignalDeduplicator | None" = None
+
+
+def get_deduplicator() -> "SignalDeduplicator | None":
+    return _deduplicator
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1180,13 @@ async def generate_signal_v4(pair: str) -> None:
             return
         logger.info(f"[{pair}] ✅ Candle-close confirmed — proceeding with signal generation")
 
+    # 1c. V4.2 Deduplication pre-check — extract candle timestamp before any
+    #     expensive calls so we can bail out early if this candle was already
+    #     processed.  The direction is not yet known at this point, so we store
+    #     the candle_ts for use later in the pipeline (after GPT resolves the
+    #     direction).
+    _candle_ts: str = str(df.iloc[-1].get("datetime", df.iloc[-1].name))
+
     # 2. Indicators
     ind = compute_indicators(df, cfg["decimals"])
     if ind is None:
@@ -1227,6 +1253,18 @@ async def generate_signal_v4(pair: str) -> None:
             f"(conf_mult={conf_mult:.3f}) — skipping"
         )
         return
+
+    # 6b. V4.2 Deduplication check — skip if this (candle, pair, direction)
+    #     has already been signalled within the current 4H window.
+    _dedup = get_deduplicator()
+    if _dedup is not None:
+        if await _dedup.has_signalled(_candle_ts, pair, signal_type):
+            logger.info(
+                f"[{pair}] 🔁 Duplicate signal suppressed — "
+                f"candle={_candle_ts} direction={signal_type} already fired"
+            )
+            _v4_metrics["signals_suppressed_dedupe"] += 1
+            return
 
     # 7. Validate MTF direction agrees with GPT signal
     mtf_dir = mtf_ctx.get("dominant_direction", "NEUTRAL")
@@ -1323,6 +1361,15 @@ async def generate_signal_v4(pair: str) -> None:
             if _TRADE_MANAGER_AVAILABLE:
                 trade_doc = {**doc, "indicators": ind}
                 get_trade_manager().register_new_trade(str(result.inserted_id), trade_doc)
+
+            # V4.2 Mark this (candle, pair, direction) as signalled so
+            # subsequent scheduler runs within the same 4H window are
+            # suppressed.  TTL = 4 hours — auto-expires with the candle.
+            _dedup = get_deduplicator()
+            if _dedup is not None:
+                await _dedup.mark_signalled(
+                    _candle_ts, pair, signal_type, ttl_seconds=14_400
+                )
 
             _v4_metrics["signals_generated"] += 1
             _v4_metrics["trades_opened"]     += 1
@@ -1540,6 +1587,17 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning(f"⚠️ TradeManager startup sync failed (non-fatal): {exc}")
 
+    # V4.2 Signal deduplicator — ensure TTL index and inject DB reference
+    global _deduplicator
+    if _DEDUPLICATOR_AVAILABLE:
+        try:
+            _deduplicator = SignalDeduplicator(db=_db)
+            await _deduplicator.setup()
+            logger.info("✅ SignalDeduplicator initialised (4H TTL deduplication active)")
+        except Exception as exc:
+            logger.warning(f"⚠️ SignalDeduplicator init failed (non-fatal): {exc}")
+            _deduplicator = None
+
     # Signal scheduler
     scheduler.add_job(
         run_all_signals_v4,
@@ -1664,6 +1722,8 @@ async def health():
             "candle_close_guard":      _CANDLE_UTILS_AVAILABLE,
             "data_freshness_guard":    _FRESHNESS_GUARD_AVAILABLE,
             "trade_management_loop":   _TRADE_MANAGER_AVAILABLE,
+            # V4.2 additions
+            "signal_deduplication":    _DEDUPLICATOR_AVAILABLE,
         },
         "v4_config": {
             "mtf_min_alignment":        MTF_MIN_ALIGNMENT,
@@ -2165,6 +2225,7 @@ async def get_v4_metrics():
             "candle_close_guard":   _CANDLE_UTILS_AVAILABLE,
             "data_freshness_guard": _FRESHNESS_GUARD_AVAILABLE,
             "trade_manager":        _TRADE_MANAGER_AVAILABLE,
+            "signal_deduplication": _DEDUPLICATOR_AVAILABLE,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
