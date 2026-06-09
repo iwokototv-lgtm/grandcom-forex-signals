@@ -29,6 +29,7 @@ Output
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -40,6 +41,13 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+    _PYMONGO_AVAILABLE = True
+except ImportError:
+    _PYMONGO_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -917,6 +925,138 @@ def print_report(stats: BacktestStats) -> None:
 
 
 # ---------------------------------------------------------------------------
+# MongoDB persistence
+# ---------------------------------------------------------------------------
+
+def save_to_mongodb(stats: BacktestStats) -> Optional[str]:
+    """
+    Persist a completed backtest result to the MongoDB ``backtest_results``
+    collection.
+
+    Returns the inserted document ID as a string on success, or None if the
+    save was skipped / failed.  All errors are caught and logged so they never
+    interrupt the backtest run itself.
+    """
+    if not _PYMONGO_AVAILABLE:
+        print("  ⚠  pymongo not installed — skipping MongoDB save.", flush=True)
+        return None
+
+    mongo_url = os.environ.get("MONGO_URL", "").strip()
+    if not mongo_url:
+        print("  ⚠  MONGO_URL not set — skipping MongoDB save.", flush=True)
+        return None
+
+    try:
+        client = MongoClient(mongo_url, serverSelectionTimeoutMS=5_000)
+        db     = client[os.environ.get("DB_NAME", "gold_signals_v4")]
+        col    = db["backtest_results"]
+
+        # Determine date range from the trade list (fall back to "unknown")
+        if stats.trades:
+            start_dt = min(t.entry_time for t in stats.trades)
+            end_dt   = max(
+                t.exit_time if t.exit_time else t.entry_time
+                for t in stats.trades
+            )
+            start_date    = start_dt.strftime("%Y-%m-%d")
+            end_date      = end_dt.strftime("%Y-%m-%d")
+            duration_years = round(
+                (end_dt - start_dt).total_seconds() / (365.25 * 86_400), 2
+            )
+        else:
+            start_date = end_date = "unknown"
+            duration_years = 0.0
+
+        # Serialise individual trades to plain dicts
+        trades_list = []
+        for t in stats.trades:
+            trades_list.append({
+                "pair":           t.pair,
+                "direction":      t.direction,
+                "entry_price":    t.entry_price,
+                "entry_time":     t.entry_time.isoformat(),
+                "exit_price":     t.exit_price,
+                "exit_time":      t.exit_time.isoformat() if t.exit_time else None,
+                "sl_price":       t.sl_price,
+                "tp1_price":      t.tp1_price,
+                "tp2_price":      t.tp2_price,
+                "tp3_price":      t.tp3_price,
+                "atr_at_entry":   t.atr_at_entry,
+                "result":         t.result,
+                "gross_pnl":      round(t.gross_pnl, 6),
+                "net_pnl":        round(t.net_pnl, 6),
+                "be_activated":   t.be_activated,
+                "tp1_hit":        t.tp1_hit,
+                "tp2_hit":        t.tp2_hit,
+                "tp3_hit":        t.tp3_hit,
+                "max_adverse":    round(t.max_adverse, 6),
+                "max_favourable": round(t.max_favourable, 6),
+            })
+
+        profit_factor = (
+            stats.profit_factor
+            if stats.profit_factor != float("inf")
+            else None          # JSON / BSON cannot store Infinity
+        )
+
+        document = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "pair":           stats.pair,
+                "data_source":    stats.data_source,
+                "start_date":     start_date,
+                "end_date":       end_date,
+                "duration_years": duration_years,
+                "timeframe":      INTERVAL,
+                "candles_fetched": stats.candles_fetched,
+                "candles_used":   stats.candles_used,
+            },
+            "summary": {
+                "total_trades":    stats.total_trades,
+                "wins":            stats.wins,
+                "losses":          stats.losses,
+                "timeouts":        stats.timeouts,
+                "be_exits":        stats.be_exits,
+                "win_rate":        round(stats.win_rate, 4),
+                "gross_pnl":       round(stats.gross_pnl, 4),
+                "net_pnl":         round(stats.net_pnl, 4),
+                "total_costs":     round(stats.total_costs, 4),
+                "profit_factor":   round(profit_factor, 4) if profit_factor is not None else None,
+                "sharpe_ratio":    round(stats.sharpe_ratio, 4),
+                "max_drawdown_pct": round(stats.max_drawdown_pct, 4),
+                "max_drawdown_usd": round(stats.max_drawdown_usd, 4),
+                "final_equity":    round(stats.final_balance, 4),
+                "roi_pct":         round(stats.return_pct, 4),
+                "be_activations":  stats.be_activations,
+                "partial_closes":  stats.partial_closes,
+                "atr_mean":        round(stats.atr_mean, 4),
+                "atr_min":         round(stats.atr_min, 4),
+                "atr_max":         round(stats.atr_max, 4),
+                "account_balance": ACCOUNT_BALANCE,
+                "risk_per_trade_pct": RISK_PER_TRADE_PCT,
+            },
+            "monthly_pnl": {
+                k: round(v, 4) for k, v in stats.monthly_pnl.items()
+            },
+            "trades": trades_list,
+        }
+
+        result = col.insert_one(document)
+        client.close()
+
+        doc_id = str(result.inserted_id)
+        print(f"  ✓ Backtest result saved to MongoDB  (id={doc_id})", flush=True)
+        return doc_id
+
+    except PyMongoError as exc:
+        print(f"  ✗ MongoDB save failed: {exc}", flush=True)
+        return None
+    except Exception as exc:
+        print(f"  ✗ Unexpected error saving to MongoDB: {exc}", flush=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -981,6 +1121,7 @@ def main() -> None:
         stats = run_backtest(pair, candles, data_source)
         all_stats.append(stats)
         print_report(stats)
+        save_to_mongodb(stats)
 
     # ── Combined summary ──────────────────────────────────────────────────────
     if len(all_stats) > 1:
