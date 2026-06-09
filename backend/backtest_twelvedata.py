@@ -1056,6 +1056,68 @@ def save_to_mongodb(stats: BacktestStats) -> Optional[str]:
         return None
 
 
+def save_backtest_to_mongodb(stats_list: list[BacktestStats]) -> Optional[str]:
+    """
+    Save backtest results to MongoDB.
+
+    Args:
+        stats_list: List of BacktestStats objects (one per pair)
+
+    Returns:
+        Inserted document ID string, or None if save failed
+    """
+    if not _PYMONGO_AVAILABLE:
+        print("⚠️  PyMongo not available, skipping MongoDB save")
+        return None
+
+    mongo_url = os.environ.get("MONGO_URL")
+    if not mongo_url:
+        print("⚠️  MONGO_URL not set, skipping MongoDB save")
+        return None
+
+    try:
+        client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+        db = client["gold_signals_test"]
+        collection = db["backtest_results"]
+
+        # Prepare document
+        doc = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "pairs": [s.pair for s in stats_list],
+                "data_source": stats_list[0].data_source if stats_list else "unknown",
+                "num_pairs": len(stats_list),
+            },
+            "results": [
+                {
+                    "pair": s.pair,
+                    "total_trades": s.total_trades,
+                    "win_rate": s.win_rate,
+                    "gross_pnl": s.gross_pnl,
+                    "net_pnl": s.net_pnl,
+                    "profit_factor": s.profit_factor,
+                    "sharpe_ratio": s.sharpe_ratio,
+                    "max_drawdown_pct": s.max_drawdown_pct,
+                    "final_balance": s.final_balance,
+                    "return_pct": s.return_pct,
+                }
+                for s in stats_list
+            ]
+        }
+
+        result = collection.insert_one(doc)
+        doc_id = str(result.inserted_id)
+        print(f"✅ Backtest results saved to MongoDB: {doc_id}")
+        return doc_id
+
+    except PyMongoError as e:
+        print(f"⚠️  MongoDB save failed: {e}")
+        return None
+    except Exception as e:
+        print(f"⚠️  Unexpected error saving to MongoDB: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1122,6 +1184,11 @@ def main() -> None:
         all_stats.append(stats)
         print_report(stats)
         save_to_mongodb(stats)
+
+    # Save results to MongoDB
+    mongo_id = save_backtest_to_mongodb(all_stats)
+    if mongo_id:
+        print(f"\n📊 Results stored in MongoDB with ID: {mongo_id}")
 
     # ── Combined summary ──────────────────────────────────────────────────────
     if len(all_stats) > 1:
