@@ -87,8 +87,10 @@ class TradeManager:
                 {"_id": 1, "pair": 1, "type": 1, "entry_price": 1, "sl_price": 1,
                  "tp_levels": 1, "be_trigger": 1, "be_sl": 1, "be_enabled": 1,
                  "ts_start": 1, "ts_distance": 1, "ts_enabled": 1,
-                 "status": 1, "lots": 1, "tp1_hit": 1, "be_activated": 1,
-                 "current_sl": 1, "created_at": 1},
+                 "status": 1, "lots": 1, "tp1_hit": 1, "tp2_hit": 1, "tp3_hit": 1,
+                 "tp1_price": 1, "tp2_price": 1, "tp3_price": 1,
+                 "be_activated": 1, "current_sl": 1, "ts_last_price": 1,
+                 "created_at": 1},
             )
             trades = await cursor.to_list(500)
 
@@ -233,6 +235,9 @@ class TradeManager:
         """
         Move SL to entry price when +0.5R profit is reached.
 
+        Idempotent: if BE was already activated (e.g. persisted before a
+        restart) this method logs and returns False without touching MongoDB.
+
         Returns True if the update was applied.
         """
         if db is None:
@@ -241,6 +246,15 @@ class TradeManager:
         try:
             from bson import ObjectId
             trade = self._open_trades.get(trade_id, {})
+
+            # ── Idempotency guard ────────────────────────────────────────────
+            if trade.get("be_activated"):
+                logger.info(
+                    f"[{trade.get('pair', '?')}] BE already activated — "
+                    f"skipping duplicate activation at price {current_price}"
+                )
+                return False
+
             be_sl = float(trade.get("be_sl", trade.get("entry_price", 0)))
 
             await db.gold_signals_v4.update_one(
@@ -285,6 +299,10 @@ class TradeManager:
         For BUY : new_sl = current_price - atr  (only moves up)
         For SELL: new_sl = current_price + atr  (only moves down)
 
+        Idempotent: if the SL was already trailed to this exact price level
+        (ts_last_price persisted before a restart) the update is skipped to
+        prevent re-firing the same TS move on restart.
+
         Returns True if the SL was actually updated (moved in favour).
         """
         if db is None or atr <= 0:
@@ -293,6 +311,15 @@ class TradeManager:
         try:
             from bson import ObjectId
             trade = self._open_trades.get(trade_id, {})
+
+            # ── Idempotency guard ────────────────────────────────────────────
+            last_ts_price = trade.get("ts_last_price")
+            if last_ts_price is not None and float(last_ts_price) == current_price:
+                logger.info(
+                    f"[{trade.get('pair', '?')}] TS already updated at price "
+                    f"{current_price} — skipping duplicate trailing-stop update"
+                )
+                return False
 
             if signal_type == "BUY":
                 new_sl = round(current_price - atr, 2)
@@ -315,9 +342,10 @@ class TradeManager:
                 },
             )
 
-            # Update in-memory cache
+            # Update in-memory cache (including ts_last_price for idempotency)
             if trade_id in self._open_trades:
-                self._open_trades[trade_id]["current_sl"] = new_sl
+                self._open_trades[trade_id]["current_sl"]    = new_sl
+                self._open_trades[trade_id]["ts_last_price"] = current_price
 
             logger.info(
                 f"[{trade.get('pair', '?')}] 🔄 TS updated — "
@@ -342,6 +370,10 @@ class TradeManager:
         Partial sizes: TP1=50%, TP2=30%, TP3=20%.
         Updates trade status to PARTIAL and logs the close.
 
+        Idempotent: if the TP level was already recorded (e.g. persisted
+        before a restart) this method logs and returns False without touching
+        MongoDB, preventing double-counted partial closes.
+
         Returns True if the update was applied.
         """
         if db is None:
@@ -350,6 +382,16 @@ class TradeManager:
         try:
             from bson import ObjectId
             trade        = self._open_trades.get(trade_id, {})
+
+            # ── Idempotency guard ────────────────────────────────────────────
+            if trade.get(f"{tp_level.lower()}_hit"):
+                tp_price = trade.get(f"{tp_level.lower()}_price", "unknown")
+                logger.info(
+                    f"[{trade.get('pair', '?')}] {tp_level} already hit at "
+                    f"{tp_price} — skipping duplicate partial close"
+                )
+                return False
+
             partial_pct  = PARTIAL_SIZES.get(tp_level, 0.50)
             lots         = float(trade.get("lots", 0.01))
             partial_lots = round(lots * partial_pct, 2)
@@ -410,6 +452,10 @@ class TradeManager:
         ----------
         result : "WIN", "LOSS", or "CLOSED" (manual close).
 
+        Idempotent: if the trade is already in a terminal state (WIN / LOSS /
+        CLOSED) this method logs and returns False without touching MongoDB,
+        preventing duplicate close operations on restart.
+
         Returns True if the update was applied.
         """
         if db is None:
@@ -418,6 +464,17 @@ class TradeManager:
         try:
             from bson import ObjectId
             trade       = self._open_trades.get(trade_id, {})
+
+            # ── Idempotency guard ────────────────────────────────────────────
+            current_status = trade.get("status", "")
+            if current_status in ("WIN", "LOSS", "CLOSED"):
+                logger.info(
+                    f"[{trade.get('pair', '?')}] Trade already closed with "
+                    f"status '{current_status}' — skipping duplicate close at "
+                    f"price {close_price}"
+                )
+                return False
+
             entry       = float(trade.get("entry_price", 0))
             lots        = float(trade.get("lots", 0.01))
             signal_type = trade.get("type", "BUY")
