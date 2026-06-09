@@ -30,6 +30,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from pymongo.errors import DuplicateKeyError
+
 logger = logging.getLogger("signal_deduplicator")
 
 # Collection name used for MongoDB-backed locks
@@ -197,14 +199,12 @@ class SignalDeduplicator:
             await self._db[DEDUPE_COLLECTION].insert_one(doc)
             logger.debug(f"SignalDeduplicator: lock created — key={key!r}")
             return True
+        except DuplicateKeyError:
+            logger.debug(
+                f"SignalDeduplicator: lock already exists — key={key!r}"
+            )
+            return False
         except Exception as exc:
-            # Duplicate key error (code 11000) means lock already exists
-            err_str = str(exc)
-            if "11000" in err_str or "duplicate key" in err_str.lower():
-                logger.debug(
-                    f"SignalDeduplicator: lock already exists (race) — key={key!r}"
-                )
-                return False
             # Any other error — log and fail-open (allow signal through)
             logger.warning(
                 f"SignalDeduplicator._mongo_mark unexpected error — "
