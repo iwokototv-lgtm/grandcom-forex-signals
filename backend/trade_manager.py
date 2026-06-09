@@ -1,8 +1,43 @@
 """
 Trade Manager — V4.0 Gold Signals
 ===================================
-Manages open trades stored in MongoDB with automatic Breakeven (BE),
-Trailing Stop (TS), and partial-profit management.
+SIGNAL MANAGEMENT MODULE — NOT AN ORDER EXECUTOR
+-------------------------------------------------
+This module manages the *state* of open trades stored in MongoDB.  It does
+**not** call any broker API, place orders, or modify live positions directly.
+
+Execution model
+---------------
+  1. gold_server_v4.py generates a BUY/SELL signal and writes it to MongoDB.
+  2. An external broker or copy-trade follower reads the MongoDB document and
+     places the actual order with the initial SL/TP levels.
+  3. Every 2 minutes, run_management_cycle() evaluates BE/TS/partial-profit
+     logic and writes updated SL/TP values (current_sl, be_activated, tp1_hit,
+     etc.) back to MongoDB.
+  4. The broker/follower polls MongoDB (or receives a webhook) and modifies
+     the live order to match the updated SL/TP.
+
+MongoDB is the source of truth for signal intent.
+The broker is the source of truth for live order state.
+
+Price source — ⚠️ IMPORTANT
+----------------------------
+  current_prices passed to run_management_cycle() is currently populated from
+  the last 4H candle close fetched from TwelveData.  This price is stale by
+  up to 4 hours between candle closes.
+
+  For production use, current_prices should come from a real-time quote feed
+  (broker WebSocket or TwelveData WebSocket) so that BE/TS/SL detection
+  reflects the actual market price, not a stale candle close.
+
+  See backend/TRADE_EXECUTION_MODEL.md for full details.
+
+Latency & spike risk
+--------------------
+  The management loop runs every 2 minutes.  A fast price spike can jump the
+  stop-loss between checks.  The broker must enforce hard SL/TP orders natively
+  as the primary protection.  This module's SL detection is a secondary safety
+  net and a record-keeping mechanism only.
 
 Trade lifecycle
 ---------------
@@ -43,10 +78,23 @@ PARTIAL_SIZES: dict[str, float] = {
 
 class TradeManager:
     """
-    Manage open trades with BE / TS / partial-profit logic.
+    Manage open trade *state* with BE / TS / partial-profit logic.
+
+    ⚠️  This class is a SIGNAL MANAGER, not an order executor.
+        It writes SL/TP updates to MongoDB only.  The broker or copy-trade
+        follower is responsible for reading those updates and modifying live
+        orders on the trading account.
 
     All state is persisted to MongoDB (gold_signals_v4 collection).
     An in-memory cache is maintained for fast access during the management loop.
+
+    Price source
+    ------------
+    current_prices passed to run_management_cycle() must be real-time quotes
+    for accurate BE/TS/SL detection.  Using stale 4H candle closes (the current
+    default in gold_server_v4.run_trade_management_loop) introduces up to 4 h
+    of lag.  Replace with a broker WebSocket or TwelveData WebSocket feed for
+    production use.  See backend/TRADE_EXECUTION_MODEL.md.
 
     Usage
     -----
@@ -128,6 +176,11 @@ class TradeManager:
         ----------
         db             : Motor MongoDB database instance.
         current_prices : {pair: current_price} mapping, e.g. {"XAUUSD": 2345.50}.
+                         Must be real-time quotes for accurate SL/BE/TS detection.
+                         ⚠️  The current gold_server_v4 implementation passes the
+                         last 4H candle close from TwelveData, which is stale by
+                         up to 4 hours.  Replace with a real-time feed in production.
+                         See backend/TRADE_EXECUTION_MODEL.md.
 
         Returns
         -------

@@ -2,6 +2,31 @@
 Grandcom Gold Signals Server v4.0 — Balanced Edition
 Institutional Multi-Strategy Hybrid Portfolio System with Advanced Risk Management
 
+EXECUTION MODEL — READ BEFORE DEPLOYING
+----------------------------------------
+This server is a SIGNAL GENERATOR, not an order executor.  It does not call
+any broker API.  Trade execution is handled by an external broker or copy-trade
+follower that reads signal documents from MongoDB.
+
+  Signal flow:
+    1. This server generates BUY/SELL signals and writes them to MongoDB.
+    2. The broker/follower reads MongoDB and places hard SL/TP orders.
+    3. run_trade_management_loop() runs every 2 min, updates SL/TP in MongoDB.
+    4. The broker/follower reads the updated MongoDB document and modifies the
+       live order accordingly.
+
+  Price source for trade management (⚠️ STALE — see below):
+    run_trade_management_loop() currently fetches prices via fetch_ohlcv()
+    with interval="4h", which returns the last completed 4H candle close from
+    TwelveData.  This price is stale by up to 4 hours between candle closes.
+    For production use, replace with a real-time quote feed (broker WebSocket
+    or TwelveData WebSocket).  See backend/TRADE_EXECUTION_MODEL.md.
+
+  Spike risk:
+    The 2-minute management loop combined with stale 4H prices means a fast
+    spike can jump the stop-loss before it is detected.  The broker MUST
+    enforce hard SL/TP orders natively as the primary protection.
+
 V4.0 Balanced Option C Features:
   ✅ Breakeven Stop-Loss  — Moves SL to entry after TP1 hit (+0.5R activation)
   ✅ Trailing Stop        — Follows price by 1 ATR; activates after TP1 hit
@@ -1397,6 +1422,29 @@ async def run_trade_management_loop() -> None:
       - Trailing stop updates (after TP1 hit)
       - Partial profit closes (TP1/TP2/TP3)
       - SL hit detection → close as LOSS
+
+    ⚠️  PRICE SOURCE — STALE 4H CANDLE CLOSE
+    -----------------------------------------
+    Prices are fetched via fetch_ohlcv(interval="4h", outputsize=5) and the
+    "price" field is df.iloc[-1]["close"] — the close of the last completed
+    4H candle from TwelveData.  Between candle closes this value is stale by
+    up to 4 hours.
+
+    This means BE activation, TS updates, and SL detection can lag the actual
+    market price by up to 4 hours.  A fast spike can blow through the SL
+    without being detected until the next 4H candle closes.
+
+    PRODUCTION RECOMMENDATION:
+      Replace the fetch_ohlcv() call below with a real-time quote feed
+      (broker WebSocket or TwelveData WebSocket) so that current_prices
+      reflects the live market price.  The trade_manager.run_management_cycle()
+      interface accepts any {pair: float} dict — only this function needs to
+      change.  Alternatively, reduce the scheduler interval to 30 seconds as
+      a partial mitigation (does not fix the staleness, only the loop lag).
+
+      The broker MUST enforce hard SL/TP orders natively.  This loop is a
+      secondary safety net and record-keeping mechanism, not the primary
+      stop-loss enforcement.  See backend/TRADE_EXECUTION_MODEL.md.
     """
     if not _TRADE_MANAGER_AVAILABLE:
         return
@@ -1416,6 +1464,10 @@ async def run_trade_management_loop() -> None:
 
     for pair in active_pairs:
         try:
+            # ⚠️  STALE PRICE: last 4H candle close from TwelveData (up to 4 h old).
+            # TODO: Replace with a real-time quote feed (broker WebSocket or
+            #       TwelveData WebSocket) for accurate BE/TS/SL detection.
+            #       See backend/TRADE_EXECUTION_MODEL.md for details.
             df = await fetch_ohlcv(pair, interval="4h", outputsize=5)
             if df is not None and len(df) > 0:
                 ind = compute_indicators(df, PAIRS[pair]["decimals"])
