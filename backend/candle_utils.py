@@ -81,19 +81,20 @@ def is_candle_closed(df: pd.DataFrame, interval: str = "4h") -> bool:
 
         closed = now >= cutoff
 
-        logger.debug(
+        logger.info(
             f"is_candle_closed [{interval}]: "
             f"open={last_ts.isoformat()} "
             f"close={close_time.isoformat()} "
             f"cutoff={cutoff.isoformat()} "
             f"now={now.isoformat()} "
-            f"→ {'CLOSED' if closed else 'FORMING'}"
+            f"→ {'CLOSED ✅' if closed else 'FORMING ⏳'}"
         )
         return closed
 
     except Exception as exc:
+        # Re-raise so the caller's fail-closed handler can catch and reject
         logger.error(f"is_candle_closed failed: {exc}", exc_info=True)
-        return False
+        raise
 
 
 def get_candle_close_time(timestamp: datetime, interval: str) -> datetime:

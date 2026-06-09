@@ -1170,15 +1170,43 @@ async def generate_signal_v4(pair: str) -> None:
         )
 
     # 1b. V4.1 Candle-close confirmation — no mid-candle signals
-    if _CANDLE_UTILS_AVAILABLE:
-        if not is_candle_closed(df, interval="4h"):
-            logger.info(
-                f"[{pair}] ⏳ Last 4H candle still FORMING — "
-                f"signal suppressed (candle-close confirmation)"
-            )
-            _v4_metrics["signals_suppressed_candle"] += 1
-            return
-        logger.info(f"[{pair}] ✅ Candle-close confirmed — proceeding with signal generation")
+    # CRITICAL: This gate MUST be fail-closed. If candle_utils is unavailable
+    # or raises, we REJECT the signal rather than proceeding on a forming candle.
+    _last_candle_ts_raw = df.iloc[-1].get("datetime", df.iloc[-1].name) if hasattr(df.iloc[-1], "get") else df.iloc[-1].name
+    logger.info(
+        f"[{pair}] 🕯️  Candle-close gate — last candle ts={_last_candle_ts_raw} "
+        f"candle_utils_available={_CANDLE_UTILS_AVAILABLE}"
+    )
+    if not _CANDLE_UTILS_AVAILABLE:
+        # candle_utils failed to import — REJECT to avoid mid-candle signals
+        logger.error(
+            f"[{pair}] ❌ candle_utils unavailable — signal REJECTED (fail-closed). "
+            f"Fix the candle_utils import to re-enable signal generation."
+        )
+        _v4_metrics["signals_suppressed_candle"] += 1
+        return
+    try:
+        _candle_is_closed = is_candle_closed(df, interval="4h")
+    except Exception as _gate_exc:
+        # Exception in gate — REJECT (fail-closed), never fail-open
+        logger.error(
+            f"[{pair}] ❌ is_candle_closed() raised {_gate_exc!r} — "
+            f"signal REJECTED (fail-closed)"
+        )
+        _v4_metrics["signals_suppressed_candle"] += 1
+        return
+    logger.info(
+        f"[{pair}] 🕯️  is_candle_closed={_candle_is_closed} "
+        f"(candle_ts={_last_candle_ts_raw})"
+    )
+    if not _candle_is_closed:
+        logger.info(
+            f"[{pair}] ⏳ Last 4H candle still FORMING — "
+            f"signal suppressed (candle-close confirmation)"
+        )
+        _v4_metrics["signals_suppressed_candle"] += 1
+        return
+    logger.info(f"[{pair}] ✅ Candle-close confirmed — proceeding with signal generation")
 
     # 1c. V4.2 Deduplication pre-check — extract candle timestamp before any
     #     expensive calls so we can bail out early if this candle was already
@@ -1276,9 +1304,18 @@ async def generate_signal_v4(pair: str) -> None:
         return
 
     # 8. Levels
-    entry = float(gpt.get("entry_price") or ind["price"])
-    if entry <= 0:
-        entry = ind["price"]
+    # CRITICAL: Entry price MUST come from the confirmed closed candle (df.iloc[-1]),
+    # NOT from GPT's suggestion (which echoes the live forming price sent in the prompt).
+    # GPT's entry_price is discarded — it is derived from ind["price"] which is the
+    # live close of the last candle at prompt-build time and changes every cycle.
+    # After the candle-close gate above, df.iloc[-1] is the confirmed closed candle.
+    _closed_candle_close = round(float(df.iloc[-1]["close"]), cfg["decimals"])
+    entry = _closed_candle_close
+    logger.info(
+        f"[{pair}] 📌 Entry pinned to closed candle close={entry} "
+        f"(candle_ts={_last_candle_ts_raw}) — "
+        f"GPT suggested entry_price={gpt.get('entry_price', 'N/A')} (ignored)"
+    )
 
     tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
 
