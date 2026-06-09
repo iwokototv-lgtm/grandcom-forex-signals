@@ -7,22 +7,28 @@ false signals and must be rejected early in the pipeline.
 
 Rules
 -----
-  - Data is "fresh" if the last candle timestamp is < max_age_seconds old
-    (default: 300 s / 5 minutes).
+  - Data is "fresh" if the API response timestamp is < max_age_seconds old
+    (default: 300 s / 5 minutes).  The API response timestamp reflects when
+    the feed last delivered data — NOT the candle's open time.  This detects
+    a dead feed (no new data for 5+ minutes) without incorrectly rejecting
+    recently-closed candles whose open time is hours in the past.
   - Timestamps must be monotonically increasing (no out-of-order candles).
   - No timestamp may be in the future (> now + 1 min tolerance).
   - The last timestamp must be ≤ now.
 
 Typical usage
 -------------
+    response_ts = datetime.now(timezone.utc)   # captured right after API call
     guard = DataFreshnessGuard()
-    if not guard.is_fresh(df):
-        logger.warning("Stale data — skipping signal generation")
+    if not guard.is_fresh(df, response_timestamp=response_ts):
+        logger.warning("Dead feed — skipping signal generation")
         return
     if not guard.validate_timestamps(df):
         logger.warning("Invalid timestamps — skipping signal generation")
         return
 """
+
+
 
 from __future__ import annotations
 
@@ -56,36 +62,88 @@ class DataFreshnessGuard:
         self,
         df: pd.DataFrame,
         max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+        response_timestamp: Optional[datetime] = None,
     ) -> bool:
         """
-        Return True if the last candle in *df* is fresh (< max_age_seconds old).
+        Return True if the data feed is fresh (< max_age_seconds old).
 
-        "Age" is measured from the candle's open timestamp to now.  For a
-        4H candle that opened at 08:00 UTC and it is currently 08:03 UTC,
-        the age is 3 minutes — well within the 5-minute default.
+        Staleness is measured against *response_timestamp* — the moment the
+        API call returned — NOT the candle's open time.  This correctly
+        detects a dead feed (no new data arriving for 5+ minutes) without
+        penalising recently-closed candles whose open time is hours in the
+        past.
+
+        Example: a 4H bar that opened at 00:00 UTC and closed at 04:00 UTC.
+        At 04:05 UTC the API responds with that bar.  The candle open is
+        4 h 5 min old, but the feed age is only 5 seconds — fresh.
 
         Parameters
         ----------
-        df              : OHLCV DataFrame with a datetime column or index.
-        max_age_seconds : Maximum acceptable age in seconds (default: 300).
+        df                 : OHLCV DataFrame with a datetime column or index
+                             (used only for candle_open_time debug logging).
+        max_age_seconds    : Maximum acceptable feed age in seconds (default: 300).
+        response_timestamp : UTC datetime captured immediately after the API
+                             call returned.  Falls back to now() if omitted
+                             (treats the feed as instantaneously fresh — use
+                             only when a timestamp cannot be captured).
 
         Returns
         -------
-        bool — True if fresh, False if stale.
+        bool — True if fresh, False if stale (dead feed).
         """
         try:
-            age = self.get_data_age(df)
-            if age is None:
-                logger.warning("is_fresh: could not determine data age — treating as stale")
-                return False
+            now = datetime.now(timezone.utc)
 
-            fresh = age < max_age_seconds
+            # Determine feed age from API response time
+            if response_timestamp is not None:
+                # Ensure timezone-aware
+                rt = response_timestamp
+                if rt.tzinfo is None:
+                    rt = rt.replace(tzinfo=timezone.utc)
+                feed_age = (now - rt).total_seconds()
+                feed_age = max(0.0, feed_age)
+            else:
+                # No response timestamp provided — treat feed as instantaneously
+                # fresh but emit a warning so callers know to pass it.
+                logger.warning(
+                    "is_fresh: response_timestamp not provided — "
+                    "feed age cannot be measured; treating as fresh. "
+                    "Pass response_timestamp=datetime.now(timezone.utc) "
+                    "immediately after the API call."
+                )
+                feed_age = 0.0
+
+            # Log candle open time alongside feed age for debugging
+            candle_open_time: Optional[datetime] = None
+            try:
+                ts_series = self._extract_timestamp_series(df)
+                if ts_series is not None and not ts_series.empty:
+                    candle_open_time = self._to_utc_datetime(ts_series.iloc[-1])
+            except Exception:
+                pass
+
+            if candle_open_time is not None:
+                candle_age = (now - candle_open_time).total_seconds()
+                logger.debug(
+                    f"is_fresh: candle_open={candle_open_time.isoformat()} "
+                    f"(age={candle_age:.0f}s) | "
+                    f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
+                    f"(feed_age={feed_age:.0f}s)"
+                )
+
+            fresh = feed_age < max_age_seconds
             if not fresh:
                 logger.warning(
-                    f"is_fresh: data is stale — age={age:.0f}s > max={max_age_seconds}s"
+                    f"is_fresh: dead feed detected — "
+                    f"feed_age={feed_age:.0f}s > max={max_age_seconds}s "
+                    f"(candle_open={candle_open_time.isoformat() if candle_open_time else 'unknown'}, "
+                    f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'})"
                 )
             else:
-                logger.debug(f"is_fresh: data age={age:.0f}s — OK")
+                logger.debug(
+                    f"is_fresh: feed OK — feed_age={feed_age:.0f}s "
+                    f"(candle_open={candle_open_time.isoformat() if candle_open_time else 'unknown'})"
+                )
 
             return fresh
 

@@ -506,8 +506,14 @@ async def fetch_ohlcv(
     pair: str,
     interval: str = "4h",
     outputsize: int = 100,
-) -> pd.DataFrame | None:
-    """Fetch OHLCV from TwelveData."""
+) -> tuple[pd.DataFrame, datetime] | tuple[None, None]:
+    """Fetch OHLCV from TwelveData.
+
+    Returns a (DataFrame, response_timestamp) tuple where response_timestamp
+    is the UTC datetime captured immediately after the API call returned.
+    This timestamp is used by DataFreshnessGuard to measure feed staleness
+    (not the candle open time).  Returns (None, None) on failure.
+    """
     cfg = PAIRS[pair]
     url = (
         f"https://api.twelvedata.com/time_series"
@@ -519,20 +525,23 @@ async def fetch_ohlcv(
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
 
+        # Capture response time immediately after the API call completes
+        response_timestamp = datetime.now(timezone.utc)
+
         if "values" not in data:
             logger.error(f"[{pair}] TwelveData error: {data.get('message', data)}")
-            return None
+            return None, None
 
         df = pd.DataFrame(data["values"])
         for col in ("open", "high", "low", "close"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.iloc[::-1].reset_index(drop=True)
-        logger.info(f"[{pair}] Fetched {len(df)} {interval} candles")
-        return df
+        logger.info(f"[{pair}] Fetched {len(df)} {interval} candles (response_ts={response_timestamp.isoformat()})")
+        return df, response_timestamp
 
     except Exception as exc:
         logger.error(f"[{pair}] fetch_ohlcv failed: {exc}")
-        return None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -1107,18 +1116,28 @@ async def generate_signal_v4(pair: str) -> None:
     logger.info(f"[{pair}] Starting V4.0 signal generation")
 
     # 1. Price data (4H — permanent timeframe)
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    df, response_timestamp = await fetch_ohlcv(pair, interval="4h", outputsize=100)
     if df is None or len(df) < 52:
         logger.warning(f"[{pair}] Insufficient 4H candles, skipping")
         return
 
-    # 1a. V4.1 Data freshness check — reject stale data before processing
+    # 1a. V4.1 Data freshness check — detects dead feed, not candle age
+    # Age is measured from API response time so recently-closed candles
+    # (whose open time is hours old) are correctly treated as fresh.
     if _FRESHNESS_GUARD_AVAILABLE and _freshness_guard is not None:
-        data_age = _freshness_guard.get_data_age(df)
-        if not _freshness_guard.is_fresh(df, max_age_seconds=DATA_FRESHNESS_MAX_AGE_SECONDS):
+        logger.info(
+            f"[{pair}] Freshness check — "
+            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+        )
+        if not _freshness_guard.is_fresh(
+            df,
+            max_age_seconds=DATA_FRESHNESS_MAX_AGE_SECONDS,
+            response_timestamp=response_timestamp,
+        ):
             logger.warning(
-                f"[{pair}] ⚠️  Stale data detected — age={data_age:.0f}s "
-                f"> {DATA_FRESHNESS_MAX_AGE_SECONDS}s — signal suppressed"
+                f"[{pair}] ⚠️  Dead feed detected — "
+                f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
+                f"> {DATA_FRESHNESS_MAX_AGE_SECONDS}s ago — signal suppressed"
             )
             _v4_metrics["signals_suppressed_stale"] += 1
             return
@@ -1126,7 +1145,10 @@ async def generate_signal_v4(pair: str) -> None:
             logger.warning(f"[{pair}] ⚠️  Invalid timestamps — signal suppressed")
             _v4_metrics["signals_suppressed_stale"] += 1
             return
-        logger.info(f"[{pair}] ✅ Data freshness OK — age={data_age:.0f}s")
+        logger.info(
+            f"[{pair}] ✅ Feed freshness OK — "
+            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+        )
 
     # 1b. V4.1 Candle-close confirmation — no mid-candle signals
     if _CANDLE_UTILS_AVAILABLE:
@@ -1416,7 +1438,7 @@ async def run_trade_management_loop() -> None:
 
     for pair in active_pairs:
         try:
-            df = await fetch_ohlcv(pair, interval="4h", outputsize=5)
+            df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=5)
             if df is not None and len(df) > 0:
                 ind = compute_indicators(df, PAIRS[pair]["decimals"])
                 if ind:
@@ -1714,7 +1736,7 @@ async def get_regime_analysis(pair: str):
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=100)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 
@@ -1740,7 +1762,7 @@ async def get_smc_analysis(pair: str):
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=100)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 
@@ -1764,9 +1786,9 @@ async def get_pivot_analysis(
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="1day", outputsize=10)
+    df, _ = await fetch_ohlcv(pair, interval="1day", outputsize=10)
     if df is None:
-        df = await fetch_ohlcv(pair, interval="4h", outputsize=50)
+        df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=50)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 
@@ -1811,7 +1833,7 @@ async def get_hybrid_analysis(pair: str):
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=100)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 
@@ -1907,7 +1929,7 @@ async def get_be_ts_levels(
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=30)
+    df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=30)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 
@@ -1947,7 +1969,7 @@ async def get_position_size(
     if pair not in PAIRS:
         raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
 
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    df, _ = await fetch_ohlcv(pair, interval="4h", outputsize=100)
     if df is None:
         raise HTTPException(status_code=503, detail="Failed to fetch price data")
 

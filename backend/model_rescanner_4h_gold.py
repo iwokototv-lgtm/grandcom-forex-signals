@@ -109,8 +109,14 @@ async def fetch_ohlcv(
     pair: str,
     interval: str = TIMEFRAME,
     outputsize: int = CANDLE_COUNT,
-) -> list[dict] | None:
-    """Fetch OHLCV candles from TwelveData for a Gold pair."""
+) -> tuple[list[dict], datetime] | tuple[None, None]:
+    """Fetch OHLCV candles from TwelveData for a Gold pair.
+
+    Returns a (candles, response_timestamp) tuple where response_timestamp
+    is the UTC datetime captured immediately after the API call returned.
+    This timestamp is used by DataFreshnessGuard to measure feed staleness
+    (not the candle open time).  Returns (None, None) on failure.
+    """
     cfg = GOLD_PAIRS[pair]
     url = (
         "https://api.twelvedata.com/time_series"
@@ -121,18 +127,21 @@ async def fetch_ohlcv(
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             data = await resp.json()
 
+        # Capture response time immediately after the API call completes
+        response_timestamp = datetime.now(timezone.utc)
+
         if "values" not in data:
             logger.error(f"[{pair}] TwelveData error: {data.get('message', data)}")
-            return None
+            return None, None
 
         # Reverse so oldest candle is first
         candles = list(reversed(data["values"]))
-        logger.info(f"[{pair}] Fetched {len(candles)} {interval} candles")
-        return candles
+        logger.info(f"[{pair}] Fetched {len(candles)} {interval} candles (response_ts={response_timestamp.isoformat()})")
+        return candles, response_timestamp
 
     except Exception as exc:
         logger.error(f"[{pair}] fetch_ohlcv failed: {exc}")
-        return None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +341,7 @@ async def scan_pair(
     }
 
     # 1. Fetch OHLCV candles
-    candles = await fetch_ohlcv(session, pair, interval=TIMEFRAME, outputsize=CANDLE_COUNT)
+    candles, response_timestamp = await fetch_ohlcv(session, pair, interval=TIMEFRAME, outputsize=CANDLE_COUNT)
     if candles is None or len(candles) < MIN_CANDLES:
         msg = (
             f"Insufficient candles "
@@ -349,19 +358,37 @@ async def scan_pair(
         df_check = df_check.rename(columns={"date": "datetime"})
 
     if _UTILS_AVAILABLE and _freshness_guard is not None:
-        # Freshness check (warn only — do not abort; rescanner runs at candle close)
-        data_age = _freshness_guard.get_data_age(df_check)
-        data_fresh = _freshness_guard.is_fresh(df_check, max_age_seconds=300)
-        result["data_age_seconds"] = round(data_age, 1) if data_age is not None else None
+        # Freshness check — measures feed age (time since API responded), NOT
+        # candle open time.  A just-closed 4H bar is fresh even though its
+        # open timestamp is hours old.  Warn only — do not abort; rescanner
+        # runs at candle close and a stale flag here means a dead feed.
+        logger.info(
+            f"[{pair}] Freshness check — "
+            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+        )
+        data_fresh = _freshness_guard.is_fresh(
+            df_check,
+            max_age_seconds=300,
+            response_timestamp=response_timestamp,
+        )
+        # Also record feed age in seconds for the summary/Telegram message
+        feed_age: float | None = None
+        if response_timestamp is not None:
+            feed_age = max(0.0, (datetime.now(timezone.utc) - response_timestamp).total_seconds())
+        result["data_age_seconds"] = round(feed_age, 1) if feed_age is not None else None
         result["data_fresh"] = data_fresh
 
         if not data_fresh:
             logger.warning(
-                f"[{pair}] ⚠️  Data freshness check FAILED — "
-                f"age={data_age:.0f}s > 300s. Proceeding with caution."
+                f"[{pair}] ⚠️  Dead feed detected — "
+                f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
+                f"> 300s ago. Proceeding with caution."
             )
         else:
-            logger.info(f"[{pair}] ✅ Data freshness OK — age={data_age:.0f}s")
+            logger.info(
+                f"[{pair}] ✅ Feed freshness OK — "
+                f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+            )
 
         # Timestamp validation
         if not _freshness_guard.validate_timestamps(df_check):
