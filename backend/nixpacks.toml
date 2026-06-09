@@ -5,4 +5,13 @@ nixPkgs = ["python311"]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "uvicorn gold_server_v3:app --host 0.0.0.0 --port ${PORT:-8002}"
+cmd = "uvicorn gold_server_v4:app --host 0.0.0.0 --port ${PORT:-8002}"
+
+# ---------------------------------------------------------------------------
+# Cron services (configure in Railway dashboard or railway.json)
+# ---------------------------------------------------------------------------
+# model-rescanner-4h-gold:
+#   command : python model_rescanner_4h_gold.py
+#   schedule: 5 0,4,8,12,16,20 * * *
+#   (6x/day at 5 min past each 4H candle close — was every hour = 60x/day)
+

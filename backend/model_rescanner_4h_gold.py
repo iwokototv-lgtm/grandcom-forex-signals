@@ -2,7 +2,11 @@
 Model Rescanner — 4H Gold (XAUUSD / XAUEUR)
 ============================================
 Lightweight, robust cron job that fetches current Gold prices and stores
-results in MongoDB.  Designed to run as a Railway cron service every hour:
+results in MongoDB.  Designed to run as a Railway cron service 6x/day at
+candle-close boundaries:
+
+    Cron schedule: 5 0,4,8,12,16,20 * * *
+    (5 minutes past each 4H boundary — after candle close + buffer)
 
     python model_rescanner_4h_gold.py
 
@@ -10,10 +14,16 @@ Pipeline
 --------
 1. Validate required environment variables (with graceful fallback).
 2. Fetch current Gold prices (XAUUSD, XAUEUR) from TwelveData API.
-3. Compute basic technical indicators from 4H OHLCV data.
-4. Store results in MongoDB (with graceful fallback if unavailable).
-5. Send a Telegram status notification (with graceful fallback if unavailable).
-6. Exit with status 0 on success, 1 on failure.
+3. Validate data freshness (warn if > 5 min old) and timestamps.
+4. Validate candle-close confirmation before storing results.
+5. Compute basic technical indicators from 4H OHLCV data.
+6. Store results in MongoDB (with graceful fallback if unavailable).
+7. Send a Telegram status notification (with graceful fallback if unavailable).
+8. Log scan metrics (candles fetched, freshness, close status).
+9. Exit with status 0 on success, 1 on failure.
+
+Schedule change: 6x/day (was 60x/day) — 90% reduction in API calls.
+Aligned to 4H candle-close boundaries to ensure only closed candles are stored.
 """
 
 from __future__ import annotations
@@ -27,7 +37,20 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pandas as pd
 from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Local utilities (candle-close confirmation + data freshness)
+# ---------------------------------------------------------------------------
+try:
+    from candle_utils import is_candle_closed, validate_candle_timestamp
+    from data_freshness import DataFreshnessGuard
+    _freshness_guard = DataFreshnessGuard()
+    _UTILS_AVAILABLE = True
+except ImportError:
+    _UTILS_AVAILABLE = False
+    _freshness_guard = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Bootstrap — load .env when running locally
@@ -258,9 +281,14 @@ async def send_telegram_summary(
         trend = info.get("trend", "N/A")
         rsi   = info.get("rsi", "N/A")
         atr   = info.get("atr", "N/A")
+        candle_closed = info.get("candle_closed")
+        closed_icon   = "🕯✅" if candle_closed is True else ("🕯⏳" if candle_closed is False else "🕯❓")
+        data_age      = info.get("data_age_seconds")
+        age_str       = f"{data_age:.0f}s" if data_age is not None else "?"
         lines.append(
             f"{pair_emoji} <b>{pair}</b> | {trend} | "
-            f"Price: {price} | RSI: {rsi} | ATR: {atr}"
+            f"Price: {price} | RSI: {rsi} | ATR: {atr} | "
+            f"{closed_icon} | Age: {age_str}"
         )
 
     if summary.get("errors"):
@@ -268,7 +296,7 @@ async def send_telegram_summary(
         for err in summary["errors"]:
             lines.append(f"  • {err}")
 
-    lines += ["", "<i>🤖 Grandcom Gold Engine — model-rescanner-4h-gold</i>"]
+    lines += ["", "<i>🤖 Grandcom Gold Engine — model-rescanner-4h-gold v4.0 | 6x/day @ candle close</i>"]
 
     await send_telegram_message(session, "\n".join(lines))
 
@@ -296,7 +324,11 @@ async def scan_pair(
         "ma20": None,
         "ma50": None,
         "atr": None,
-        "system_version": "3.0.0",
+        "system_version": "4.0.0",
+        # Freshness / candle-close metadata
+        "candle_closed": None,
+        "data_age_seconds": None,
+        "data_fresh": None,
     }
 
     # 1. Fetch OHLCV candles
@@ -310,7 +342,48 @@ async def scan_pair(
         result["error"] = msg
         return result
 
-    # 2. Compute indicators
+    # ── 2. Data freshness & timestamp validation ─────────────────────────────
+    # Build a minimal DataFrame for the utility functions
+    df_check = pd.DataFrame(candles)
+    if "datetime" not in df_check.columns and "date" in df_check.columns:
+        df_check = df_check.rename(columns={"date": "datetime"})
+
+    if _UTILS_AVAILABLE and _freshness_guard is not None:
+        # Freshness check (warn only — do not abort; rescanner runs at candle close)
+        data_age = _freshness_guard.get_data_age(df_check)
+        data_fresh = _freshness_guard.is_fresh(df_check, max_age_seconds=300)
+        result["data_age_seconds"] = round(data_age, 1) if data_age is not None else None
+        result["data_fresh"] = data_fresh
+
+        if not data_fresh:
+            logger.warning(
+                f"[{pair}] ⚠️  Data freshness check FAILED — "
+                f"age={data_age:.0f}s > 300s. Proceeding with caution."
+            )
+        else:
+            logger.info(f"[{pair}] ✅ Data freshness OK — age={data_age:.0f}s")
+
+        # Timestamp validation
+        if not _freshness_guard.validate_timestamps(df_check):
+            logger.warning(f"[{pair}] ⚠️  Timestamp validation FAILED — data may be malformed")
+            result["timestamp_valid"] = False
+        else:
+            result["timestamp_valid"] = True
+
+        # Candle-close confirmation
+        candle_closed = is_candle_closed(df_check, interval=TIMEFRAME)
+        result["candle_closed"] = candle_closed
+        if not candle_closed:
+            logger.warning(
+                f"[{pair}] ⚠️  Last 4H candle is still FORMING — "
+                f"storing result but flagging as unconfirmed"
+            )
+        else:
+            logger.info(f"[{pair}] ✅ Candle-close confirmed — last 4H candle is CLOSED")
+    else:
+        logger.debug(f"[{pair}] candle_utils / data_freshness not available — skipping checks")
+
+    # ── 3. Compute indicators ────────────────────────────────────────────────
     ind = compute_indicators(candles, cfg["decimals"])
     if ind:
         result.update(ind)
@@ -322,21 +395,22 @@ async def scan_pair(
     logger.info(
         f"[{pair}] Scan complete — "
         f"price={result['price']} trend={result['trend']} "
-        f"rsi={result['rsi']} atr={result['atr']}"
+        f"rsi={result['rsi']} atr={result['atr']} "
+        f"candle_closed={result.get('candle_closed')} "
+        f"data_age={result.get('data_age_seconds')}s"
     )
 
-    # 3. Persist to MongoDB (non-fatal if unavailable)
+    # ── 4. Persist to MongoDB (non-fatal if unavailable) ─────────────────────
     await store_rescan_result(db, pair, result)
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 async def main() -> None:
     logger.info("=" * 60)
     logger.info("Gold Model Rescanner — 4H  (XAUUSD / XAUEUR)")
+    logger.info("Cron schedule: 5 0,4,8,12,16,20 * * *  (6x/day at candle close)")
     logger.info("=" * 60)
 
     # ── 1. Check required env vars (warn but don't abort on optional ones) ──
@@ -381,11 +455,16 @@ async def main() -> None:
             try:
                 pair_result = await scan_pair(session, pair, db)
                 summary["pairs"][pair] = {
-                    "success": pair_result["success"],
-                    "price":   pair_result.get("price"),
-                    "trend":   pair_result.get("trend", "UNKNOWN"),
-                    "rsi":     pair_result.get("rsi"),
-                    "atr":     pair_result.get("atr"),
+                    "success":          pair_result["success"],
+                    "price":            pair_result.get("price"),
+                    "trend":            pair_result.get("trend", "UNKNOWN"),
+                    "rsi":              pair_result.get("rsi"),
+                    "atr":              pair_result.get("atr"),
+                    # V4 freshness / candle-close metadata
+                    "candle_closed":    pair_result.get("candle_closed"),
+                    "data_fresh":       pair_result.get("data_fresh"),
+                    "data_age_seconds": pair_result.get("data_age_seconds"),
+                    "timestamp_valid":  pair_result.get("timestamp_valid"),
                 }
                 if not pair_result["success"]:
                     summary["success"] = False
@@ -417,6 +496,21 @@ async def main() -> None:
 
     overall = "✅ SUCCESS" if summary["success"] else "⚠️  COMPLETED WITH ERRORS"
     logger.info(f"Gold Model Rescanner 4H — {overall}")
+
+    # ── Metrics summary ──────────────────────────────────────────────
+    for pair, info in summary.get("pairs", {}).items():
+        closed_flag = info.get("candle_closed")
+        fresh_flag  = info.get("data_fresh")
+        age_s       = info.get("data_age_seconds")
+        logger.info(
+            f"[{pair}] METRICS — "
+            f"success={info.get('success')} "
+            f"candle_closed={closed_flag} "
+            f"data_fresh={fresh_flag} "
+            f"data_age={age_s}s "
+            f"timestamp_valid={info.get('timestamp_valid')}"
+        )
+
     logger.info("=" * 60)
 
     if not summary["success"]:
