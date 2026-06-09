@@ -1143,31 +1143,39 @@ async def generate_signal_v4(pair: str) -> None:
     # 1a. V4.1 Data freshness check — detects dead feed, not candle age
     # Age is measured from API response time so recently-closed candles
     # (whose open time is hours old) are correctly treated as fresh.
-    if _FRESHNESS_GUARD_AVAILABLE and _freshness_guard is not None:
-        logger.info(
-            f"[{pair}] Freshness check — "
-            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+    # FAIL-CLOSED: if the guard is unavailable for any reason, reject the signal.
+    if not _FRESHNESS_GUARD_AVAILABLE or _freshness_guard is None:
+        logger.warning(
+            f"[{pair}] ⚠️  DataFreshnessGuard unavailable — "
+            f"cannot verify feed freshness — signal suppressed (fail-closed)"
         )
-        if not _freshness_guard.is_fresh(
-            df,
-            max_age_seconds=DATA_FRESHNESS_MAX_AGE_SECONDS,
-            response_timestamp=response_timestamp,
-        ):
-            logger.warning(
-                f"[{pair}] ⚠️  Dead feed detected — "
-                f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
-                f"> {DATA_FRESHNESS_MAX_AGE_SECONDS}s ago — signal suppressed"
-            )
-            _v4_metrics["signals_suppressed_stale"] += 1
-            return
-        if not _freshness_guard.validate_timestamps(df):
-            logger.warning(f"[{pair}] ⚠️  Invalid timestamps — signal suppressed")
-            _v4_metrics["signals_suppressed_stale"] += 1
-            return
-        logger.info(
-            f"[{pair}] ✅ Feed freshness OK — "
-            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+        _v4_metrics["signals_suppressed_stale"] += 1
+        return
+
+    logger.info(
+        f"[{pair}] Freshness check — "
+        f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+    )
+    if not _freshness_guard.is_fresh(
+        df,
+        max_age_seconds=DATA_FRESHNESS_MAX_AGE_SECONDS,
+        response_timestamp=response_timestamp,
+    ):
+        logger.warning(
+            f"[{pair}] ⚠️  Freshness check FAILED — "
+            f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
+            f"— signal suppressed (fail-closed)"
         )
+        _v4_metrics["signals_suppressed_stale"] += 1
+        return
+    if not _freshness_guard.validate_timestamps(df):
+        logger.warning(f"[{pair}] ⚠️  Timestamp validation FAILED — signal suppressed (fail-closed)")
+        _v4_metrics["signals_suppressed_stale"] += 1
+        return
+    logger.info(
+        f"[{pair}] ✅ Feed freshness OK — "
+        f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'}"
+    )
 
     # 1b. V4.1 Candle-close confirmation — no mid-candle signals
     if _CANDLE_UTILS_AVAILABLE:

@@ -103,15 +103,15 @@ class DataFreshnessGuard:
                 feed_age = (now - rt).total_seconds()
                 feed_age = max(0.0, feed_age)
             else:
-                # No response timestamp provided — treat feed as instantaneously
-                # fresh but emit a warning so callers know to pass it.
+                # No response timestamp provided — cannot verify freshness.
+                # Fail-closed: reject the signal rather than assume it is fresh.
                 logger.warning(
                     "is_fresh: response_timestamp not provided — "
-                    "feed age cannot be measured; treating as fresh. "
+                    "feed age cannot be measured; treating as STALE (fail-closed). "
                     "Pass response_timestamp=datetime.now(timezone.utc) "
                     "immediately after the API call."
                 )
-                feed_age = 0.0
+                return False
 
             # Log candle open time alongside feed age for debugging
             candle_open_time: Optional[datetime] = None
@@ -124,7 +124,7 @@ class DataFreshnessGuard:
 
             if candle_open_time is not None:
                 candle_age = (now - candle_open_time).total_seconds()
-                logger.debug(
+                logger.info(
                     f"is_fresh: candle_open={candle_open_time.isoformat()} "
                     f"(age={candle_age:.0f}s) | "
                     f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'} "
@@ -134,14 +134,16 @@ class DataFreshnessGuard:
             fresh = feed_age < max_age_seconds
             if not fresh:
                 logger.warning(
-                    f"is_fresh: dead feed detected — "
-                    f"feed_age={feed_age:.0f}s > max={max_age_seconds}s "
+                    f"is_fresh: FAIL-CLOSED — dead feed detected — "
+                    f"feed_age={feed_age:.0f}s exceeds max={max_age_seconds}s — "
+                    f"signal rejected "
                     f"(candle_open={candle_open_time.isoformat() if candle_open_time else 'unknown'}, "
                     f"response_ts={response_timestamp.isoformat() if response_timestamp else 'N/A'})"
                 )
             else:
-                logger.debug(
-                    f"is_fresh: feed OK — feed_age={feed_age:.0f}s "
+                logger.info(
+                    f"is_fresh: PASS — feed_age={feed_age:.0f}s < max={max_age_seconds}s — "
+                    f"signal allowed "
                     f"(candle_open={candle_open_time.isoformat() if candle_open_time else 'unknown'})"
                 )
 
