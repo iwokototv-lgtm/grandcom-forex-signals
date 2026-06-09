@@ -46,6 +46,31 @@ from telegram import Bot
 load_dotenv()
 
 # ---------------------------------------------------------------------------
+# V4.1 Safety Modules — candle-close confirmation, freshness guard, trade mgmt
+# ---------------------------------------------------------------------------
+try:
+    from candle_utils import is_candle_closed
+    _CANDLE_UTILS_AVAILABLE = True
+except ImportError:
+    _CANDLE_UTILS_AVAILABLE = False
+    logger_bootstrap = logging.getLogger("gold_server_v4")
+    logger_bootstrap.warning("candle_utils not available — candle-close check disabled")
+
+try:
+    from data_freshness import DataFreshnessGuard
+    _freshness_guard = DataFreshnessGuard()
+    _FRESHNESS_GUARD_AVAILABLE = True
+except ImportError:
+    _freshness_guard = None  # type: ignore
+    _FRESHNESS_GUARD_AVAILABLE = False
+
+try:
+    from trade_manager import TradeManager, get_trade_manager
+    _TRADE_MANAGER_AVAILABLE = True
+except ImportError:
+    _TRADE_MANAGER_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
@@ -102,6 +127,24 @@ VOL_REGIME_MULTIPLIERS: dict[str, float] = {
     "LOW_VOL":        1.10,
 }
 VOL_POSITION_SIZE_HARD_CAP = 1.5   # Hard cap: never exceed 1.5x base lot size
+
+# ---------------------------------------------------------------------------
+# V4.1 Safety Config
+# ---------------------------------------------------------------------------
+# Maximum data age before a freshness warning is emitted (seconds)
+DATA_FRESHNESS_MAX_AGE_SECONDS = int(os.environ.get("DATA_FRESHNESS_MAX_AGE_SECONDS", "300"))
+
+# V4.1 Runtime Metrics (in-memory counters, reset on restart)
+_v4_metrics: dict[str, int] = {
+    "signals_generated":    0,
+    "signals_suppressed_candle":  0,   # Suppressed: candle still forming
+    "signals_suppressed_stale":   0,   # Suppressed: stale data
+    "trades_opened":        0,
+    "be_activations":       0,
+    "ts_updates":           0,
+    "partial_closes":       0,
+    "trade_closes":         0,
+}
 
 # ---------------------------------------------------------------------------
 # Trading Pairs — V4 ATR Multipliers (tighter TP1 for faster BE activation)
@@ -1069,6 +1112,33 @@ async def generate_signal_v4(pair: str) -> None:
         logger.warning(f"[{pair}] Insufficient 4H candles, skipping")
         return
 
+    # 1a. V4.1 Data freshness check — reject stale data before processing
+    if _FRESHNESS_GUARD_AVAILABLE and _freshness_guard is not None:
+        data_age = _freshness_guard.get_data_age(df)
+        if not _freshness_guard.is_fresh(df, max_age_seconds=DATA_FRESHNESS_MAX_AGE_SECONDS):
+            logger.warning(
+                f"[{pair}] ⚠️  Stale data detected — age={data_age:.0f}s "
+                f"> {DATA_FRESHNESS_MAX_AGE_SECONDS}s — signal suppressed"
+            )
+            _v4_metrics["signals_suppressed_stale"] += 1
+            return
+        if not _freshness_guard.validate_timestamps(df):
+            logger.warning(f"[{pair}] ⚠️  Invalid timestamps — signal suppressed")
+            _v4_metrics["signals_suppressed_stale"] += 1
+            return
+        logger.info(f"[{pair}] ✅ Data freshness OK — age={data_age:.0f}s")
+
+    # 1b. V4.1 Candle-close confirmation — no mid-candle signals
+    if _CANDLE_UTILS_AVAILABLE:
+        if not is_candle_closed(df, interval="4h"):
+            logger.info(
+                f"[{pair}] ⏳ Last 4H candle still FORMING — "
+                f"signal suppressed (candle-close confirmation)"
+            )
+            _v4_metrics["signals_suppressed_candle"] += 1
+            return
+        logger.info(f"[{pair}] ✅ Candle-close confirmed — proceeding with signal generation")
+
     # 2. Indicators
     ind = compute_indicators(df, cfg["decimals"])
     if ind is None:
@@ -1226,6 +1296,14 @@ async def generate_signal_v4(pair: str) -> None:
             }
             result = await db.gold_signals_v4.insert_one(doc)
             logger.info(f"[{pair}] V4 signal stored — id={result.inserted_id}")
+
+            # Register with TradeManager for BE/TS/partial management
+            if _TRADE_MANAGER_AVAILABLE:
+                trade_doc = {**doc, "indicators": ind}
+                get_trade_manager().register_new_trade(str(result.inserted_id), trade_doc)
+
+            _v4_metrics["signals_generated"] += 1
+            _v4_metrics["trades_opened"]     += 1
         except Exception as exc:
             logger.error(f"[{pair}] MongoDB insert failed: {exc}")
 
@@ -1310,6 +1388,64 @@ async def run_retrain_job() -> None:
         logger.warning(f"⚠️ Scheduled retraining issue: {result.get('error', 'unknown')}")
 
 
+async def run_trade_management_loop() -> None:
+    """
+    V4.1 Trade management loop — runs every 2 minutes.
+
+    Fetches current prices for all active pairs and processes:
+      - Breakeven activation (price reached +0.5R)
+      - Trailing stop updates (after TP1 hit)
+      - Partial profit closes (TP1/TP2/TP3)
+      - SL hit detection → close as LOSS
+    """
+    if not _TRADE_MANAGER_AVAILABLE:
+        return
+
+    trade_mgr = get_trade_manager()
+    open_trades = await trade_mgr.get_open_trades()
+    if not open_trades:
+        return
+
+    db = get_db()
+    if db is None:
+        return
+
+    # Fetch current prices for all pairs that have open trades
+    active_pairs = {t.get("pair") for t in open_trades if t.get("pair")}
+    current_prices: dict[str, float] = {}
+
+    for pair in active_pairs:
+        try:
+            df = await fetch_ohlcv(pair, interval="4h", outputsize=5)
+            if df is not None and len(df) > 0:
+                ind = compute_indicators(df, PAIRS[pair]["decimals"])
+                if ind:
+                    current_prices[pair] = ind["price"]
+        except Exception as exc:
+            logger.warning(f"[{pair}] Trade management: price fetch failed: {exc}")
+
+    if not current_prices:
+        return
+
+    summary = await trade_mgr.run_management_cycle(db, current_prices)
+
+    # Update global metrics
+    _v4_metrics["be_activations"]  += summary.get("be_activations", 0)
+    _v4_metrics["ts_updates"]      += summary.get("ts_updates", 0)
+    _v4_metrics["partial_closes"]  += summary.get("partial_closes", 0)
+    _v4_metrics["trade_closes"]    += summary.get("sl_hits", 0)
+
+    if any(v > 0 for v in summary.values()):
+        logger.info(
+            f"🔄 Trade management cycle — "
+            f"checked={summary.get('trades_checked', 0)} "
+            f"BE={summary.get('be_activations', 0)} "
+            f"TS={summary.get('ts_updates', 0)} "
+            f"partials={summary.get('partial_closes', 0)} "
+            f"SL_hits={summary.get('sl_hits', 0)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
@@ -1371,6 +1507,17 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning(f"⚠️ WinRateTracker startup sync failed (non-fatal): {exc}")
 
+    # V4.1 TradeManager startup sync — load all open trades from MongoDB
+    if _TRADE_MANAGER_AVAILABLE and _db is not None:
+        try:
+            tm_sync = await get_trade_manager().sync_from_mongodb(_db)
+            logger.info(
+                f"✅ TradeManager startup sync — "
+                f"{tm_sync.get('open_trades', 0)} open trade(s) loaded"
+            )
+        except Exception as exc:
+            logger.warning(f"⚠️ TradeManager startup sync failed (non-fatal): {exc}")
+
     # Signal scheduler
     scheduler.add_job(
         run_all_signals_v4,
@@ -1401,10 +1548,21 @@ async def lifespan(app: FastAPI):
         coalesce=True,
     )
 
+    # V4.1 Trade management loop (every 2 minutes — BE/TS/partial management)
+    scheduler.add_job(
+        run_trade_management_loop,
+        "interval",
+        minutes=2,
+        id="trade_management_v4",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.start()
     logger.info(
-        f"✅ V4 Scheduler started — pairs={list(PAIRS.keys())} "
+        f"✅ V4.1 Scheduler started — pairs={list(PAIRS.keys())} "
         f"signal_interval={SIGNAL_INTERVAL_MINUTES}min "
+        f"trade_mgmt_interval=2min "
         f"sync_interval={RETRAIN_SYNC_HOURS}h "
         f"retrain_interval={RETRAIN_INTERVAL_HOURS}h"
     )
@@ -1454,10 +1612,18 @@ async def health():
         for j in scheduler.get_jobs()
     ]
 
+    # V4.1 TradeManager metrics
+    tm_metrics: dict = {}
+    if _TRADE_MANAGER_AVAILABLE:
+        try:
+            tm_metrics = get_trade_manager().get_metrics()
+        except Exception:
+            pass
+
     return {
         "status":              "ok",
         "service":             "gold_signals_v4",
-        "version":             "4.0.0",
+        "version":             "4.1.0",
         "edition":             "Balanced Option C",
         "pairs":               list(PAIRS.keys()),
         "telegram_channel":    TELEGRAM_CHANNEL_ID,
@@ -1466,23 +1632,32 @@ async def health():
         "mongo_connected":     mongo_ok,
         "system_components":   system_status.get("total_components", 0),
         "v4_features": {
-            "breakeven_sl":        True,
-            "trailing_stop":       True,
-            "mtf_confirmation":    True,
-            "advanced_sizing":     True,
-            "light_retraining":    True,
-            "manual_execution":    True,
+            "breakeven_sl":            True,
+            "trailing_stop":           True,
+            "mtf_confirmation":        True,
+            "advanced_sizing":         True,
+            "light_retraining":        True,
+            "manual_execution":        True,
+            # V4.1 additions
+            "candle_close_guard":      _CANDLE_UTILS_AVAILABLE,
+            "data_freshness_guard":    _FRESHNESS_GUARD_AVAILABLE,
+            "trade_management_loop":   _TRADE_MANAGER_AVAILABLE,
         },
         "v4_config": {
-            "mtf_min_alignment":    MTF_MIN_ALIGNMENT,
-            "be_activation_r":      BE_ACTIVATION_R,
-            "trailing_atr_mult":    TRAILING_ATR_MULT,
-            "trailing_stop_enabled":ENABLE_TRAILING_STOP,
-            "retrain_interval_h":   RETRAIN_INTERVAL_HOURS,
-            "sync_interval_h":      RETRAIN_SYNC_HOURS,
-            "min_confidence":       MIN_CONFIDENCE,
-            "vol_hard_cap":         VOL_POSITION_SIZE_HARD_CAP,
+            "mtf_min_alignment":        MTF_MIN_ALIGNMENT,
+            "be_activation_r":          BE_ACTIVATION_R,
+            "trailing_atr_mult":        TRAILING_ATR_MULT,
+            "trailing_stop_enabled":    ENABLE_TRAILING_STOP,
+            "retrain_interval_h":       RETRAIN_INTERVAL_HOURS,
+            "sync_interval_h":          RETRAIN_SYNC_HOURS,
+            "min_confidence":           MIN_CONFIDENCE,
+            "vol_hard_cap":             VOL_POSITION_SIZE_HARD_CAP,
+            # V4.1 additions
+            "data_freshness_max_age_s": DATA_FRESHNESS_MAX_AGE_SECONDS,
+            "trade_mgmt_interval_min":  2,
         },
+        "v4_metrics":          _v4_metrics,
+        "trade_manager":       tm_metrics,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1939,6 +2114,65 @@ async def get_v4_config():
         "min_confidence":      MIN_CONFIDENCE,
         "signal_interval_min": SIGNAL_INTERVAL_MINUTES,
         "timestamp":           datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 17: V4.1 Runtime Metrics
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/metrics")
+async def get_v4_metrics():
+    """
+    Return V4.1 runtime metrics since last startup.
+
+    Includes signal generation counts, suppression reasons,
+    trade management activity (BE/TS/partials), and open trade count.
+    """
+    tm_metrics: dict = {}
+    if _TRADE_MANAGER_AVAILABLE:
+        try:
+            tm_metrics = get_trade_manager().get_metrics()
+        except Exception:
+            pass
+
+    return {
+        "version":              "4.1.0",
+        "signal_metrics":       _v4_metrics,
+        "trade_manager":        tm_metrics,
+        "safety_modules": {
+            "candle_close_guard":   _CANDLE_UTILS_AVAILABLE,
+            "data_freshness_guard": _FRESHNESS_GUARD_AVAILABLE,
+            "trade_manager":        _TRADE_MANAGER_AVAILABLE,
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 18: V4.1 Open Trades
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/trades/open")
+async def get_open_trades(pair: Optional[str] = None):
+    """
+    Return all currently open (ACTIVE / PARTIAL) trades from the TradeManager
+    in-memory cache.  Optionally filter by pair.
+    """
+    if not _TRADE_MANAGER_AVAILABLE:
+        return {"error": "TradeManager not available", "trades": [], "count": 0}
+
+    trades = await get_trade_manager().get_open_trades(pair=pair)
+    # Strip MongoDB ObjectId objects for JSON serialisation
+    safe_trades = []
+    for t in trades:
+        safe_t = {k: v for k, v in t.items() if k != "_id"}
+        safe_trades.append(safe_t)
+
+    return {
+        "trades":  safe_trades,
+        "count":   len(safe_trades),
+        "pair":    pair,
+        "version": "4.1.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
