@@ -1,6 +1,9 @@
 """
 Feature Engineering Framework
-Extracts advanced technical features for ML regime detection
+Extracts advanced technical features for ML regime detection.
+
+Also provides SimpleTrendDetector — a lightweight, robust trend classifier
+used by the 3-component core signal system (Component A).
 """
 import pandas as pd
 import numpy as np
@@ -10,6 +13,101 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class SimpleTrendDetector:
+    """
+    Simple, robust trend detection for the 3-component core system.
+
+    Rules (all must agree for a directional verdict):
+      Uptrend:   RSI > 60  AND  MACD histogram > 0  AND  EMA20 > EMA50
+      Downtrend: RSI < 40  AND  MACD histogram < 0  AND  EMA20 < EMA50
+      Neutral:   anything else — no trade
+
+    This replaces the complex regime detector for signal generation.
+    The regime detector is still used for feature extraction / ML.
+    """
+
+    def detect(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Detect trend direction from OHLCV data.
+
+        Args:
+            df: DataFrame with at least a 'close' column (50+ rows recommended)
+
+        Returns:
+            Dict with keys: direction, confidence, rsi, macd_hist, ema20, ema50
+        """
+        try:
+            if len(df) < 26:
+                return {
+                    "direction": "NEUTRAL",
+                    "confidence": 0.0,
+                    "reason": "insufficient_data",
+                    "valid": False,
+                }
+
+            close = df["close"].astype(float)
+
+            # RSI (14)
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+
+            # MACD histogram
+            ema12 = close.ewm(span=12, adjust=False).mean()
+            ema26 = close.ewm(span=26, adjust=False).mean()
+            macd_line = ema12 - ema26
+            macd_signal_line = macd_line.ewm(span=9, adjust=False).mean()
+            macd_hist = float((macd_line - macd_signal_line).iloc[-1])
+
+            # EMA cross
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+            ema_bull = ema20 > ema50
+
+            # Evaluate conditions
+            bull_conditions = [rsi > 60, macd_hist > 0, ema_bull]
+            bear_conditions = [rsi < 40, macd_hist < 0, not ema_bull]
+            bull_count = sum(bull_conditions)
+            bear_count = sum(bear_conditions)
+
+            if bull_count == 3:
+                direction = "UPTREND"
+                rsi_strength = min((rsi - 60) / 40.0, 1.0)
+                confidence = 0.60 + 0.40 * rsi_strength
+            elif bear_count == 3:
+                direction = "DOWNTREND"
+                rsi_strength = min((40 - rsi) / 40.0, 1.0)
+                confidence = 0.60 + 0.40 * rsi_strength
+            else:
+                direction = "NEUTRAL"
+                confidence = 0.0
+
+            return {
+                "direction": direction,
+                "confidence": round(confidence, 4),
+                "rsi": round(rsi, 2),
+                "macd_hist": round(macd_hist, 6),
+                "ema20": round(ema20, 5),
+                "ema50": round(ema50, 5),
+                "ema_bull": ema_bull,
+                "bull_conditions_met": bull_count,
+                "bear_conditions_met": bear_count,
+                "valid": True,
+            }
+
+        except Exception as exc:
+            logger.error(f"SimpleTrendDetector error: {exc}")
+            return {
+                "direction": "NEUTRAL",
+                "confidence": 0.0,
+                "error": str(exc),
+                "valid": False,
+            }
+
 
 class FeatureEngineer:
     """
