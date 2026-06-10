@@ -6,36 +6,29 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
-    g++ \
-    libffi-dev \
-    libssl-dev \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for layer caching
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY backend/ .
 
-# Create models directory for ML artifacts
-RUN mkdir -p models
-
-# Set Python path
+# Set Python environment
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 8080
+EXPOSE 8000
 
-# Health check - use proper format
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # Start command
-CMD ["uvicorn", "gold_server_v4:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--log-level", "info"]
+CMD ["uvicorn", "gold_server_v3:app", "--host", "0.0.0.0", "--port", "8000"]
 
