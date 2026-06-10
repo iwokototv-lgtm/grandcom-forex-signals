@@ -96,7 +96,11 @@ TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TWELVE_DATA_API_KEY   = os.environ.get("TWELVE_DATA_API_KEY", "")
 OPENAI_API_KEY        = os.environ.get("OPENAI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY", "")
 
-_raw_channel = os.environ.get("TELEGRAM_GOLD_CHANNEL_ID", "-1003834233408")
+_raw_channel = (
+    os.environ.get("TELEGRAM_CHANNEL_ID")
+    or os.environ.get("TELEGRAM_GOLD_CHANNEL_ID")
+    or "-1003834233408"
+)
 try:
     TELEGRAM_CHANNEL_ID: int | str = int(_raw_channel)
 except ValueError:
@@ -1530,6 +1534,88 @@ async def send_to_telegram_v4(
         logger.error(f"[{pair}] Telegram V4 delivery failed: {exc}")
 
 
+async def send_telegram_signal(
+    pair: str,
+    direction: str,
+    confidence: float,
+    entry: float,
+    tps: list[float],
+    sl: float,
+    rr: float,
+    position_size: float,
+    regime: str,
+    strategy_mode: str,
+    account_balance: float,
+    daily_pnl: float,
+) -> None:
+    """
+    Send a comprehensive signal notification to the Telegram channel.
+
+    Formats a single HTML message with all critical trade details so traders
+    can execute manually without checking the API.  Errors are logged but
+    never propagate — signal generation must not be interrupted by Telegram
+    delivery failures (bot blocked, not admin, network timeout, etc.).
+
+    Args:
+        pair:            Trading pair, e.g. "XAUUSD".
+        direction:       "BUY" or "SELL".
+        confidence:      Signal confidence percentage (60–100).
+        entry:           Entry price (confirmed closed-candle close).
+        tps:             List of take-profit levels [TP1, TP2, TP3].
+        sl:              Stop-loss price.
+        rr:              Risk:Reward ratio (reward / risk at TP1).
+        position_size:   Recommended position size in units.
+        regime:          Market regime label, e.g. "TREND_UP", "RANGE".
+        strategy_mode:   Active strategy, e.g. "price_action".
+        account_balance: Current account balance in USD.
+        daily_pnl:       Today's realised P&L in USD (positive = profit).
+    """
+    try:
+        bot = get_bot()
+
+        dir_emoji  = "🟢" if direction == "BUY" else "🔴"
+        pnl_sign   = "+" if daily_pnl >= 0 else ""
+        tp1 = tps[0] if len(tps) > 0 else "N/A"
+        tp2 = tps[1] if len(tps) > 1 else "N/A"
+        tp3 = tps[2] if len(tps) > 2 else "N/A"
+        timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        msg = (
+            f"🎯 <b>SIGNAL GENERATED</b>\n"
+            f"\n"
+            f"📊 <b>{_html_escape(pair)}</b>\n"
+            f"{dir_emoji} <b>{_html_escape(direction)}</b> | "
+            f"<b>{confidence:.0f}%</b> Confidence\n"
+            f"\n"
+            f"💰 <b>Entry:</b> {entry}\n"
+            f"🎯 <b>TP1:</b> {tp1} | <b>TP2:</b> {tp2} | <b>TP3:</b> {tp3}\n"
+            f"🛑 <b>SL:</b> {sl}\n"
+            f"📈 <b>R:R:</b> {rr}\n"
+            f"\n"
+            f"📦 <b>Position:</b> {position_size} units\n"
+            f"💼 <b>Account:</b> ${account_balance:,.0f} | "
+            f"<b>Daily P&amp;L:</b> {pnl_sign}${daily_pnl:,.0f}\n"
+            f"⚡ <b>Regime:</b> {_html_escape(regime)} | "
+            f"<b>Mode:</b> {_html_escape(strategy_mode)}\n"
+            f"\n"
+            f"<i>⏰ {timestamp} | Grandcom Gold Engine v4.0</i>"
+        )
+
+        await bot.send_message(
+            chat_id=TELEGRAM_CHANNEL_ID,
+            text=msg,
+            parse_mode="HTML",
+        )
+        logger.info(
+            f"[{pair}] ✅ send_telegram_signal delivered to channel {TELEGRAM_CHANNEL_ID}"
+        )
+
+    except Exception as exc:
+        logger.error(
+            f"[{pair}] ⚠️  send_telegram_signal failed (non-fatal): {exc}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Core Signal Generation — V4 Pipeline
 # ---------------------------------------------------------------------------
@@ -1944,7 +2030,28 @@ async def generate_signal_v4(pair: str) -> None:
         except Exception as exc:
             logger.error(f"[{pair}] MongoDB insert failed: {exc}")
 
-    # 13. Send to Telegram
+    # 13a. Send comprehensive signal notification to Telegram channel.
+    #      Uses the trader-friendly summary format with all critical details.
+    #      Fire-and-forget: errors are caught inside send_telegram_signal()
+    #      and logged without interrupting the rest of the pipeline.
+    asyncio.ensure_future(
+        send_telegram_signal(
+            pair=pair,
+            direction=signal_type,
+            confidence=round(confidence, 1),
+            entry=entry,
+            tps=tps,
+            sl=sl,
+            rr=rr,
+            position_size=conf_sizing.get("units", lots),
+            regime=hybrid_ctx.get("regime", "UNKNOWN"),
+            strategy_mode=STRATEGY_MODE,
+            account_balance=_risk_state.get("account_balance", ACCOUNT_BALANCE),
+            daily_pnl=_risk_state.get("daily_pnl", 0.0),
+        )
+    )
+
+    # 13b. Send copy-trading block + V4 analytics detail messages.
     await send_to_telegram_v4(
         pair=pair,
         signal=signal_type,
