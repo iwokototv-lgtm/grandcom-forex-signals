@@ -144,8 +144,34 @@ PARTIAL_SIZES: Dict[str, float] = {
     "TP3": 0.20,
 }
 
+# ---------------------------------------------------------------------------
+# Strategy mode selection
+# ---------------------------------------------------------------------------
+# Set STRATEGY_MODE env var to choose which approach to backtest.
+# Valid values: "mean_reversion", "price_action", "macro_filtered",
+#               "consensus", "original", "all"
+# "all" runs mean_reversion, price_action, and macro_filtered sequentially
+# and prints a comparison table.  Default: "mean_reversion".
+STRATEGY_MODE: str = os.environ.get("STRATEGY_MODE", "mean_reversion").strip().lower()
+
+# Per-mode confidence thresholds (lower than the original 70% because these
+# engines have lower base confidence by design)
+_MODE_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
+    "original":       70.0,
+    "mean_reversion": 60.0,
+    "price_action":   65.0,
+    "macro_filtered": 60.0,
+    "consensus":      62.0,
+}
+
+
+def _confidence_threshold_for_mode(mode: str) -> float:
+    """Return the minimum confidence threshold for a given strategy mode."""
+    return _MODE_CONFIDENCE_THRESHOLDS.get(mode, 60.0)
+
+
 # Backtest parameters
-CONFIDENCE_THRESHOLD  = 70.0    # Minimum confidence % to take a trade (raised from 62%)
+CONFIDENCE_THRESHOLD  = _confidence_threshold_for_mode(STRATEGY_MODE)
 ATR_PERIOD            = 14      # Wilder ATR period
 WARMUP_CANDLES        = 100     # Candles skipped at start for indicator warmup
 ROLLING_WINDOW_4H     = 100     # Rolling 4H window fed to generate_signal()
@@ -157,6 +183,7 @@ RISK_PER_TRADE_PCT    = 1.0     # % of account risked per trade
 IN_SAMPLE_RATIO       = 0.60    # First 60 % = in-sample
 FETCH_OUTPUTSIZE      = 1000    # Candles to fetch per timeframe
 TWELVEDATA_BASE_URL   = "https://api.twelvedata.com/time_series"
+
 
 # TwelveData interval strings
 TF_4H     = "4h"
@@ -783,6 +810,8 @@ async def _run_walkforward(
     system: "HybridPortfolioSystemV3",
     rng: random.Random,
     corr_dfs: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+    strategy_mode: str = "original",
+    confidence_threshold: float = 70.0,
 ) -> PairResult:
     """
     Walk forward one 4H candle at a time and call the production signal.
@@ -794,6 +823,12 @@ async def _run_walkforward(
                price_data dict is built at each step and passed to
                generate_signal() so the correlation engine can filter
                signals based on USD-regime changes.
+    strategy_mode : str
+               Which strategy philosophy to use.  Passed directly to
+               generate_signal().  One of: "original", "mean_reversion",
+               "price_action", "macro_filtered", "consensus".
+    confidence_threshold : float
+               Minimum confidence % required to take a trade.
 
     Returns a PairResult with all trades and split statistics.
     """
@@ -927,6 +962,8 @@ async def _run_walkforward(
                     df_4h=df_4h_window,
                     df_daily=df_daily_window,
                     price_data=_price_data_arg,
+                    strategy_mode=strategy_mode,
+                    corr_dfs=corr_dfs,
                 ),
                 timeout=15.0,
             )
@@ -947,35 +984,42 @@ async def _run_walkforward(
         confidence = float(signal_result.get("confidence", 0.0))
 
         # ── Diagnostic: log every signal evaluation with component votes ─────
-        _votes = signal_result.get("component_votes", {})
+        _votes           = signal_result.get("component_votes", {})
         _conf_components = signal_result.get("confidence_components", {})
-        _quality = signal_result.get("signal_quality", "N/A")
-        _rejection = signal_result.get("rejection_reason", "")
+        _quality         = signal_result.get("signal_quality", "N/A")
+        _rejection       = signal_result.get("rejection_reason", "")
+        _macro_modifier  = signal_result.get("macro_modifier", None)
 
-        _vote_str = (
-            f"A={_votes.get('A_trend', '?')} "
-            f"B={_votes.get('B_sr', '?')} "
-            f"C={_votes.get('C_mtf', '?')}"
-            if _votes else "votes=N/A"
-        )
-        _conf_str = (
-            f"A={_conf_components.get('A_trend', 0):.0f}% "
-            f"B={_conf_components.get('B_sr', 0):.0f}% "
-            f"C={_conf_components.get('C_mtf', 0):.0f}%"
-            if _conf_components else ""
+        # Build a human-readable vote string that works for all strategy modes
+        if _votes:
+            _vote_str = "  ".join(f"{k}={v}" for k, v in _votes.items())
+        else:
+            _vote_str = "votes=N/A"
+
+        # Confidence breakdown (original mode has A/B/C; new modes may differ)
+        if _conf_components:
+            _conf_str = "  ".join(
+                f"{k}={v:.0f}%" for k, v in _conf_components.items()
+            )
+        else:
+            _conf_str = ""
+
+        # Macro modifier annotation
+        _macro_str = (
+            f"  macro_mod={_macro_modifier:+.0%}" if _macro_modifier is not None else ""
         )
 
-        if signal in ("BUY", "SELL") and confidence >= CONFIDENCE_THRESHOLD:
+        if signal in ("BUY", "SELL") and confidence >= confidence_threshold:
             print(
                 f"  [SIGNAL idx={idx}] {signal} conf={confidence:.1f}% "
-                f"quality={_quality}  {_vote_str}  {_conf_str}",
+                f"quality={_quality}  {_vote_str}  {_conf_str}{_macro_str}",
                 flush=True,
             )
         elif signal in ("BUY", "SELL"):
-            # Unanimous but below threshold
+            # Signal fired but below threshold
             print(
                 f"  [FILTERED idx={idx}] {signal} conf={confidence:.1f}% "
-                f"(below {CONFIDENCE_THRESHOLD}%)  {_vote_str}  {_conf_str}",
+                f"(below {confidence_threshold:.0f}%)  {_vote_str}  {_conf_str}{_macro_str}",
                 flush=True,
             )
         elif _rejection:
@@ -987,7 +1031,7 @@ async def _run_walkforward(
                 )
 
         # ── Confidence filter ────────────────────────────────────────────────
-        if signal not in ("BUY", "SELL") or confidence < CONFIDENCE_THRESHOLD:
+        if signal not in ("BUY", "SELL") or confidence < confidence_threshold:
             continue
 
         result.signals_used += 1
@@ -1387,21 +1431,149 @@ def save_results_to_mongodb(results: List[PairResult]) -> Optional[str]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+async def _run_single_mode(
+    mode: str,
+    pairs_tfs: Dict[str, Dict[str, Optional[pd.DataFrame]]],
+    system: "HybridPortfolioSystemV3",
+    rng: random.Random,
+    corr_dfs: Dict[str, Optional[pd.DataFrame]],
+) -> List[PairResult]:
+    """
+    Run the walk-forward backtest for all pairs under a single strategy mode.
+
+    Parameters
+    ----------
+    mode       : Strategy mode string (e.g. "mean_reversion").
+    pairs_tfs  : Dict mapping pair name → timeframe DataFrames.
+    system     : Shared HybridPortfolioSystemV3 instance.
+    rng        : Seeded random.Random for reproducible baselines.
+    corr_dfs   : Pre-fetched correlation asset DataFrames.
+
+    Returns a list of PairResult objects (one per pair).
+    """
+    threshold = _confidence_threshold_for_mode(mode)
+    results: List[PairResult] = []
+
+    for pair, tfs in pairs_tfs.items():
+        cfg = PAIRS[pair]
+        df_4h = tfs.get(TF_4H)
+        if df_4h is None or len(df_4h) < WARMUP_CANDLES + TIMEOUT_CANDLES + 10:
+            print(f"  ✗ Insufficient 4H data for {pair} — skipping.", flush=True)
+            continue
+
+        print(
+            f"\n  [{mode.upper()}] Walking forward {pair} "
+            f"(threshold={threshold:.0f}%) …",
+            flush=True,
+        )
+        result = await _run_walkforward(
+            pair=pair,
+            cfg=cfg,
+            tfs=tfs,
+            system=system,
+            rng=rng,
+            corr_dfs=corr_dfs,
+            strategy_mode=mode,
+            confidence_threshold=threshold,
+        )
+        results.append(result)
+
+    return results
+
+
+def _print_mode_comparison(
+    mode_results: Dict[str, List[PairResult]],
+) -> None:
+    """
+    Print a side-by-side comparison of all strategy modes.
+
+    Shows OOS win rate, OOS return, and OOS profit factor for each mode
+    and each pair, then declares the best-performing mode.
+    """
+    print(f"\n{_SEP2}")
+    print("  STRATEGY MODE COMPARISON — OUT-OF-SAMPLE")
+    print(_SEP2)
+
+    modes = list(mode_results.keys())
+    pairs = list({r.pair for results in mode_results.values() for r in results})
+
+    # Header
+    header = f"  {'Pair':<10} {'Mode':<18} {'OOS WR':>8}  {'OOS Ret':>9}  {'OOS PF':>8}  {'Trades':>7}"
+    print(header)
+    print(f"  {'─'*10} {'─'*18} {'─'*8}  {'─'*9}  {'─'*8}  {'─'*7}")
+
+    best_mode_by_return: Dict[str, Tuple[str, float]] = {}  # pair → (mode, return)
+
+    for pair in pairs:
+        for mode in modes:
+            pair_results = [r for r in mode_results.get(mode, []) if r.pair == pair]
+            if not pair_results:
+                print(f"  {pair:<10} {mode:<18} {'N/A':>8}  {'N/A':>9}  {'N/A':>8}  {'N/A':>7}")
+                continue
+            oos = pair_results[0].out_sample
+            pf_str = _pf_str(oos.profit_factor)
+            sign   = "+" if oos.return_pct >= 0 else ""
+            print(
+                f"  {pair:<10} {mode:<18} {oos.win_rate:>7.1f}%  "
+                f"{sign}{oos.return_pct:>+8.2f}%  {pf_str:>8}  {oos.total_trades:>7}"
+            )
+            # Track best mode per pair
+            if pair not in best_mode_by_return or oos.return_pct > best_mode_by_return[pair][1]:
+                best_mode_by_return[pair] = (mode, oos.return_pct)
+
+    print(f"\n  {'─'*72}")
+    print("  BEST MODE PER PAIR (by OOS return):")
+    for pair, (best_mode, best_ret) in best_mode_by_return.items():
+        sign = "+" if best_ret >= 0 else ""
+        print(f"    {pair:<10}  {best_mode:<18}  {sign}{best_ret:>+.2f}%")
+
+    # Overall best mode (average OOS return across all pairs)
+    mode_avg_returns: Dict[str, float] = {}
+    for mode in modes:
+        oos_returns = []
+        for results in [mode_results.get(mode, [])]:
+            for r in results:
+                oos_returns.append(r.out_sample.return_pct)
+        if oos_returns:
+            mode_avg_returns[mode] = sum(oos_returns) / len(oos_returns)
+
+    if mode_avg_returns:
+        overall_best = max(mode_avg_returns, key=lambda m: mode_avg_returns[m])
+        print(f"\n  OVERALL BEST MODE: {overall_best.upper()} "
+              f"(avg OOS return: {mode_avg_returns[overall_best]:>+.2f}%)")
+        print(f"\n  All mode averages:")
+        for mode, avg in sorted(mode_avg_returns.items(), key=lambda x: -x[1]):
+            sign = "+" if avg >= 0 else ""
+            print(f"    {mode:<18}  {sign}{avg:>+.2f}%")
+
+    print(f"{_SEP2}\n")
+
+
 async def _main_async() -> None:
     api_key = (
         os.environ.get("TWELVEDATA_API_KEY", "")
         or os.environ.get("TWELVE_DATA_API_KEY", "")
     ).strip()
 
-    print(_SEP2)
-    print("  PRODUCTION SIGNAL BACKTEST — HybridPortfolioSystemV3 (3-Component Core)")
-    print(f"  Pairs     : {', '.join(PAIRS)}")
-    print(f"  Confidence: ≥{CONFIDENCE_THRESHOLD:.0f}%  |  Warmup: {WARMUP_CANDLES} candles  |  Logic: unanimous AND-gate")
-    print(f"  Fetch size: {FETCH_OUTPUTSIZE} candles/TF  |  Timeout: {TIMEOUT_CANDLES} candles")
-    print(f"  Split     : {IN_SAMPLE_RATIO*100:.0f}% in-sample / "
-          f"{(1-IN_SAMPLE_RATIO)*100:.0f}% out-of-sample")
+    # Determine which modes to run
+    run_all   = STRATEGY_MODE == "all"
+    run_modes = (
+        ["mean_reversion", "price_action", "macro_filtered"]
+        if run_all
+        else [STRATEGY_MODE]
+    )
+    active_threshold = _confidence_threshold_for_mode(run_modes[0]) if not run_all else 60.0
 
-    print(f"  Account   : ${ACCOUNT_BALANCE:,.0f}  |  Risk/trade: {RISK_PER_TRADE_PCT}%")
+    print(_SEP2)
+    print("  PRODUCTION SIGNAL BACKTEST — HybridPortfolioSystemV3 v3.2")
+    print(f"  Pairs        : {', '.join(PAIRS)}")
+    print(f"  Strategy mode: {STRATEGY_MODE.upper()}"
+          + (f"  (running: {', '.join(run_modes)})" if run_all else ""))
+    print(f"  Confidence   : ≥{active_threshold:.0f}%  |  Warmup: {WARMUP_CANDLES} candles")
+    print(f"  Fetch size   : {FETCH_OUTPUTSIZE} candles/TF  |  Timeout: {TIMEOUT_CANDLES} candles")
+    print(f"  Split        : {IN_SAMPLE_RATIO*100:.0f}% in-sample / "
+          f"{(1-IN_SAMPLE_RATIO)*100:.0f}% out-of-sample")
+    print(f"  Account      : ${ACCOUNT_BALANCE:,.0f}  |  Risk/trade: {RISK_PER_TRADE_PCT}%")
     print(_SEP2)
 
     if not _PRODUCTION_AVAILABLE:
@@ -1419,15 +1591,12 @@ async def _main_async() -> None:
         )
         sys.exit(1)
 
-    # Initialise production system (one shared instance across pairs)
+    # Initialise production system (one shared instance across all modes and pairs)
     print("Initialising HybridPortfolioSystemV3 …", flush=True)
     system = HybridPortfolioSystemV3(account_balance=ACCOUNT_BALANCE)
     rng    = random.Random(42)   # Fixed seed for reproducible random baseline
 
-    # ── Fetch correlation assets once (shared across all pairs) ─────────────
-    # DXY, EURUSD, GBPUSD, USDJPY are fetched at 4H so the correlation engine
-    # can filter XAUUSD signals based on USD-regime changes.  Fetching once
-    # avoids redundant API calls when multiple pairs are backtested.
+    # ── Fetch correlation assets once (shared across all pairs and modes) ────
     print(f"\n{'─'*72}", flush=True)
     corr_dfs = fetch_correlation_assets(
         api_key=api_key,
@@ -1442,43 +1611,67 @@ async def _main_async() -> None:
         flush=True,
     )
 
-    all_results: List[PairResult] = []
-
+    # ── Fetch all timeframes for each pair once (reused across modes) ────────
+    pairs_tfs: Dict[str, Dict[str, Optional[pd.DataFrame]]] = {}
     for pair, cfg in PAIRS.items():
         print(f"\n{'─'*72}")
-        print(f"  Processing {pair} ({cfg['symbol']}) …", flush=True)
-
-        # Fetch all timeframes
+        print(f"  Fetching data for {pair} ({cfg['symbol']}) …", flush=True)
         tfs = fetch_all_timeframes(
             symbol_td=cfg["symbol"],
             api_key=api_key,
             outputsize=FETCH_OUTPUTSIZE,
             rate_limit_sleep=1.2,
         )
-
         df_4h = tfs.get(TF_4H)
         if df_4h is None or len(df_4h) < WARMUP_CANDLES + TIMEOUT_CANDLES + 10:
             print(f"  ✗ Insufficient 4H data for {pair} — skipping.", flush=True)
             continue
+        pairs_tfs[pair] = tfs
 
-        print(f"\n  Running walk-forward backtest …", flush=True)
-        result = await _run_walkforward(pair, cfg, tfs, system, rng, corr_dfs=corr_dfs)
-        all_results.append(result)
+    if not pairs_tfs:
+        print("\n❌ No pairs with sufficient data.", flush=True)
+        sys.exit(1)
 
-        print_pair_report(result)
+    # ── Run backtest(s) ──────────────────────────────────────────────────────
+    mode_results: Dict[str, List[PairResult]] = {}
 
-    if not all_results:
+    for mode in run_modes:
+        print(f"\n{'═'*72}")
+        print(f"  RUNNING MODE: {mode.upper()}")
+        print(f"{'═'*72}")
+        results = await _run_single_mode(
+            mode=mode,
+            pairs_tfs=pairs_tfs,
+            system=system,
+            rng=rng,
+            corr_dfs=corr_dfs,
+        )
+        mode_results[mode] = results
+
+        for result in results:
+            print_pair_report(result)
+
+        if len(results) >= 2:
+            print_combined_summary(results)
+
+    if not any(mode_results.values()):
         print("\n❌ No pairs completed successfully.", flush=True)
         sys.exit(1)
 
-    print_combined_summary(all_results)
+    # ── Multi-mode comparison (only when running "all") ──────────────────────
+    if run_all and len(mode_results) > 1:
+        _print_mode_comparison(mode_results)
 
-    print("Saving results to MongoDB …", flush=True)
-    doc_id = save_results_to_mongodb(all_results)
-    if doc_id:
-        print(f"✓ MongoDB document ID: {doc_id}\n", flush=True)
-    else:
-        print("  (MongoDB save skipped or failed — results printed above)\n", flush=True)
+    # ── MongoDB persistence ──────────────────────────────────────────────────
+    # Save the results for the primary (or last) mode
+    primary_results = mode_results.get(run_modes[-1], [])
+    if primary_results:
+        print("Saving results to MongoDB …", flush=True)
+        doc_id = save_results_to_mongodb(primary_results)
+        if doc_id:
+            print(f"✓ MongoDB document ID: {doc_id}\n", flush=True)
+        else:
+            print("  (MongoDB save skipped or failed — results printed above)\n", flush=True)
 
 
 def main() -> None:
