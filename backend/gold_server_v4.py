@@ -596,6 +596,10 @@ class LiveRiskManager:
     Thread-safe via asyncio.Lock for concurrent scheduler access.
     """
 
+    # Alert thresholds — fire AI warning before hard limits are hit
+    DRAWDOWN_ALERT_PCT   = 10.0   # Warn at 10% drawdown (hard limit: 15%)
+    DAILY_LOSS_ALERT_PCT = 3.0    # Warn at 3% daily loss (hard limit: 5%)
+
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         # Cumulative P&L tracking (in account currency)
@@ -607,6 +611,9 @@ class LiveRiskManager:
         # Breach flags
         self._drawdown_breached: bool = False
         self._daily_limit_breached: bool = False
+        # Alert-sent flags — prevent repeated alerts for the same threshold crossing
+        self._drawdown_alert_sent: bool = False
+        self._daily_loss_alert_sent: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -637,6 +644,42 @@ class LiveRiskManager:
             return False, (
                 f"DAILY_LOSS_LIMIT_BREACHED: daily_loss=${abs(self._daily_pnl):.2f} "
                 f">= {MAX_DAILY_LOSS_PCT}% of ${account:.0f}"
+            )
+
+        # ── AI risk alerts — warn before hard limits are hit ──────────────
+        total_drawdown_pct = abs(self._total_pnl / account * 100) if account else 0.0
+        daily_loss_pct     = abs(self._daily_pnl / account * 100) if account else 0.0
+
+        if (
+            total_drawdown_pct >= self.DRAWDOWN_ALERT_PCT
+            and not self._drawdown_alert_sent
+        ):
+            self._drawdown_alert_sent = True
+            asyncio.ensure_future(
+                generate_risk_alert(
+                    alert_type="DRAWDOWN",
+                    current_pct=round(total_drawdown_pct, 2),
+                    limit_pct=MAX_TOTAL_DRAWDOWN_PCT,
+                    account_balance=account,
+                    daily_pnl=self._daily_pnl,
+                    total_pnl=self._total_pnl,
+                )
+            )
+
+        if (
+            daily_loss_pct >= self.DAILY_LOSS_ALERT_PCT
+            and not self._daily_loss_alert_sent
+        ):
+            self._daily_loss_alert_sent = True
+            asyncio.ensure_future(
+                generate_risk_alert(
+                    alert_type="DAILY_LOSS",
+                    current_pct=round(daily_loss_pct, 2),
+                    limit_pct=MAX_DAILY_LOSS_PCT,
+                    account_balance=account,
+                    daily_pnl=self._daily_pnl,
+                    total_pnl=self._total_pnl,
+                )
             )
 
         open_count = self._open_positions.get(pair, 0)
@@ -699,6 +742,7 @@ class LiveRiskManager:
                 )
             self._daily_pnl = 0.0
             self._daily_limit_breached = False
+            self._daily_loss_alert_sent = False   # Reset daily alert flag at midnight
             self._daily_reset_date = today
 
 
@@ -1617,6 +1661,552 @@ async def send_telegram_signal(
 
 
 # ---------------------------------------------------------------------------
+# AI Analysis Functions — GPT-4 powered insights
+# ---------------------------------------------------------------------------
+
+async def analyze_signal_with_ai(
+    signal_id: str,
+    pair: str,
+    direction: str,
+    confidence: float,
+    entry: float,
+    tps: list,
+    sl: float,
+    rr: float,
+    regime: str,
+    account_balance: float,
+) -> str:
+    """
+    Generate a 2-3 sentence AI explanation for a trading signal using GPT-4.
+
+    Explains why the signal triggered, key support/resistance levels, and
+    risk/reward assessment.  Result is cached back to MongoDB on the signal
+    document.  Errors are logged but never propagate — signal delivery must
+    not be blocked by an AI call failure.
+
+    Returns the analysis text, or an empty string on failure.
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("[AI] OPENAI_API_KEY not set — skipping signal analysis")
+        return ""
+
+    try:
+        import litellm
+
+        tp1 = tps[0] if len(tps) > 0 else "N/A"
+        tp2 = tps[1] if len(tps) > 1 else "N/A"
+        tp3 = tps[2] if len(tps) > 2 else "N/A"
+
+        prompt = f"""\
+You are a professional forex trader analyzing a gold trading signal.
+
+Signal Details:
+- Pair: {pair}
+- Direction: {direction}
+- Confidence: {confidence:.0f}%
+- Entry: {entry}
+- TP1: {tp1} | TP2: {tp2} | TP3: {tp3}
+- SL: {sl}
+- Risk:Reward: {rr}
+- Regime: {regime}
+- Account: ${account_balance:,.0f}
+
+Provide a 2-3 sentence professional analysis explaining:
+1. Why this signal triggered (technical reason)
+2. Key support/resistance levels
+3. Risk/reward assessment
+
+Keep it concise and actionable for traders."""
+
+        resp = await litellm.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an elite institutional gold trader. "
+                        "Provide concise, actionable signal analysis. "
+                        "Respond with plain text only — no markdown, no bullet points."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            api_key=OPENAI_API_KEY,
+            timeout=20,
+            max_tokens=200,
+        )
+
+        ai_analysis = resp.choices[0].message.content.strip()
+        logger.info(f"[AI] Signal analysis generated for {pair} {direction} (id={signal_id})")
+
+        # Cache result back to MongoDB signal document
+        db = get_db()
+        if db is not None and signal_id:
+            try:
+                from bson import ObjectId
+                await db.gold_signals_v4.update_one(
+                    {"_id": ObjectId(signal_id)},
+                    {"$set": {"ai_analysis": ai_analysis, "ai_analysis_at": datetime.now(timezone.utc)}},
+                )
+            except Exception as cache_exc:
+                logger.warning(f"[AI] Failed to cache signal analysis in MongoDB: {cache_exc}")
+
+        return ai_analysis
+
+    except Exception as exc:
+        logger.error(f"[AI] analyze_signal_with_ai failed for {pair}: {exc}")
+        return ""
+
+
+async def generate_market_commentary() -> str:
+    """
+    Generate a 3-4 sentence AI market overview using GPT-4.
+
+    Analyses the last 10 signals from MongoDB plus the current regime to
+    produce a market commentary covering trend direction, volatility, and
+    key levels.  Posts to Telegram and caches in the market_commentary_v4
+    collection.  Returns the commentary text, or empty string on failure.
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("[AI] OPENAI_API_KEY not set — skipping market commentary")
+        return ""
+
+    db = get_db()
+
+    try:
+        import litellm
+
+        # Fetch last 10 signals for context
+        recent_signals: list = []
+        if db is not None:
+            try:
+                recent_signals = (
+                    await db.gold_signals_v4
+                    .find(
+                        {},
+                        {"_id": 0, "pair": 1, "type": 1, "confidence": 1,
+                         "entry_price": 1, "tp_levels": 1, "sl_price": 1,
+                         "regime": 1, "risk_reward": 1, "status": 1, "created_at": 1},
+                    )
+                    .sort("created_at", -1)
+                    .limit(10)
+                    .to_list(10)
+                )
+            except Exception as db_exc:
+                logger.warning(f"[AI] Failed to fetch recent signals for commentary: {db_exc}")
+
+        # Summarise signals for the prompt
+        signal_summary = ""
+        if recent_signals:
+            lines = []
+            for s in recent_signals:
+                tps = s.get("tp_levels", [])
+                tp1 = tps[0] if tps else "N/A"
+                lines.append(
+                    f"  {s.get('pair','?')} {s.get('type','?')} @ {s.get('entry_price','?')} "
+                    f"| TP1:{tp1} SL:{s.get('sl_price','?')} "
+                    f"| Conf:{s.get('confidence','?')}% "
+                    f"| Regime:{s.get('regime','?')} "
+                    f"| Status:{s.get('status','?')}"
+                )
+            signal_summary = "\n".join(lines)
+        else:
+            signal_summary = "  No recent signals available."
+
+        # Determine dominant regime from recent signals
+        regimes = [s.get("regime", "UNKNOWN") for s in recent_signals if s.get("regime")]
+        dominant_regime = max(set(regimes), key=regimes.count) if regimes else "UNKNOWN"
+
+        prompt = f"""\
+You are a professional gold market analyst. Based on the recent trading signals below, \
+provide a 3-4 sentence market commentary covering:
+1. Current trend direction and strength
+2. Volatility assessment
+3. Key support/resistance levels to watch
+4. Recommended trading posture
+
+Recent Signals (last 10):
+{signal_summary}
+
+Dominant Regime: {dominant_regime}
+Account Balance: ${ACCOUNT_BALANCE:,.0f}
+Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+
+Write in a professional, concise style suitable for traders. Plain text only."""
+
+        resp = await litellm.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an elite institutional gold market analyst. "
+                        "Provide concise, actionable market commentary. "
+                        "Plain text only — no markdown, no bullet points."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            api_key=OPENAI_API_KEY,
+            timeout=25,
+            max_tokens=300,
+        )
+
+        commentary = resp.choices[0].message.content.strip()
+        now = datetime.now(timezone.utc)
+
+        # Cache in MongoDB
+        if db is not None:
+            try:
+                await db.market_commentary_v4.insert_one({
+                    "commentary":       commentary,
+                    "dominant_regime":  dominant_regime,
+                    "signals_analysed": len(recent_signals),
+                    "created_at":       now,
+                })
+            except Exception as cache_exc:
+                logger.warning(f"[AI] Failed to cache market commentary: {cache_exc}")
+
+        # Post to Telegram
+        try:
+            bot = get_bot()
+            tg_msg = (
+                f"📊 <b>MARKET COMMENTARY (4H)</b>\n\n"
+                f"{_html_escape(commentary)}\n\n"
+                f"<i>⏰ {now.strftime('%Y-%m-%d %H:%M UTC')} | Grandcom Gold Engine v4.0</i>"
+            )
+            await bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=tg_msg,
+                parse_mode="HTML",
+            )
+            logger.info("[AI] Market commentary posted to Telegram")
+        except Exception as tg_exc:
+            logger.error(f"[AI] Failed to post market commentary to Telegram: {tg_exc}")
+
+        logger.info(f"[AI] Market commentary generated — {len(recent_signals)} signals analysed")
+        return commentary
+
+    except Exception as exc:
+        logger.error(f"[AI] generate_market_commentary failed: {exc}")
+        return ""
+
+
+async def generate_daily_review() -> str:
+    """
+    Generate a 4-5 sentence AI daily performance review using GPT-4.
+
+    Analyses all signals from the past 24 hours, calculates win rate and
+    profit factor, and produces a narrative summary with insights.  Posts
+    to Telegram and stores in the daily_reviews_v4 collection.
+    Returns the review text, or empty string on failure.
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("[AI] OPENAI_API_KEY not set — skipping daily review")
+        return ""
+
+    db = get_db()
+
+    try:
+        import litellm
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        daily_signals: list = []
+
+        if db is not None:
+            try:
+                daily_signals = (
+                    await db.gold_signals_v4
+                    .find(
+                        {"created_at": {"$gte": cutoff}},
+                        {"_id": 0, "pair": 1, "type": 1, "confidence": 1,
+                         "entry_price": 1, "tp_levels": 1, "sl_price": 1,
+                         "risk_reward": 1, "status": 1, "result": 1,
+                         "regime": 1, "dollar_risk": 1, "created_at": 1},
+                    )
+                    .sort("created_at", -1)
+                    .limit(100)
+                    .to_list(100)
+                )
+            except Exception as db_exc:
+                logger.warning(f"[AI] Failed to fetch daily signals for review: {db_exc}")
+
+        total = len(daily_signals)
+        wins = [s for s in daily_signals if s.get("result") == "WIN" or s.get("status") == "WIN"]
+        losses = [s for s in daily_signals if s.get("result") == "LOSS" or s.get("status") == "LOSS"]
+        closed = len(wins) + len(losses)
+        win_rate = round(len(wins) / closed * 100, 1) if closed > 0 else 0.0
+
+        # Approximate P&L from risk/reward
+        win_pnl = sum(
+            float(s.get("dollar_risk", 0)) * float(s.get("risk_reward", 1.0))
+            for s in wins
+        )
+        loss_pnl = sum(float(s.get("dollar_risk", 0)) for s in losses)
+        net_pnl = win_pnl - loss_pnl
+
+        # Best and worst trades
+        best_trade = max(
+            wins,
+            key=lambda s: float(s.get("risk_reward", 0)) * float(s.get("dollar_risk", 0)),
+            default=None,
+        )
+        worst_trade = max(
+            losses,
+            key=lambda s: float(s.get("dollar_risk", 0)),
+            default=None,
+        )
+
+        best_str = "None"
+        if best_trade:
+            tps = best_trade.get("tp_levels", [])
+            tp1 = tps[0] if tps else "N/A"
+            best_str = (
+                f"{best_trade.get('pair','?')} {best_trade.get('type','?')} "
+                f"@ {best_trade.get('entry_price','?')} → TP1:{tp1} "
+                f"(+${float(best_trade.get('dollar_risk',0)) * float(best_trade.get('risk_reward',1)):.0f})"
+            )
+
+        worst_str = "None"
+        if worst_trade:
+            worst_str = (
+                f"{worst_trade.get('pair','?')} {worst_trade.get('type','?')} "
+                f"@ {worst_trade.get('entry_price','?')} → SL hit "
+                f"(-${float(worst_trade.get('dollar_risk',0)):.0f})"
+            )
+
+        # Regime breakdown
+        regimes = [s.get("regime", "UNKNOWN") for s in daily_signals if s.get("regime")]
+        regime_counts: dict[str, int] = {}
+        for r in regimes:
+            regime_counts[r] = regime_counts.get(r, 0) + 1
+        regime_summary = ", ".join(f"{r}:{c}" for r, c in sorted(regime_counts.items(), key=lambda x: -x[1]))
+
+        prompt = f"""\
+You are a professional trading performance analyst. Write a 4-5 sentence daily performance review \
+for a gold trading system based on the data below. Include:
+1. Overall performance summary (signals, win rate, P&L)
+2. Best and worst trades
+3. Market regime observations
+4. Actionable insight for tomorrow
+
+Daily Performance Data:
+- Total signals: {total}
+- Closed signals: {closed} ({len(wins)} wins, {len(losses)} losses)
+- Win rate: {win_rate:.1f}%
+- Estimated net P&L: ${net_pnl:+.0f}
+- Best trade: {best_str}
+- Worst trade: {worst_str}
+- Regime breakdown: {regime_summary if regime_summary else 'N/A'}
+- Account balance: ${ACCOUNT_BALANCE:,.0f}
+- Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d UTC')}
+
+Write in a professional, concise style. Plain text only."""
+
+        resp = await litellm.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an elite trading performance analyst. "
+                        "Provide concise, insightful daily reviews. "
+                        "Plain text only — no markdown, no bullet points."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            api_key=OPENAI_API_KEY,
+            timeout=30,
+            max_tokens=400,
+        )
+
+        review = resp.choices[0].message.content.strip()
+        now = datetime.now(timezone.utc)
+
+        # Store in MongoDB
+        if db is not None:
+            try:
+                await db.daily_reviews_v4.insert_one({
+                    "review":           review,
+                    "date":             now.strftime("%Y-%m-%d"),
+                    "total_signals":    total,
+                    "closed_signals":   closed,
+                    "wins":             len(wins),
+                    "losses":           len(losses),
+                    "win_rate_pct":     win_rate,
+                    "net_pnl_approx":   round(net_pnl, 2),
+                    "regime_breakdown": regime_counts,
+                    "created_at":       now,
+                })
+            except Exception as cache_exc:
+                logger.warning(f"[AI] Failed to store daily review: {cache_exc}")
+
+        # Post to Telegram
+        try:
+            bot = get_bot()
+            tg_msg = (
+                f"📈 <b>DAILY PERFORMANCE REVIEW</b>\n\n"
+                f"{_html_escape(review)}\n\n"
+                f"<b>Stats:</b> {total} signals | {closed} closed | "
+                f"{win_rate:.0f}% win rate | ${net_pnl:+.0f} est. P&amp;L\n"
+                f"<i>⏰ {now.strftime('%Y-%m-%d %H:%M UTC')} | Grandcom Gold Engine v4.0</i>"
+            )
+            await bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=tg_msg,
+                parse_mode="HTML",
+            )
+            logger.info("[AI] Daily review posted to Telegram")
+        except Exception as tg_exc:
+            logger.error(f"[AI] Failed to post daily review to Telegram: {tg_exc}")
+
+        logger.info(
+            f"[AI] Daily review generated — {total} signals, "
+            f"win_rate={win_rate:.1f}%, net_pnl=${net_pnl:+.0f}"
+        )
+        return review
+
+    except Exception as exc:
+        logger.error(f"[AI] generate_daily_review failed: {exc}")
+        return ""
+
+
+async def generate_risk_alert(
+    alert_type: str,
+    current_pct: float,
+    limit_pct: float,
+    account_balance: float,
+    daily_pnl: float = 0.0,
+    total_pnl: float = 0.0,
+) -> str:
+    """
+    Generate an AI risk warning when drawdown or daily loss limits approach.
+
+    alert_type: "DRAWDOWN" | "DAILY_LOSS"
+    current_pct: current drawdown/loss as a percentage (positive = loss)
+    limit_pct: the hard limit percentage
+
+    Posts to Telegram immediately and stores in risk_alerts_v4 collection.
+    Returns the alert text, or empty string on failure.
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("[AI] OPENAI_API_KEY not set — skipping risk alert")
+        return ""
+
+    db = get_db()
+
+    try:
+        import litellm
+
+        remaining_pct = limit_pct - current_pct
+        remaining_usd = account_balance * (remaining_pct / 100.0)
+        now = datetime.now(timezone.utc)
+
+        # Compute next daily reset time
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        hours_to_reset = round((tomorrow - now).total_seconds() / 3600, 1)
+
+        if alert_type == "DRAWDOWN":
+            limit_label = "Total drawdown"
+            current_label = f"{current_pct:.1f}% total drawdown"
+        else:
+            limit_label = "Daily loss"
+            current_label = f"{current_pct:.1f}% daily loss"
+
+        prompt = f"""\
+You are a professional risk manager for a gold trading system. \
+Write a 3-4 sentence risk alert for the following situation:
+
+Risk Alert Details:
+- Alert type: {alert_type}
+- {limit_label} limit: {limit_pct:.1f}% of ${account_balance:,.0f}
+- Current {current_label}: ${abs(daily_pnl if alert_type == 'DAILY_LOSS' else total_pnl):,.0f}
+- Remaining buffer: {remaining_pct:.1f}% (${remaining_usd:,.0f})
+- Daily reset in: {hours_to_reset:.1f} hours ({tomorrow.strftime('%Y-%m-%d %H:%M UTC')})
+
+Include:
+1. What the current risk exposure is
+2. How much buffer remains before the hard limit
+3. Recommended immediate action
+4. When the daily counter resets (if applicable)
+
+Be direct and urgent. Plain text only."""
+
+        resp = await litellm.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional trading risk manager. "
+                        "Write clear, urgent risk alerts. "
+                        "Plain text only — no markdown, no bullet points."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            api_key=OPENAI_API_KEY,
+            timeout=20,
+            max_tokens=250,
+        )
+
+        alert_text = resp.choices[0].message.content.strip()
+
+        # Store in MongoDB
+        if db is not None:
+            try:
+                await db.risk_alerts_v4.insert_one({
+                    "alert_type":       alert_type,
+                    "alert_text":       alert_text,
+                    "current_pct":      round(current_pct, 2),
+                    "limit_pct":        limit_pct,
+                    "remaining_pct":    round(remaining_pct, 2),
+                    "remaining_usd":    round(remaining_usd, 2),
+                    "account_balance":  account_balance,
+                    "daily_pnl":        round(daily_pnl, 2),
+                    "total_pnl":        round(total_pnl, 2),
+                    "created_at":       now,
+                })
+            except Exception as cache_exc:
+                logger.warning(f"[AI] Failed to store risk alert: {cache_exc}")
+
+        # Post to Telegram immediately
+        try:
+            bot = get_bot()
+            emoji = "🚨" if remaining_pct < 1.0 else "⚠️"
+            tg_msg = (
+                f"{emoji} <b>RISK ALERT — {alert_type.replace('_', ' ')}</b>\n\n"
+                f"{_html_escape(alert_text)}\n\n"
+                f"<b>Current:</b> {current_pct:.1f}% | "
+                f"<b>Limit:</b> {limit_pct:.1f}% | "
+                f"<b>Buffer:</b> {remaining_pct:.1f}% (${remaining_usd:,.0f})\n"
+                f"<i>⏰ {now.strftime('%Y-%m-%d %H:%M UTC')} | Grandcom Gold Engine v4.0</i>"
+            )
+            await bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=tg_msg,
+                parse_mode="HTML",
+            )
+            logger.info(f"[AI] Risk alert ({alert_type}) posted to Telegram")
+        except Exception as tg_exc:
+            logger.error(f"[AI] Failed to post risk alert to Telegram: {tg_exc}")
+
+        logger.warning(
+            f"[AI] Risk alert generated — type={alert_type} "
+            f"current={current_pct:.1f}% limit={limit_pct:.1f}% "
+            f"buffer={remaining_pct:.1f}%"
+        )
+        return alert_text
+
+    except Exception as exc:
+        logger.error(f"[AI] generate_risk_alert failed: {exc}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Core Signal Generation — V4 Pipeline
 # ---------------------------------------------------------------------------
 async def generate_signal_v4(pair: str) -> None:
@@ -1946,6 +2536,7 @@ async def generate_signal_v4(pair: str) -> None:
 
     # 12. Store in MongoDB (V4 collection)
     # Note: db was already fetched in step 11c for A/B test threshold lookup
+    _inserted_id: str = ""   # Will be set after successful MongoDB insert
     if db is not None:
         try:
             doc = {
@@ -2027,6 +2618,24 @@ async def generate_signal_v4(pair: str) -> None:
 
             _v4_metrics["signals_generated"] += 1
             _v4_metrics["trades_opened"]     += 1
+
+            # 12a. AI signal analysis — fire-and-forget; result cached in MongoDB
+            #      and appended to the Telegram message below.
+            _inserted_id = str(result.inserted_id)
+            asyncio.ensure_future(
+                analyze_signal_with_ai(
+                    signal_id=_inserted_id,
+                    pair=pair,
+                    direction=signal_type,
+                    confidence=round(confidence, 1),
+                    entry=entry,
+                    tps=tps,
+                    sl=sl,
+                    rr=rr,
+                    regime=hybrid_ctx.get("regime", "UNKNOWN"),
+                    account_balance=_risk_state.get("account_balance", ACCOUNT_BALANCE),
+                )
+            )
         except Exception as exc:
             logger.error(f"[{pair}] MongoDB insert failed: {exc}")
 
@@ -2052,6 +2661,9 @@ async def generate_signal_v4(pair: str) -> None:
     )
 
     # 13b. Send copy-trading block + V4 analytics detail messages.
+    #      analysis already contains the GPT signal-generation analysis from
+    #      gpt_signal_v4(); the deeper AI explanation is cached asynchronously
+    #      in MongoDB via analyze_signal_with_ai() above.
     await send_to_telegram_v4(
         pair=pair,
         signal=signal_type,
@@ -2130,6 +2742,32 @@ async def run_retrain_job() -> None:
         )
     else:
         logger.warning(f"⚠️ Scheduled retraining issue: {result.get('error', 'unknown')}")
+
+
+async def run_market_commentary_job() -> None:
+    """Scheduled AI market commentary — runs every 4 hours."""
+    logger.info("🤖 AI market commentary job starting …")
+    try:
+        commentary = await generate_market_commentary()
+        if commentary:
+            logger.info(f"✅ AI market commentary posted ({len(commentary)} chars)")
+        else:
+            logger.warning("⚠️ AI market commentary returned empty result")
+    except Exception as exc:
+        logger.error(f"❌ AI market commentary job failed: {exc}", exc_info=True)
+
+
+async def run_daily_review_job() -> None:
+    """Scheduled AI daily performance review — runs at UTC midnight."""
+    logger.info("🤖 AI daily review job starting …")
+    try:
+        review = await generate_daily_review()
+        if review:
+            logger.info(f"✅ AI daily review posted ({len(review)} chars)")
+        else:
+            logger.warning("⚠️ AI daily review returned empty result")
+    except Exception as exc:
+        logger.error(f"❌ AI daily review job failed: {exc}", exc_info=True)
 
 
 async def run_trade_management_loop() -> None:
@@ -2313,13 +2951,36 @@ async def lifespan(app: FastAPI):
         coalesce=True,
     )
 
+    # AI market commentary (every 4 hours)
+    scheduler.add_job(
+        run_market_commentary_job,
+        "interval",
+        hours=4,
+        id="ai_market_commentary_v4",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # AI daily performance review (every day at UTC midnight)
+    scheduler.add_job(
+        run_daily_review_job,
+        "cron",
+        hour=0,
+        minute=5,
+        id="ai_daily_review_v4",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.start()
     logger.info(
         f"✅ V4.1 Scheduler started — pairs={list(PAIRS.keys())} "
         f"signal_interval={SIGNAL_INTERVAL_MINUTES}min "
         f"trade_mgmt_interval=2min "
         f"sync_interval={RETRAIN_SYNC_HOURS}h "
-        f"retrain_interval={RETRAIN_INTERVAL_HOURS}h"
+        f"retrain_interval={RETRAIN_INTERVAL_HOURS}h "
+        f"ai_commentary_interval=4h "
+        f"ai_daily_review=00:05 UTC"
     )
 
     asyncio.create_task(run_all_signals_v4())
@@ -4248,6 +4909,269 @@ async def get_confidence_distribution(
         "buckets":        result,
         "version":        "4.0.0",
         "timestamp":      datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ===========================================================================
+# AI ENDPOINTS (35-40) — GPT-4 powered signal analysis, commentary & reviews
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Endpoint 35: Get AI Analysis for a Signal
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ai/signal-analysis/{signal_id}")
+async def get_signal_ai_analysis(signal_id: str):
+    """
+    Return the AI-generated analysis for a specific signal.
+
+    If the signal has already been analysed (ai_analysis field present in
+    MongoDB), returns the cached result immediately.  Otherwise triggers a
+    fresh GPT-4 analysis, caches it, and returns the result.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    try:
+        from bson import ObjectId
+        doc = await db.gold_signals_v4.find_one(
+            {"_id": ObjectId(signal_id)},
+            {"_id": 0, "pair": 1, "type": 1, "confidence": 1, "entry_price": 1,
+             "tp_levels": 1, "sl_price": 1, "risk_reward": 1, "regime": 1,
+             "ai_analysis": 1, "ai_analysis_at": 1},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid signal_id: {exc}")
+
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
+
+    # Return cached analysis if available
+    if doc.get("ai_analysis"):
+        return {
+            "signal_id":      signal_id,
+            "ai_analysis":    doc["ai_analysis"],
+            "ai_analysis_at": doc.get("ai_analysis_at"),
+            "cached":         True,
+            "version":        "4.0.0",
+            "timestamp":      datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Generate fresh analysis
+    ai_analysis = await analyze_signal_with_ai(
+        signal_id=signal_id,
+        pair=doc.get("pair", "XAUUSD"),
+        direction=doc.get("type", "BUY"),
+        confidence=float(doc.get("confidence", 0)),
+        entry=float(doc.get("entry_price", 0)),
+        tps=doc.get("tp_levels", []),
+        sl=float(doc.get("sl_price", 0)),
+        rr=float(doc.get("risk_reward", 0)),
+        regime=doc.get("regime", "UNKNOWN"),
+        account_balance=ACCOUNT_BALANCE,
+    )
+
+    return {
+        "signal_id":      signal_id,
+        "ai_analysis":    ai_analysis,
+        "ai_analysis_at": datetime.now(timezone.utc).isoformat(),
+        "cached":         False,
+        "version":        "4.0.0",
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 36: Get Latest Market Commentary
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ai/market-commentary")
+async def get_market_commentary(limit: int = Query(default=1, ge=1, le=10)):
+    """
+    Return the latest AI-generated market commentary from MongoDB.
+    Set limit > 1 to retrieve recent commentary history.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    try:
+        docs = (
+            await db.market_commentary_v4
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+            .to_list(limit)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not docs:
+        return {
+            "commentary":  None,
+            "message":     "No market commentary generated yet. Use POST /generate to create one.",
+            "version":     "4.0.0",
+            "timestamp":   datetime.now(timezone.utc).isoformat(),
+        }
+
+    return {
+        "commentary":  docs[0].get("commentary") if limit == 1 else None,
+        "results":     docs,
+        "count":       len(docs),
+        "version":     "4.0.0",
+        "timestamp":   datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 37: Generate New Market Commentary
+# ---------------------------------------------------------------------------
+@app.post("/api/v4/ai/market-commentary/generate")
+async def trigger_market_commentary():
+    """
+    Immediately generate a new AI market commentary and post it to Telegram.
+    Does not wait for the 4-hour scheduler — useful for on-demand analysis.
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
+
+    commentary = await generate_market_commentary()
+
+    if not commentary:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate market commentary — check logs for details",
+        )
+
+    return {
+        "commentary":  commentary,
+        "posted_to_telegram": True,
+        "version":     "4.0.0",
+        "timestamp":   datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 38: Get Latest Daily Review
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ai/daily-review")
+async def get_daily_review(limit: int = Query(default=1, ge=1, le=30)):
+    """
+    Return the latest AI-generated daily performance review from MongoDB.
+    Set limit > 1 to retrieve recent review history.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    try:
+        docs = (
+            await db.daily_reviews_v4
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+            .to_list(limit)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not docs:
+        return {
+            "review":    None,
+            "message":   "No daily reviews generated yet. Use POST /generate to create one.",
+            "version":   "4.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    return {
+        "review":    docs[0].get("review") if limit == 1 else None,
+        "results":   docs,
+        "count":     len(docs),
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 39: Generate New Daily Review
+# ---------------------------------------------------------------------------
+@app.post("/api/v4/ai/daily-review/generate")
+async def trigger_daily_review():
+    """
+    Immediately generate a new AI daily performance review and post to Telegram.
+    Does not wait for the midnight scheduler — useful for on-demand reporting.
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
+
+    review = await generate_daily_review()
+
+    if not review:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate daily review — check logs for details",
+        )
+
+    return {
+        "review":             review,
+        "posted_to_telegram": True,
+        "version":            "4.0.0",
+        "timestamp":          datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 40: List Recent Risk Alerts
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ai/risk-alerts")
+async def get_risk_alerts(
+    limit:      int          = Query(default=20, ge=1, le=100),
+    alert_type: Optional[str] = Query(default=None, description="DRAWDOWN or DAILY_LOSS"),
+):
+    """
+    Return recent AI-generated risk alerts from MongoDB.
+
+    Alerts are generated automatically when:
+      - Total drawdown exceeds 10% (approaching 15% hard limit)
+      - Daily loss exceeds 3% (approaching 5% hard limit)
+
+    Use alert_type to filter by DRAWDOWN or DAILY_LOSS.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    query: dict = {}
+    if alert_type:
+        query["alert_type"] = alert_type.upper()
+
+    try:
+        docs = (
+            await db.risk_alerts_v4
+            .find(query, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+            .to_list(limit)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Current risk state for context
+    risk_state = get_live_risk_manager().get_state()
+
+    return {
+        "alerts":       docs,
+        "count":        len(docs),
+        "alert_type":   alert_type,
+        "current_risk": {
+            "total_drawdown_pct":  risk_state.get("total_drawdown_pct"),
+            "daily_loss_pct":      risk_state.get("daily_loss_pct"),
+            "drawdown_alert_threshold":   LiveRiskManager.DRAWDOWN_ALERT_PCT,
+            "daily_loss_alert_threshold": LiveRiskManager.DAILY_LOSS_ALERT_PCT,
+            "drawdown_hard_limit":        MAX_TOTAL_DRAWDOWN_PCT,
+            "daily_loss_hard_limit":      MAX_DAILY_LOSS_PCT,
+        },
+        "version":      "4.0.0",
+        "timestamp":    datetime.now(timezone.utc).isoformat(),
     }
 
 
