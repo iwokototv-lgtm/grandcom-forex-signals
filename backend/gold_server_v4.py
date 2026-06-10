@@ -149,6 +149,27 @@ PRICE_ACTION_MOMENTUM_THRESHOLD  = float(os.environ.get("PRICE_ACTION_MOMENTUM_T
 PRICE_ACTION_VOLATILITY_THRESHOLD = float(os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", "0.55"))
 PRICE_ACTION_CONFLUENCE_WEIGHT   = float(os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", "0.40"))
 
+# ---------------------------------------------------------------------------
+# A/B Testing & Account Scaling Constants
+# ---------------------------------------------------------------------------
+AB_TEST_COLLECTION          = os.environ.get("AB_TEST_COLLECTION", "ab_tests_v4")
+AB_TEST_MIN_SIGNALS         = int(os.environ.get("AB_TEST_MIN_SIGNALS", "20"))
+AB_TEST_MAX_ACTIVE_PER_PAIR = int(os.environ.get("AB_TEST_MAX_ACTIVE_PER_PAIR", "1"))
+
+ACCOUNT_SCALING_BASE_BALANCE    = float(os.environ.get("ACCOUNT_SCALING_BASE_BALANCE", "10000.0"))
+ACCOUNT_SCALING_MAX_BASE_PER_1K = float(os.environ.get("ACCOUNT_SCALING_MAX_BASE_PER_1K", "50.0"))
+ACCOUNT_HISTORY_COLLECTION      = os.environ.get("ACCOUNT_HISTORY_COLLECTION", "account_history_v4")
+ACCOUNT_SCALING_THRESHOLDS = [
+    {"growth_pct": 10.0, "size_increase_pct": 10.0},
+    {"growth_pct": 25.0, "size_increase_pct": 25.0},
+    {"growth_pct": 50.0, "size_increase_pct": 50.0},
+]
+
+# Backtest benchmarks (Phase 2 results — used for live vs backtest comparison)
+BACKTEST_WIN_RATE        = float(os.environ.get("BACKTEST_WIN_RATE", "45.1"))
+BACKTEST_PROFIT_FACTOR   = float(os.environ.get("BACKTEST_PROFIT_FACTOR", "2.17"))
+BACKTEST_AVG_RETURN_PCT  = float(os.environ.get("BACKTEST_AVG_RETURN_PCT", "7.85"))
+
 # V4 Advanced Position Sizing — Volatility Regime Constants
 # Regimes: SQUEEZE → NORMAL → EXPANDING → HIGH_EXPANDING → EXTREME_HIGH
 VOL_REGIME_MULTIPLIERS: dict[str, float] = {
@@ -771,6 +792,7 @@ def log_signal_json(
     pa_thresholds: dict,
     risk_state: dict,
     analysis: str,
+    ab_test_id: str | None = None,
 ) -> dict:
     """
     Emit a structured JSON log entry for every generated signal.
@@ -848,6 +870,9 @@ def log_signal_json(
 
         # ── Analysis text ─────────────────────────────────────────────
         "analysis":         analysis,
+
+        # ── A/B test attribution ──────────────────────────────────────
+        "ab_test_id":       ab_test_id,
 
         # ── System metadata ───────────────────────────────────────────
         "system_version":   "4.0.0",
@@ -1789,22 +1814,23 @@ async def generate_signal_v4(pair: str) -> None:
         account_balance=ACCOUNT_BALANCE,
     )
 
-    # 11c. Collect price action thresholds used (for A/B analysis in signal logs)
-    _pair_upper = pair.upper()
+    # 11c. Collect price action thresholds used (for A/B analysis in signal logs).
+    #      If an active A/B test exists for this pair, use its thresholds and
+    #      record the signal against the test for later win/loss attribution.
+    db = get_db()
+    _ab_mgr = get_ab_test_manager()
+    _pa_thresholds_full = await _ab_mgr.get_thresholds_for_pair(db, pair)
+    _active_test_id: str | None = _pa_thresholds_full.get("test_id")
+
     _pa_thresholds = {
-        "momentum_threshold":  float(os.environ.get(
-            f"PRICE_ACTION_MOMENTUM_THRESHOLD_{_pair_upper}",
-            os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD", str(PRICE_ACTION_MOMENTUM_THRESHOLD)),
-        )),
-        "volatility_threshold": float(os.environ.get(
-            f"PRICE_ACTION_VOLATILITY_THRESHOLD_{_pair_upper}",
-            os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", str(PRICE_ACTION_VOLATILITY_THRESHOLD)),
-        )),
-        "confluence_weight": float(os.environ.get(
-            f"PRICE_ACTION_CONFLUENCE_WEIGHT_{_pair_upper}",
-            os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", str(PRICE_ACTION_CONFLUENCE_WEIGHT)),
-        )),
+        "momentum_threshold":   _pa_thresholds_full["momentum_threshold"],
+        "volatility_threshold": _pa_thresholds_full["volatility_threshold"],
+        "confluence_weight":    _pa_thresholds_full["confluence_weight"],
     }
+
+    # Record this signal against the active A/B test (count only; result TBD)
+    if _active_test_id:
+        await _ab_mgr.record_signal(db, _active_test_id)
 
     # 11d. Capture risk state snapshot at signal time
     _risk_state = _risk_mgr.get_state()
@@ -1829,10 +1855,11 @@ async def generate_signal_v4(pair: str) -> None:
         pa_thresholds=_pa_thresholds,
         risk_state=_risk_state,
         analysis=analysis,
+        ab_test_id=_active_test_id,
     )
 
     # 12. Store in MongoDB (V4 collection)
-    db = get_db()
+    # Note: db was already fetched in step 11c for A/B test threshold lookup
     if db is not None:
         try:
             doc = {
@@ -1879,6 +1906,9 @@ async def generate_signal_v4(pair: str) -> None:
                 "pa_momentum_threshold":   _pa_thresholds["momentum_threshold"],
                 "pa_volatility_threshold": _pa_thresholds["volatility_threshold"],
                 "pa_confluence_weight":    _pa_thresholds["confluence_weight"],
+                # A/B test attribution — test_id is None if no active test
+                "ab_test_id":              _active_test_id,
+                "ab_test_source":          _pa_thresholds_full.get("source", "default"),
                 # Risk state at signal time
                 "risk_daily_pnl":          _risk_state.get("daily_pnl"),
                 "risk_total_pnl":          _risk_state.get("total_pnl"),
@@ -2841,6 +2871,1276 @@ async def get_risk_state():
             "volatility_threshold": PRICE_ACTION_VOLATILITY_THRESHOLD,
             "confluence_weight":    PRICE_ACTION_CONFLUENCE_WEIGHT,
         },
+    }
+
+
+# ===========================================================================
+# PHASE 3 — Advanced Monitoring, A/B Testing, Account Scaling, Analytics
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# A/B Testing Framework
+# ---------------------------------------------------------------------------
+import uuid as _uuid
+
+
+class ABTestManager:
+    """
+    Manages per-pair PA threshold A/B tests stored in MongoDB.
+
+    Each test document schema:
+      {
+        "test_id":    str (UUID4),
+        "pair":       str,
+        "name":       str,
+        "status":     "ACTIVE" | "COMPLETED" | "CANCELLED",
+        "thresholds": {
+            "momentum_threshold":   float,
+            "volatility_threshold": float,
+            "confluence_weight":    float,
+        },
+        "start_date": datetime,
+        "end_date":   datetime | None,
+        "created_at": datetime,
+        "signal_count": int,
+        "win_count":    int,
+        "loss_count":   int,
+        "notes":        str,
+      }
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Active test lookup (called on every signal — must be fast)
+    # ------------------------------------------------------------------
+
+    async def get_active_test_for_pair(self, db, pair: str) -> dict | None:
+        """Return the single active A/B test for a pair, or None."""
+        if db is None:
+            return None
+        try:
+            doc = await db[AB_TEST_COLLECTION].find_one(
+                {"pair": pair.upper(), "status": "ACTIVE"},
+                {"_id": 0},
+                sort=[("created_at", -1)],
+            )
+            return doc
+        except Exception as exc:
+            logger.warning(f"[ABTest] get_active_test_for_pair failed: {exc}")
+            return None
+
+    async def get_thresholds_for_pair(self, db, pair: str) -> dict:
+        """
+        Return PA thresholds for a pair.  If an active A/B test exists,
+        return its thresholds; otherwise fall back to global env-var defaults.
+        """
+        test = await self.get_active_test_for_pair(db, pair)
+        if test:
+            return {
+                "momentum_threshold":   test["thresholds"].get("momentum_threshold",   PRICE_ACTION_MOMENTUM_THRESHOLD),
+                "volatility_threshold": test["thresholds"].get("volatility_threshold", PRICE_ACTION_VOLATILITY_THRESHOLD),
+                "confluence_weight":    test["thresholds"].get("confluence_weight",    PRICE_ACTION_CONFLUENCE_WEIGHT),
+                "test_id":              test["test_id"],
+                "test_name":            test.get("name", ""),
+                "source":               "ab_test",
+            }
+        # Fall back to per-pair env-var overrides → global defaults
+        _pair_upper = pair.upper()
+        return {
+            "momentum_threshold": float(os.environ.get(
+                f"PRICE_ACTION_MOMENTUM_THRESHOLD_{_pair_upper}",
+                os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD", str(PRICE_ACTION_MOMENTUM_THRESHOLD)),
+            )),
+            "volatility_threshold": float(os.environ.get(
+                f"PRICE_ACTION_VOLATILITY_THRESHOLD_{_pair_upper}",
+                os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", str(PRICE_ACTION_VOLATILITY_THRESHOLD)),
+            )),
+            "confluence_weight": float(os.environ.get(
+                f"PRICE_ACTION_CONFLUENCE_WEIGHT_{_pair_upper}",
+                os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", str(PRICE_ACTION_CONFLUENCE_WEIGHT)),
+            )),
+            "test_id":   None,
+            "test_name": None,
+            "source":    "default",
+        }
+
+    # ------------------------------------------------------------------
+    # Signal outcome recording
+    # ------------------------------------------------------------------
+
+    async def record_signal(self, db, test_id: str, result: str | None = None) -> None:
+        """
+        Increment signal_count (and win/loss counters) for a test.
+        Called every time a signal is generated under a test.
+        result: "WIN" | "LOSS" | None (still open)
+        """
+        if db is None or not test_id:
+            return
+        try:
+            inc: dict = {"signal_count": 1}
+            if result == "WIN":
+                inc["win_count"] = 1
+            elif result == "LOSS":
+                inc["loss_count"] = 1
+            await db[AB_TEST_COLLECTION].update_one(
+                {"test_id": test_id},
+                {"$inc": inc},
+            )
+        except Exception as exc:
+            logger.warning(f"[ABTest] record_signal failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    async def create_test(
+        self,
+        db,
+        pair: str,
+        name: str,
+        thresholds: dict,
+        notes: str = "",
+    ) -> dict:
+        """Create a new A/B test.  Fails if another test is already ACTIVE for the pair."""
+        if db is None:
+            return {"success": False, "error": "MongoDB not connected"}
+
+        pair = pair.upper()
+        async with self._lock:
+            # Enforce max-1 active test per pair
+            existing = await db[AB_TEST_COLLECTION].count_documents(
+                {"pair": pair, "status": "ACTIVE"}
+            )
+            if existing >= AB_TEST_MAX_ACTIVE_PER_PAIR:
+                return {
+                    "success": False,
+                    "error": f"Pair {pair} already has {existing} active test(s). "
+                             f"Complete or cancel it before starting a new one.",
+                }
+
+            test_id = str(_uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            doc = {
+                "test_id":    test_id,
+                "pair":       pair,
+                "name":       name,
+                "status":     "ACTIVE",
+                "thresholds": {
+                    "momentum_threshold":   float(thresholds.get("momentum_threshold",   PRICE_ACTION_MOMENTUM_THRESHOLD)),
+                    "volatility_threshold": float(thresholds.get("volatility_threshold", PRICE_ACTION_VOLATILITY_THRESHOLD)),
+                    "confluence_weight":    float(thresholds.get("confluence_weight",    PRICE_ACTION_CONFLUENCE_WEIGHT)),
+                },
+                "start_date":   now,
+                "end_date":     None,
+                "created_at":   now,
+                "signal_count": 0,
+                "win_count":    0,
+                "loss_count":   0,
+                "notes":        notes,
+            }
+            await db[AB_TEST_COLLECTION].insert_one(doc)
+            logger.info(f"[ABTest] Created test {test_id} for {pair} — {name}")
+            return {"success": True, "test_id": test_id, "pair": pair, "name": name}
+
+    async def complete_test(self, db, test_id: str) -> dict:
+        """Mark a test as COMPLETED."""
+        if db is None:
+            return {"success": False, "error": "MongoDB not connected"}
+        now = datetime.now(timezone.utc)
+        result = await db[AB_TEST_COLLECTION].update_one(
+            {"test_id": test_id, "status": "ACTIVE"},
+            {"$set": {"status": "COMPLETED", "end_date": now}},
+        )
+        if result.modified_count == 0:
+            return {"success": False, "error": f"Test {test_id} not found or not ACTIVE"}
+        return {"success": True, "test_id": test_id, "status": "COMPLETED"}
+
+    async def cancel_test(self, db, test_id: str) -> dict:
+        """Mark a test as CANCELLED."""
+        if db is None:
+            return {"success": False, "error": "MongoDB not connected"}
+        now = datetime.now(timezone.utc)
+        result = await db[AB_TEST_COLLECTION].update_one(
+            {"test_id": test_id, "status": "ACTIVE"},
+            {"$set": {"status": "CANCELLED", "end_date": now}},
+        )
+        if result.modified_count == 0:
+            return {"success": False, "error": f"Test {test_id} not found or not ACTIVE"}
+        return {"success": True, "test_id": test_id, "status": "CANCELLED"}
+
+    async def get_test_results(self, db, test_id: str) -> dict:
+        """Return full results for a single test, including computed metrics."""
+        if db is None:
+            return {"error": "MongoDB not connected"}
+        doc = await db[AB_TEST_COLLECTION].find_one({"test_id": test_id}, {"_id": 0})
+        if not doc:
+            return {"error": f"Test {test_id} not found"}
+
+        signal_count = doc.get("signal_count", 0)
+        win_count    = doc.get("win_count", 0)
+        loss_count   = doc.get("loss_count", 0)
+        closed       = win_count + loss_count
+
+        win_rate = round(win_count / closed * 100, 1) if closed > 0 else None
+        profit_factor = round(win_count / loss_count, 2) if loss_count > 0 else None
+        statistically_significant = closed >= AB_TEST_MIN_SIGNALS
+
+        # Compare to backtest benchmarks
+        vs_backtest: dict = {}
+        if win_rate is not None:
+            vs_backtest["win_rate_delta_pct"] = round(win_rate - BACKTEST_WIN_RATE, 1)
+        if profit_factor is not None:
+            vs_backtest["profit_factor_delta"] = round(profit_factor - BACKTEST_PROFIT_FACTOR, 2)
+
+        return {
+            **doc,
+            "computed": {
+                "win_rate_pct":             win_rate,
+                "profit_factor":            profit_factor,
+                "closed_signals":           closed,
+                "statistically_significant": statistically_significant,
+                "min_signals_required":     AB_TEST_MIN_SIGNALS,
+                "vs_backtest":              vs_backtest,
+            },
+        }
+
+    async def list_tests(self, db, status: str | None = None, pair: str | None = None) -> list:
+        """List A/B tests with optional status/pair filter."""
+        if db is None:
+            return []
+        query: dict = {}
+        if status:
+            query["status"] = status.upper()
+        if pair:
+            query["pair"] = pair.upper()
+        docs = (
+            await db[AB_TEST_COLLECTION]
+            .find(query, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(100)
+            .to_list(100)
+        )
+        return docs
+
+
+# Module-level singleton
+_ab_test_manager = ABTestManager()
+
+
+def get_ab_test_manager() -> ABTestManager:
+    return _ab_test_manager
+
+
+# ---------------------------------------------------------------------------
+# Account Scaling Manager
+# ---------------------------------------------------------------------------
+
+class AccountScalingManager:
+    """
+    Tracks account balance growth and automatically scales POSITION_SIZE_BASE_PER_1K.
+
+    Milestones (relative to ACCOUNT_SCALING_BASE_BALANCE = $10,000):
+      +10% growth ($11,000) → increase base size by 10%
+      +25% growth ($12,500) → increase base size by 25%
+      +50% growth ($15,000) → increase base size by 50%
+
+    Hard cap: POSITION_SIZE_BASE_PER_1K never exceeds ACCOUNT_SCALING_MAX_BASE_PER_1K (50).
+
+    All scaling events are persisted to MongoDB (account_history_v4 collection).
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        # In-memory scaling state (persisted to MongoDB on every change)
+        self._current_base_per_1k: float = POSITION_SIZE_BASE_PER_1K
+        self._milestones_hit: list[dict] = []   # [{growth_pct, size_increase_pct, balance_at_hit, timestamp}]
+        self._last_balance: float = ACCOUNT_SCALING_BASE_BALANCE
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_current_base_per_1k(self) -> float:
+        """Return the current (possibly scaled) POSITION_SIZE_BASE_PER_1K."""
+        return self._current_base_per_1k
+
+    async def record_balance_update(self, db, new_balance: float, source: str = "pnl") -> dict:
+        """
+        Record a new account balance and check whether any scaling milestone
+        has been crossed.  Persists a balance snapshot to MongoDB.
+
+        Returns a dict describing what happened (milestone hit, new base size, etc.).
+        """
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            base = ACCOUNT_SCALING_BASE_BALANCE
+            growth_pct = (new_balance - base) / base * 100.0 if base > 0 else 0.0
+
+            result: dict = {
+                "timestamp":          now.isoformat(),
+                "new_balance":        round(new_balance, 2),
+                "base_balance":       base,
+                "growth_pct":         round(growth_pct, 2),
+                "previous_base_per_1k": round(self._current_base_per_1k, 4),
+                "milestone_hit":      None,
+                "new_base_per_1k":    round(self._current_base_per_1k, 4),
+                "cap_applied":        False,
+                "source":             source,
+            }
+
+            # Check each threshold in descending order (highest first)
+            # so we apply the largest applicable increase
+            applicable = [
+                t for t in sorted(ACCOUNT_SCALING_THRESHOLDS, key=lambda x: x["growth_pct"], reverse=True)
+                if growth_pct >= t["growth_pct"]
+                and not any(m["growth_pct"] == t["growth_pct"] for m in self._milestones_hit)
+            ]
+
+            if applicable:
+                threshold = applicable[0]  # Highest un-hit threshold
+                increase_factor = 1.0 + threshold["size_increase_pct"] / 100.0
+                new_base = self._current_base_per_1k * increase_factor
+
+                # Apply hard cap
+                cap_applied = new_base > ACCOUNT_SCALING_MAX_BASE_PER_1K
+                new_base = min(new_base, ACCOUNT_SCALING_MAX_BASE_PER_1K)
+
+                milestone_record = {
+                    "growth_pct":        threshold["growth_pct"],
+                    "size_increase_pct": threshold["size_increase_pct"],
+                    "balance_at_hit":    round(new_balance, 2),
+                    "old_base_per_1k":   round(self._current_base_per_1k, 4),
+                    "new_base_per_1k":   round(new_base, 4),
+                    "cap_applied":       cap_applied,
+                    "timestamp":         now.isoformat(),
+                }
+                self._milestones_hit.append(milestone_record)
+                self._current_base_per_1k = new_base
+
+                result.update({
+                    "milestone_hit":   threshold,
+                    "new_base_per_1k": round(new_base, 4),
+                    "cap_applied":     cap_applied,
+                })
+
+                logger.info(
+                    f"[AccountScaling] 🚀 Milestone hit! growth={growth_pct:.1f}% "
+                    f"({threshold['growth_pct']}% threshold) — "
+                    f"base_per_1k: {milestone_record['old_base_per_1k']} → {new_base:.4f} "
+                    f"(cap_applied={cap_applied})"
+                )
+
+            self._last_balance = new_balance
+
+            # Persist balance snapshot to MongoDB
+            if db is not None:
+                try:
+                    await db[ACCOUNT_HISTORY_COLLECTION].insert_one({
+                        **result,
+                        "milestones_hit_total": len(self._milestones_hit),
+                    })
+                except Exception as exc:
+                    logger.warning(f"[AccountScaling] MongoDB persist failed: {exc}")
+
+            return result
+
+    def get_scaling_state(self) -> dict:
+        """Return a full snapshot of the current scaling state."""
+        base = ACCOUNT_SCALING_BASE_BALANCE
+        growth_pct = (self._last_balance - base) / base * 100.0 if base > 0 else 0.0
+
+        # Compute next milestone
+        hit_thresholds = {m["growth_pct"] for m in self._milestones_hit}
+        remaining = [
+            t for t in sorted(ACCOUNT_SCALING_THRESHOLDS, key=lambda x: x["growth_pct"])
+            if t["growth_pct"] not in hit_thresholds
+        ]
+        next_milestone = remaining[0] if remaining else None
+        next_milestone_balance = None
+        if next_milestone:
+            next_milestone_balance = round(
+                base * (1 + next_milestone["growth_pct"] / 100.0), 2
+            )
+
+        return {
+            "current_base_per_1k":      round(self._current_base_per_1k, 4),
+            "original_base_per_1k":     POSITION_SIZE_BASE_PER_1K,
+            "max_base_per_1k":          ACCOUNT_SCALING_MAX_BASE_PER_1K,
+            "base_balance":             base,
+            "last_known_balance":       round(self._last_balance, 2),
+            "current_growth_pct":       round(growth_pct, 2),
+            "milestones_hit":           self._milestones_hit,
+            "milestones_hit_count":     len(self._milestones_hit),
+            "next_milestone":           next_milestone,
+            "next_milestone_balance":   next_milestone_balance,
+            "all_thresholds":           ACCOUNT_SCALING_THRESHOLDS,
+            "cap_reached":              self._current_base_per_1k >= ACCOUNT_SCALING_MAX_BASE_PER_1K,
+        }
+
+    async def get_balance_history(self, db, limit: int = 100) -> list:
+        """Fetch account balance history from MongoDB."""
+        if db is None:
+            return []
+        try:
+            docs = (
+                await db[ACCOUNT_HISTORY_COLLECTION]
+                .find({}, {"_id": 0})
+                .sort("timestamp", -1)
+                .limit(limit)
+                .to_list(limit)
+            )
+            return docs
+        except Exception as exc:
+            logger.warning(f"[AccountScaling] get_balance_history failed: {exc}")
+            return []
+
+
+# Module-level singleton
+_account_scaling_manager = AccountScalingManager()
+
+
+def get_account_scaling_manager() -> AccountScalingManager:
+    return _account_scaling_manager
+
+
+# ---------------------------------------------------------------------------
+# Performance Analytics Helpers
+# ---------------------------------------------------------------------------
+
+def _compute_sharpe_ratio(returns: list[float], risk_free_rate: float = 0.0) -> float | None:
+    """
+    Compute annualised Sharpe ratio from a list of per-trade return percentages.
+    Assumes ~252 trading days / year.  Returns None if insufficient data.
+    """
+    if len(returns) < 5:
+        return None
+    import statistics
+    mean_r = statistics.mean(returns)
+    std_r  = statistics.stdev(returns) if len(returns) > 1 else 0.0
+    if std_r == 0:
+        return None
+    # Annualise: assume ~252 signals/year (rough approximation)
+    sharpe = (mean_r - risk_free_rate) / std_r * (252 ** 0.5)
+    return round(sharpe, 3)
+
+
+def _compute_profit_factor(wins: list[float], losses: list[float]) -> float | None:
+    """Gross profit / gross loss.  Returns None if no losses."""
+    gross_profit = sum(w for w in wins if w > 0)
+    gross_loss   = abs(sum(l for l in losses if l < 0))
+    if gross_loss == 0:
+        return None
+    return round(gross_profit / gross_loss, 3)
+
+
+async def compute_live_analytics(db, lookback_days: int = 30) -> dict:
+    """
+    Compute live performance metrics from closed signals in MongoDB.
+    Compares against Phase 2 backtest benchmarks.
+    """
+    if db is None:
+        return {"error": "MongoDB not connected"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+    try:
+        signals = (
+            await db.gold_signals_v4
+            .find(
+                {
+                    "status": {"$in": ["CLOSED", "WIN", "LOSS"]},
+                    "created_at": {"$gte": cutoff},
+                },
+                {"_id": 0},
+            )
+            .sort("created_at", -1)
+            .limit(1000)
+            .to_list(1000)
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    total = len(signals)
+    if total == 0:
+        return {
+            "total_signals":  0,
+            "lookback_days":  lookback_days,
+            "message":        "No closed signals in lookback window",
+            "backtest_benchmarks": {
+                "win_rate_pct":    BACKTEST_WIN_RATE,
+                "profit_factor":   BACKTEST_PROFIT_FACTOR,
+                "avg_return_pct":  BACKTEST_AVG_RETURN_PCT,
+            },
+        }
+
+    wins   = [s for s in signals if s.get("result") == "WIN" or s.get("status") == "WIN"]
+    losses = [s for s in signals if s.get("result") == "LOSS" or s.get("status") == "LOSS"]
+
+    win_count  = len(wins)
+    loss_count = len(losses)
+    closed     = win_count + loss_count
+
+    live_win_rate = round(win_count / closed * 100, 1) if closed > 0 else None
+
+    # Collect R:R values for return estimation
+    rr_values = [float(s.get("risk_reward", 0)) for s in signals if s.get("risk_reward")]
+    avg_rr    = round(sum(rr_values) / len(rr_values), 2) if rr_values else None
+
+    # Approximate per-trade returns: wins = +rr%, losses = -1%
+    win_returns  = [float(s.get("risk_reward", 1.0)) for s in wins]
+    loss_returns = [-1.0 for _ in losses]
+    all_returns  = win_returns + loss_returns
+
+    live_profit_factor = _compute_profit_factor(win_returns, loss_returns)
+    live_sharpe        = _compute_sharpe_ratio(all_returns)
+    avg_return         = round(sum(all_returns) / len(all_returns), 3) if all_returns else None
+
+    # Confidence distribution
+    conf_buckets = {"60_70": 0, "70_80": 0, "80_90": 0, "90_100": 0}
+    for s in signals:
+        c = float(s.get("confidence", 0))
+        if c >= 90:
+            conf_buckets["90_100"] += 1
+        elif c >= 80:
+            conf_buckets["80_90"] += 1
+        elif c >= 70:
+            conf_buckets["70_80"] += 1
+        else:
+            conf_buckets["60_70"] += 1
+    conf_dist = {
+        k: {"count": v, "pct": round(v / total * 100, 1) if total > 0 else 0}
+        for k, v in conf_buckets.items()
+    }
+
+    # Per-pair breakdown
+    pair_stats: dict[str, dict] = {}
+    for s in signals:
+        p = s.get("pair", "UNKNOWN")
+        if p not in pair_stats:
+            pair_stats[p] = {"total": 0, "wins": 0, "losses": 0, "rr_sum": 0.0}
+        pair_stats[p]["total"] += 1
+        if s.get("result") == "WIN" or s.get("status") == "WIN":
+            pair_stats[p]["wins"] += 1
+        elif s.get("result") == "LOSS" or s.get("status") == "LOSS":
+            pair_stats[p]["losses"] += 1
+        pair_stats[p]["rr_sum"] += float(s.get("risk_reward", 0))
+
+    pair_performance: dict[str, dict] = {}
+    for p, stats in pair_stats.items():
+        closed_p = stats["wins"] + stats["losses"]
+        wr_p = round(stats["wins"] / closed_p * 100, 1) if closed_p > 0 else None
+        avg_rr_p = round(stats["rr_sum"] / stats["total"], 2) if stats["total"] > 0 else None
+        vs_bt_wr = round(wr_p - BACKTEST_WIN_RATE, 1) if wr_p is not None else None
+        pair_performance[p] = {
+            "total_signals":    stats["total"],
+            "wins":             stats["wins"],
+            "losses":           stats["losses"],
+            "win_rate_pct":     wr_p,
+            "avg_rr":           avg_rr_p,
+            "vs_backtest_wr":   vs_bt_wr,
+            "status":           (
+                "OUTPERFORMING" if vs_bt_wr is not None and vs_bt_wr > 5
+                else "UNDERPERFORMING" if vs_bt_wr is not None and vs_bt_wr < -5
+                else "IN_LINE"
+            ),
+        }
+
+    # vs backtest comparison
+    vs_backtest: dict = {
+        "win_rate_delta_pct":    round(live_win_rate - BACKTEST_WIN_RATE, 1) if live_win_rate is not None else None,
+        "profit_factor_delta":   round(live_profit_factor - BACKTEST_PROFIT_FACTOR, 3) if live_profit_factor is not None else None,
+        "avg_return_delta_pct":  round(avg_return - BACKTEST_AVG_RETURN_PCT, 3) if avg_return is not None else None,
+    }
+
+    return {
+        "lookback_days":    lookback_days,
+        "total_signals":    total,
+        "closed_signals":   closed,
+        "wins":             win_count,
+        "losses":           loss_count,
+        "live_metrics": {
+            "win_rate_pct":    live_win_rate,
+            "profit_factor":   live_profit_factor,
+            "sharpe_ratio":    live_sharpe,
+            "avg_return_pct":  avg_return,
+            "avg_rr":          avg_rr,
+        },
+        "backtest_benchmarks": {
+            "win_rate_pct":    BACKTEST_WIN_RATE,
+            "profit_factor":   BACKTEST_PROFIT_FACTOR,
+            "avg_return_pct":  BACKTEST_AVG_RETURN_PCT,
+        },
+        "vs_backtest":          vs_backtest,
+        "confidence_distribution": conf_dist,
+        "pair_performance":     pair_performance,
+        "timestamp":            datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ===========================================================================
+# PHASE 3 — New API Endpoints (20-34)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Endpoint 20: Live Signals Feed (last 100 with full metrics)
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/signals/live")
+async def get_live_signals(
+    limit: int = Query(default=100, le=200),
+    pair:  Optional[str] = None,
+):
+    """
+    Return the last N signals with full metrics for real-time dashboard display.
+    Includes confidence, regime, MTF alignment, position sizing, and PA thresholds.
+    """
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected", "signals": [], "count": 0}
+
+    query: dict = {}
+    if pair:
+        query["pair"] = pair.upper()
+
+    signals = (
+        await db.gold_signals_v4
+        .find(query, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+    return {
+        "signals":   signals,
+        "count":     len(signals),
+        "pair":      pair,
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 21: Signal Stats (win rate, profit factor, avg confidence by pair)
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/signals/stats")
+async def get_signal_stats(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    pair:          Optional[str] = None,
+):
+    """
+    Aggregate signal statistics: win rate, profit factor, avg confidence,
+    and signal count — broken down by pair and overall.
+    """
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    query: dict = {"created_at": {"$gte": cutoff}}
+    if pair:
+        query["pair"] = pair.upper()
+
+    signals = (
+        await db.gold_signals_v4
+        .find(query, {"_id": 0, "pair": 1, "status": 1, "result": 1, "confidence": 1, "risk_reward": 1})
+        .sort("created_at", -1)
+        .limit(2000)
+        .to_list(2000)
+    )
+
+    def _stats_for(sigs: list) -> dict:
+        total = len(sigs)
+        wins  = sum(1 for s in sigs if s.get("result") == "WIN" or s.get("status") == "WIN")
+        losses = sum(1 for s in sigs if s.get("result") == "LOSS" or s.get("status") == "LOSS")
+        closed = wins + losses
+        confs  = [float(s["confidence"]) for s in sigs if s.get("confidence") is not None]
+        rrs    = [float(s["risk_reward"]) for s in sigs if s.get("risk_reward") is not None]
+        win_rate = round(wins / closed * 100, 1) if closed > 0 else None
+        pf = round(wins / losses, 2) if losses > 0 else None
+        return {
+            "total_signals":  total,
+            "closed_signals": closed,
+            "wins":           wins,
+            "losses":         losses,
+            "win_rate_pct":   win_rate,
+            "profit_factor":  pf,
+            "avg_confidence": round(sum(confs) / len(confs), 1) if confs else None,
+            "avg_rr":         round(sum(rrs) / len(rrs), 2) if rrs else None,
+        }
+
+    overall = _stats_for(signals)
+
+    by_pair: dict = {}
+    for s in signals:
+        p = s.get("pair", "UNKNOWN")
+        by_pair.setdefault(p, []).append(s)
+    pair_stats = {p: _stats_for(sigs) for p, sigs in by_pair.items()}
+
+    return {
+        "lookback_days": lookback_days,
+        "overall":       overall,
+        "by_pair":       pair_stats,
+        "version":       "4.0.0",
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 22: Performance — Live vs Backtest Comparison
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/performance")
+async def get_performance_comparison(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Compare live trading performance against Phase 2 backtest benchmarks.
+    Returns win rate, profit factor, Sharpe ratio, and per-pair breakdown.
+    """
+    analytics = await compute_live_analytics(get_db(), lookback_days=lookback_days)
+    return {"version": "4.0.0", **analytics}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 23: Account Growth History
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/account/growth")
+async def get_account_growth(
+    limit: int = Query(default=100, le=500),
+):
+    """
+    Return account balance history and growth rate.
+    Includes all recorded balance snapshots and scaling events.
+    """
+    db = get_db()
+    scaling_mgr = get_account_scaling_manager()
+    history = await scaling_mgr.get_balance_history(db, limit=limit)
+    state   = scaling_mgr.get_scaling_state()
+
+    # Compute growth rate from history
+    growth_rate_pct = None
+    if len(history) >= 2:
+        oldest = history[-1].get("new_balance", ACCOUNT_SCALING_BASE_BALANCE)
+        newest = history[0].get("new_balance", ACCOUNT_SCALING_BASE_BALANCE)
+        if oldest > 0:
+            growth_rate_pct = round((newest - oldest) / oldest * 100, 2)
+
+    return {
+        "current_balance":    state["last_known_balance"],
+        "base_balance":       state["base_balance"],
+        "growth_pct":         state["current_growth_pct"],
+        "growth_rate_pct":    growth_rate_pct,
+        "history":            history,
+        "history_count":      len(history),
+        "scaling_state":      state,
+        "version":            "4.0.0",
+        "timestamp":          datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 24: Current PA Thresholds for All Pairs
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/thresholds/current")
+async def get_current_thresholds():
+    """
+    Return the currently active PA thresholds for all pairs.
+    Shows whether each pair is using an A/B test override or global defaults.
+    """
+    db = get_db()
+    ab_mgr = get_ab_test_manager()
+
+    result: dict = {
+        "global_defaults": {
+            "momentum_threshold":   PRICE_ACTION_MOMENTUM_THRESHOLD,
+            "volatility_threshold": PRICE_ACTION_VOLATILITY_THRESHOLD,
+            "confluence_weight":    PRICE_ACTION_CONFLUENCE_WEIGHT,
+        },
+        "pairs": {},
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    for pair in PAIRS:
+        thresholds = await ab_mgr.get_thresholds_for_pair(db, pair)
+        result["pairs"][pair] = thresholds
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 25: List A/B Tests
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ab-tests")
+async def list_ab_tests(
+    status: Optional[str] = Query(default=None, regex="^(ACTIVE|COMPLETED|CANCELLED)$"),
+    pair:   Optional[str] = None,
+):
+    """
+    List all A/B tests with optional status/pair filter.
+    Returns test configurations, signal counts, and computed win rates.
+    """
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected", "tests": [], "count": 0}
+
+    ab_mgr = get_ab_test_manager()
+    tests  = await ab_mgr.list_tests(db, status=status, pair=pair)
+
+    # Enrich each test with computed metrics
+    enriched = []
+    for t in tests:
+        signal_count = t.get("signal_count", 0)
+        win_count    = t.get("win_count", 0)
+        loss_count   = t.get("loss_count", 0)
+        closed       = win_count + loss_count
+        enriched.append({
+            **t,
+            "win_rate_pct":   round(win_count / closed * 100, 1) if closed > 0 else None,
+            "profit_factor":  round(win_count / loss_count, 2) if loss_count > 0 else None,
+            "statistically_significant": closed >= AB_TEST_MIN_SIGNALS,
+        })
+
+    return {
+        "tests":     enriched,
+        "count":     len(enriched),
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 26: Create A/B Test
+# ---------------------------------------------------------------------------
+@app.post("/api/v4/ab-tests/create")
+async def create_ab_test(
+    pair:                  str   = Query(..., description="Trading pair, e.g. XAUUSD"),
+    name:                  str   = Query(..., description="Descriptive test name"),
+    momentum_threshold:    float = Query(default=PRICE_ACTION_MOMENTUM_THRESHOLD, ge=0.0, le=1.0),
+    volatility_threshold:  float = Query(default=PRICE_ACTION_VOLATILITY_THRESHOLD, ge=0.0, le=1.0),
+    confluence_weight:     float = Query(default=PRICE_ACTION_CONFLUENCE_WEIGHT, ge=0.0, le=1.0),
+    notes:                 str   = Query(default=""),
+):
+    """
+    Start a new A/B test for a pair with custom PA thresholds.
+    Only one active test is allowed per pair at a time.
+    The test_id is logged with every signal generated under this test.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    pair = pair.upper()
+    if pair not in PAIRS:
+        raise HTTPException(status_code=404, detail=f"Pair {pair} not found")
+
+    ab_mgr = get_ab_test_manager()
+    result = await ab_mgr.create_test(
+        db=db,
+        pair=pair,
+        name=name,
+        thresholds={
+            "momentum_threshold":   momentum_threshold,
+            "volatility_threshold": volatility_threshold,
+            "confluence_weight":    confluence_weight,
+        },
+        notes=notes,
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result.get("error", "Failed to create test"))
+
+    return {"version": "4.0.0", **result}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 27: Get A/B Test Results
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/ab-tests/{test_id}/results")
+async def get_ab_test_results(test_id: str):
+    """
+    Return full results for a specific A/B test, including computed win rate,
+    profit factor, and comparison against Phase 2 backtest benchmarks.
+    """
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+
+    ab_mgr = get_ab_test_manager()
+    result = await ab_mgr.get_test_results(db, test_id)
+
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+
+    return {"version": "4.0.0", **result}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 28: Complete / Cancel A/B Test
+# ---------------------------------------------------------------------------
+@app.post("/api/v4/ab-tests/{test_id}/complete")
+async def complete_ab_test(test_id: str):
+    """Mark an active A/B test as COMPLETED."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+    result = await get_ab_test_manager().complete_test(db, test_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    return {"version": "4.0.0", **result}
+
+
+@app.post("/api/v4/ab-tests/{test_id}/cancel")
+async def cancel_ab_test(test_id: str):
+    """Cancel an active A/B test."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+    result = await get_ab_test_manager().cancel_test(db, test_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    return {"version": "4.0.0", **result}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 29: Account Scaling State & History
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/account/scaling")
+async def get_account_scaling():
+    """
+    Return the current account scaling state: current base position size,
+    milestones hit, next milestone, and full scaling history.
+    """
+    db = get_db()
+    scaling_mgr = get_account_scaling_manager()
+    state   = scaling_mgr.get_scaling_state()
+    history = await scaling_mgr.get_balance_history(db, limit=50)
+
+    return {
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **state,
+        "recent_history": history[:10],  # Last 10 balance snapshots
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 30: Record Account Balance Update (triggers scaling check)
+# ---------------------------------------------------------------------------
+@app.post("/api/v4/account/update-balance")
+async def update_account_balance(
+    new_balance: float = Query(..., gt=0, description="New account balance in USD"),
+    source:      str   = Query(default="manual", description="Source of update: pnl | manual | broker_sync"),
+):
+    """
+    Record a new account balance and check whether any scaling milestone
+    has been crossed.  Automatically increases POSITION_SIZE_BASE_PER_1K
+    when growth thresholds are hit.
+    """
+    db = get_db()
+    scaling_mgr = get_account_scaling_manager()
+    result = await scaling_mgr.record_balance_update(db, new_balance=new_balance, source=source)
+
+    return {
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **result,
+        "scaling_state": scaling_mgr.get_scaling_state(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 31: Live vs Backtest Full Comparison Report
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/analytics/live-vs-backtest")
+async def get_live_vs_backtest(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Full live vs backtest comparison report.
+    Calculates live win rate, profit factor, Sharpe ratio and compares
+    against Phase 2 backtest benchmarks (+7.85% avg return, 45.1% win rate,
+    2.17 profit factor).
+    """
+    analytics = await compute_live_analytics(get_db(), lookback_days=lookback_days)
+
+    # Add overall assessment
+    vs = analytics.get("vs_backtest", {})
+    wr_delta = vs.get("win_rate_delta_pct")
+    pf_delta = vs.get("profit_factor_delta")
+
+    if wr_delta is not None and pf_delta is not None:
+        if wr_delta > 5 and pf_delta > 0.2:
+            assessment = "OUTPERFORMING"
+        elif wr_delta < -5 or pf_delta < -0.3:
+            assessment = "UNDERPERFORMING"
+        else:
+            assessment = "IN_LINE"
+    else:
+        assessment = "INSUFFICIENT_DATA"
+
+    return {
+        "version":    "4.0.0",
+        "assessment": assessment,
+        **analytics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 32: Per-Pair Performance Metrics
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/analytics/pair-performance")
+async def get_pair_performance(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Per-pair performance metrics: win rate, profit factor, avg R:R,
+    confidence distribution, and outperforming/underperforming status
+    vs Phase 2 backtest benchmarks.
+    """
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+    try:
+        signals = (
+            await db.gold_signals_v4
+            .find(
+                {"created_at": {"$gte": cutoff}},
+                {"_id": 0, "pair": 1, "status": 1, "result": 1,
+                 "confidence": 1, "risk_reward": 1, "regime": 1,
+                 "pa_momentum_threshold": 1, "pa_volatility_threshold": 1},
+            )
+            .sort("created_at", -1)
+            .limit(2000)
+            .to_list(2000)
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    by_pair: dict[str, list] = {}
+    for s in signals:
+        p = s.get("pair", "UNKNOWN")
+        by_pair.setdefault(p, []).append(s)
+
+    result: dict = {}
+    for pair_name, sigs in by_pair.items():
+        total  = len(sigs)
+        wins   = [s for s in sigs if s.get("result") == "WIN" or s.get("status") == "WIN"]
+        losses = [s for s in sigs if s.get("result") == "LOSS" or s.get("status") == "LOSS"]
+        closed = len(wins) + len(losses)
+
+        win_rate = round(len(wins) / closed * 100, 1) if closed > 0 else None
+        pf       = round(len(wins) / len(losses), 2) if len(losses) > 0 else None
+
+        confs = [float(s["confidence"]) for s in sigs if s.get("confidence") is not None]
+        rrs   = [float(s["risk_reward"]) for s in sigs if s.get("risk_reward") is not None]
+
+        # Regime breakdown
+        regime_counts: dict[str, int] = {}
+        for s in sigs:
+            r = s.get("regime", "UNKNOWN")
+            regime_counts[r] = regime_counts.get(r, 0) + 1
+
+        vs_bt_wr = round(win_rate - BACKTEST_WIN_RATE, 1) if win_rate is not None else None
+        vs_bt_pf = round(pf - BACKTEST_PROFIT_FACTOR, 2) if pf is not None else None
+
+        result[pair_name] = {
+            "total_signals":    total,
+            "closed_signals":   closed,
+            "wins":             len(wins),
+            "losses":           len(losses),
+            "win_rate_pct":     win_rate,
+            "profit_factor":    pf,
+            "avg_confidence":   round(sum(confs) / len(confs), 1) if confs else None,
+            "avg_rr":           round(sum(rrs) / len(rrs), 2) if rrs else None,
+            "regime_breakdown": regime_counts,
+            "vs_backtest": {
+                "win_rate_delta_pct":  vs_bt_wr,
+                "profit_factor_delta": vs_bt_pf,
+            },
+            "status": (
+                "OUTPERFORMING" if vs_bt_wr is not None and vs_bt_wr > 5
+                else "UNDERPERFORMING" if vs_bt_wr is not None and vs_bt_wr < -5
+                else "IN_LINE"
+            ),
+        }
+
+    return {
+        "lookback_days":    lookback_days,
+        "pairs":            result,
+        "backtest_benchmarks": {
+            "win_rate_pct":   BACKTEST_WIN_RATE,
+            "profit_factor":  BACKTEST_PROFIT_FACTOR,
+            "avg_return_pct": BACKTEST_AVG_RETURN_PCT,
+        },
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 33: Monitoring Dashboard Summary
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/dashboard")
+async def get_dashboard_summary(
+    lookback_days: int = Query(default=7, ge=1, le=90),
+):
+    """
+    Real-time monitoring dashboard summary.
+    Aggregates signal quality, account state, active A/B tests,
+    and live vs backtest performance into a single response.
+    """
+    db = get_db()
+    ab_mgr      = get_ab_test_manager()
+    scaling_mgr = get_account_scaling_manager()
+
+    # Gather all data concurrently
+    analytics_task = asyncio.create_task(compute_live_analytics(db, lookback_days=lookback_days))
+    ab_tests_task  = asyncio.create_task(ab_mgr.list_tests(db, status="ACTIVE"))
+
+    analytics = await analytics_task
+    active_tests = await ab_tests_task
+
+    scaling_state = scaling_mgr.get_scaling_state()
+    risk_state    = get_live_risk_manager().get_state()
+
+    # Recent signals (last 10)
+    recent_signals: list = []
+    if db is not None:
+        try:
+            recent_signals = (
+                await db.gold_signals_v4
+                .find({}, {"_id": 0, "pair": 1, "type": 1, "confidence": 1,
+                           "status": 1, "created_at": 1, "risk_reward": 1})
+                .sort("created_at", -1)
+                .limit(10)
+                .to_list(10)
+            )
+        except Exception:
+            pass
+
+    return {
+        "version":        "4.0.0",
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
+        "lookback_days":  lookback_days,
+        "signal_quality": {
+            "total_signals":  analytics.get("total_signals", 0),
+            "win_rate_pct":   analytics.get("live_metrics", {}).get("win_rate_pct"),
+            "profit_factor":  analytics.get("live_metrics", {}).get("profit_factor"),
+            "sharpe_ratio":   analytics.get("live_metrics", {}).get("sharpe_ratio"),
+            "vs_backtest":    analytics.get("vs_backtest", {}),
+        },
+        "account": {
+            "balance":          risk_state.get("account_balance"),
+            "daily_pnl":        risk_state.get("daily_pnl"),
+            "total_pnl":        risk_state.get("total_pnl"),
+            "drawdown_pct":     risk_state.get("total_drawdown_pct"),
+            "growth_pct":       scaling_state.get("current_growth_pct"),
+            "base_per_1k":      scaling_state.get("current_base_per_1k"),
+            "next_milestone":   scaling_state.get("next_milestone"),
+        },
+        "ab_tests": {
+            "active_count": len(active_tests),
+            "active_tests": [
+                {"test_id": t["test_id"], "pair": t["pair"], "name": t.get("name", ""),
+                 "signal_count": t.get("signal_count", 0)}
+                for t in active_tests
+            ],
+        },
+        "risk": {
+            "trading_allowed":       not (risk_state.get("drawdown_breached") or risk_state.get("daily_limit_breached")),
+            "drawdown_breached":     risk_state.get("drawdown_breached"),
+            "daily_limit_breached":  risk_state.get("daily_limit_breached"),
+            "open_positions":        risk_state.get("open_positions", {}),
+        },
+        "recent_signals": recent_signals,
+        "v4_metrics":     _v4_metrics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 34: Confidence Distribution
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/analytics/confidence-distribution")
+async def get_confidence_distribution(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    pair:          Optional[str] = None,
+):
+    """
+    Track the distribution of signal confidence tiers over time.
+    Shows what percentage of signals fall into each confidence bucket
+    (60-70%, 70-80%, 80-90%, 90-100%) and how each tier performs.
+    """
+    db = get_db()
+    if db is None:
+        return {"error": "MongoDB not connected"}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    query: dict = {"created_at": {"$gte": cutoff}}
+    if pair:
+        query["pair"] = pair.upper()
+
+    signals = (
+        await db.gold_signals_v4
+        .find(query, {"_id": 0, "confidence": 1, "status": 1, "result": 1, "risk_reward": 1})
+        .sort("created_at", -1)
+        .limit(2000)
+        .to_list(2000)
+    )
+
+    buckets: dict[str, dict] = {
+        "60_70":  {"label": "60-70% (Cautious)",       "count": 0, "wins": 0, "losses": 0, "rr_sum": 0.0},
+        "70_80":  {"label": "70-80% (Baseline)",       "count": 0, "wins": 0, "losses": 0, "rr_sum": 0.0},
+        "80_90":  {"label": "80-90% (Elevated)",       "count": 0, "wins": 0, "losses": 0, "rr_sum": 0.0},
+        "90_100": {"label": "90-100% (High Conviction)","count": 0, "wins": 0, "losses": 0, "rr_sum": 0.0},
+    }
+
+    total = len(signals)
+    for s in signals:
+        c = float(s.get("confidence", 0))
+        is_win  = s.get("result") == "WIN" or s.get("status") == "WIN"
+        is_loss = s.get("result") == "LOSS" or s.get("status") == "LOSS"
+        rr = float(s.get("risk_reward", 0))
+
+        if c >= 90:
+            key = "90_100"
+        elif c >= 80:
+            key = "80_90"
+        elif c >= 70:
+            key = "70_80"
+        else:
+            key = "60_70"
+
+        buckets[key]["count"]  += 1
+        buckets[key]["rr_sum"] += rr
+        if is_win:
+            buckets[key]["wins"] += 1
+        if is_loss:
+            buckets[key]["losses"] += 1
+
+    result: dict = {}
+    for key, b in buckets.items():
+        closed = b["wins"] + b["losses"]
+        result[key] = {
+            "label":        b["label"],
+            "count":        b["count"],
+            "pct_of_total": round(b["count"] / total * 100, 1) if total > 0 else 0,
+            "wins":         b["wins"],
+            "losses":       b["losses"],
+            "win_rate_pct": round(b["wins"] / closed * 100, 1) if closed > 0 else None,
+            "avg_rr":       round(b["rr_sum"] / b["count"], 2) if b["count"] > 0 else None,
+        }
+
+    return {
+        "lookback_days":  lookback_days,
+        "pair":           pair,
+        "total_signals":  total,
+        "buckets":        result,
+        "version":        "4.0.0",
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
     }
 
 
