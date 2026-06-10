@@ -188,6 +188,48 @@ PERFORMANCE_LOOKBACK_DAYS: int = int(os.environ.get("PERFORMANCE_LOOKBACK_DAYS",
 JOURNAL_MAX_ENTRIES: int = int(os.environ.get("JOURNAL_MAX_ENTRIES", "1000"))
 
 # ---------------------------------------------------------------------------
+# A/B Testing Framework
+# ---------------------------------------------------------------------------
+# MongoDB collection name for A/B test configurations
+AB_TEST_COLLECTION: str = os.environ.get("AB_TEST_COLLECTION", "ab_tests_v4")
+# Maximum number of concurrent active A/B tests per pair
+AB_TEST_MAX_ACTIVE_PER_PAIR: int = int(os.environ.get("AB_TEST_MAX_ACTIVE_PER_PAIR", "1"))
+# Minimum signals required before an A/B test result is considered statistically meaningful
+AB_TEST_MIN_SIGNALS: int = int(os.environ.get("AB_TEST_MIN_SIGNALS", "20"))
+
+# ---------------------------------------------------------------------------
+# Account Scaling Logic
+# ---------------------------------------------------------------------------
+# Starting account balance used as the baseline for scaling milestones
+ACCOUNT_SCALING_BASE_BALANCE: float = float(
+    os.environ.get("ACCOUNT_SCALING_BASE_BALANCE", "10000.0")
+)
+# Growth thresholds (%) that trigger a position-size increase:
+#   10% growth  → increase POSITION_SIZE_BASE_PER_1K by 10%
+#   25% growth  → increase by 25%
+#   50% growth  → increase by 50%
+ACCOUNT_SCALING_THRESHOLDS: list = [
+    {"growth_pct": 10.0,  "size_increase_pct": 10.0},
+    {"growth_pct": 25.0,  "size_increase_pct": 25.0},
+    {"growth_pct": 50.0,  "size_increase_pct": 50.0},
+]
+# Hard cap on POSITION_SIZE_BASE_PER_1K after all scaling (units per $1k)
+ACCOUNT_SCALING_MAX_BASE_PER_1K: float = float(
+    os.environ.get("ACCOUNT_SCALING_MAX_BASE_PER_1K", "50.0")
+)
+# MongoDB collection for account balance history and scaling events
+ACCOUNT_HISTORY_COLLECTION: str = os.environ.get(
+    "ACCOUNT_HISTORY_COLLECTION", "account_history_v4"
+)
+
+# ---------------------------------------------------------------------------
+# Backtest Benchmarks (Phase 2 results — used for live vs backtest comparison)
+# ---------------------------------------------------------------------------
+BACKTEST_WIN_RATE: float = float(os.environ.get("BACKTEST_WIN_RATE", "45.1"))
+BACKTEST_PROFIT_FACTOR: float = float(os.environ.get("BACKTEST_PROFIT_FACTOR", "2.17"))
+BACKTEST_AVG_RETURN_PCT: float = float(os.environ.get("BACKTEST_AVG_RETURN_PCT", "7.85"))
+
+# ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
 PORT: int = int(os.environ.get("PORT", "8002"))
