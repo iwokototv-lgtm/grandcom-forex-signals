@@ -39,17 +39,17 @@ except ValueError:
 # Trading Pairs
 # ---------------------------------------------------------------------------
 PAIRS = {
-    "XAUUSD": {
-        "symbol": "XAU/USD",
-        "decimals": 2,
-        "atr_sl": 1.5,
-        "atr_tp1": 2.0,
-        "atr_tp2": 3.5,
-        "atr_tp3": 5.0,
-        "pip_value": 0.01,
-        "min_lot": 0.01,
-        "max_lot": 10.0,
-    },
+    # "XAUUSD": {  # DISABLED — Backtest shows severe overfit (-40.60% OOS, -21.87% vs random)
+    #     "symbol": "XAU/USD",
+    #     "decimals": 2,
+    #     "atr_sl": 1.5,
+    #     "atr_tp1": 2.0,
+    #     "atr_tp2": 3.5,
+    #     "atr_tp3": 5.0,
+    #     "pip_value": 0.01,
+    #     "min_lot": 0.01,
+    #     "max_lot": 10.0,
+    # },
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
