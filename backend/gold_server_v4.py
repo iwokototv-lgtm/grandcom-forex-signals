@@ -105,6 +105,7 @@ except ValueError:
 SIGNAL_INTERVAL_MINUTES = int(os.environ.get("SIGNAL_INTERVAL_MINUTES", "2"))
 MIN_CONFIDENCE          = int(os.environ.get("MIN_CONFIDENCE", "62"))   # Raised from 60 → 62 for V4
 ACCOUNT_BALANCE         = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
+STRATEGY_MODE           = os.environ.get("STRATEGY_MODE", "price_action")  # Backtest winner: +7.85% return, 45.1% win rate
 
 # V4 Risk Management Constants
 MTF_MIN_ALIGNMENT       = float(os.environ.get("MTF_MIN_ALIGNMENT", "70.0"))   # ≥70% required
@@ -1314,6 +1315,7 @@ async def generate_signal_v4(pair: str) -> None:
                 df_4h=df,
                 df_daily=df_daily,
                 price_data=price_data if len(price_data) >= 2 else None,
+                strategy_mode=STRATEGY_MODE,
             )
             hybrid_ctx = {
                 "regime":           hybrid_result.get("regime", "UNKNOWN"),
@@ -2023,7 +2025,7 @@ async def get_hybrid_analysis(pair: str):
         raise HTTPException(status_code=503, detail="Hybrid system not available")
 
     try:
-        result = await hybrid.generate_signal(symbol=pair, df_4h=df)
+        result = await hybrid.generate_signal(symbol=pair, df_4h=df, strategy_mode=STRATEGY_MODE)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
