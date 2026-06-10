@@ -343,10 +343,14 @@ def fetch_all_timeframes(
         raw = _fetch_raw(symbol_td, tf, size, api_key)
         if raw:
             df = _raw_to_df(raw)
-            result[tf] = df if len(df) > 0 else None
-            print(f"      ✓ {len(df)} candles  "
-                  f"({df['datetime'].iloc[0].date()} → {df['datetime'].iloc[-1].date()})",
-                  flush=True)
+            if len(df) > 0:
+                result[tf] = df
+                print(f"      ✓ {len(df)} candles  "
+                      f"({df['datetime'].iloc[0].date()} → {df['datetime'].iloc[-1].date()})",
+                      flush=True)
+            else:
+                result[tf] = None
+                print(f"      ✗ No valid candles for {symbol_td}/{tf}", flush=True)
         else:
             result[tf] = None
             print(f"      ✗ No data for {symbol_td}/{tf}", flush=True)
