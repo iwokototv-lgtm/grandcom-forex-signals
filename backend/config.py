@@ -77,6 +77,15 @@ MIN_CONFIDENCE: int = int(os.environ.get("MIN_CONFIDENCE", "60"))
 MIN_SMC_SCORE: int = int(os.environ.get("MIN_SMC_SCORE", "4"))
 MIN_MTF_CONFLUENCE: int = int(os.environ.get("MIN_MTF_CONFLUENCE", "2"))
 
+# Strategy mode — controls which signal engine is active in the live system.
+# Backtest results (out-of-sample, real TwelveData):
+#   price_action   : +7.85% avg return, 45.1% win rate, 2.17 profit factor  ← WINNER
+#   macro_filtered : +0.22% avg return (breakeven)
+#   mean_reversion : -7.65% avg return (unprofitable)
+#   original       : -21.48% avg return, 23% win rate
+# Valid values: "original" | "mean_reversion" | "price_action" | "macro_filtered" | "consensus"
+STRATEGY_MODE: str = os.environ.get("STRATEGY_MODE", "price_action")
+
 # ---------------------------------------------------------------------------
 # Risk Management
 # ---------------------------------------------------------------------------
