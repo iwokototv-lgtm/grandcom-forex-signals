@@ -629,18 +629,82 @@ def _compute_split_stats(
 
 
 # ---------------------------------------------------------------------------
-# MTF slice helper
+# MTF close-time helpers  (no-lookahead guarantee)
 # ---------------------------------------------------------------------------
 
-def _slice_mtf_df(df: Optional[pd.DataFrame], current_dt: datetime, window: int = 100) -> Optional[pd.DataFrame]:
+# Timeframe durations used in the backtest
+_TF_DURATION_MINUTES: Dict[str, int] = {
+    TF_1H:     60,
+    TF_4H:     240,
+    TF_DAILY:  1440,
+    TF_WEEKLY: 10080,
+}
+
+
+def _get_bar_close_time(bar_open: datetime, timeframe: str) -> datetime:
     """
-    Return the last `window` rows of df whose datetime <= current_dt.
-    Returns None if fewer than 30 rows are available (MTF needs 30+).
+    Return the UTC close time of the bar that opened at *bar_open*.
+
+    Uses production candle_utils.get_candle_close_time() when available;
+    falls back to a simple open + duration calculation so the backtest
+    remains self-contained even without the full server stack.
+
+    Parameters
+    ----------
+    bar_open  : Bar open timestamp (UTC-aware or naive UTC).
+    timeframe : One of TF_1H, TF_4H, TF_DAILY, TF_WEEKLY.
+
+    Returns
+    -------
+    datetime — Bar close time (UTC-aware).
+    """
+    # Ensure UTC-aware
+    if bar_open.tzinfo is None:
+        bar_open = bar_open.replace(tzinfo=timezone.utc)
+
+    # Prefer the production utility (boundary-snapped, handles DST, etc.)
+    try:
+        from candle_utils import get_candle_close_time as _prod_close
+        return _prod_close(bar_open, timeframe)
+    except Exception:
+        pass
+
+    # Fallback: open + duration
+    duration_min = _TF_DURATION_MINUTES.get(timeframe.lower(), 240)
+    return bar_open + timedelta(minutes=duration_min)
+
+
+def _slice_mtf_df(
+    df: Optional[pd.DataFrame],
+    timeframe: str,
+    current_4h_close: datetime,
+    window: int = 100,
+) -> Optional[pd.DataFrame]:
+    """
+    Return the last *window* rows of *df* that are **fully closed** relative
+    to *current_4h_close*.
+
+    A bar is considered fully closed when its close time is <= current_4h_close,
+    i.e. the bar finished forming before (or exactly at) the moment the current
+    4H bar closed.  This eliminates lookahead bias from forming bars.
+
+    Parameters
+    ----------
+    df               : Full MTF DataFrame with a 'datetime' column (bar open times).
+    timeframe        : Timeframe string for the DataFrame (e.g. TF_1H, TF_DAILY).
+    current_4h_close : Close time of the current 4H bar being evaluated.
+    window           : Maximum number of rows to return.
+
+    Returns
+    -------
+    DataFrame slice, or None if fewer than 30 rows are available.
     """
     if df is None or df.empty:
         return None
-    mask = df["datetime"] <= current_dt
-    sub  = df[mask].tail(window)
+    mask = df["datetime"].apply(
+        lambda dt: _get_bar_close_time(dt, timeframe)
+    ) <= current_4h_close
+    sub = df[mask].tail(window)
     return sub if len(sub) >= 30 else None
 
 
@@ -701,23 +765,47 @@ async def _run_walkforward(
     print(f"\n  Walking forward {n_4h - WARMUP_CANDLES} candles "
           f"(split at candle {split_idx}) …", flush=True)
 
+    _first_signal_printed = False   # diagnostic flag
+
     for idx in range(WARMUP_CANDLES, n_4h - TIMEOUT_CANDLES):
-        current_dt = df_4h_full["datetime"].iloc[idx]
-        atr        = float(atr_series.iloc[idx])
+        current_dt       = df_4h_full["datetime"].iloc[idx]
+        atr              = float(atr_series.iloc[idx])
         if np.isnan(atr) or atr <= 0:
             continue
 
+        # Close time of the current 4H bar — the anchor for all MTF slices.
+        # Only bars whose close time <= current_4h_close are considered fully
+        # closed and therefore safe to use (strict no-lookahead guarantee).
+        current_4h_close = _get_bar_close_time(current_dt, TF_4H)
+
         # ── Build rolling windows ────────────────────────────────────────────
         df_4h_window    = df_4h_full.iloc[max(0, idx - ROLLING_WINDOW_4H + 1): idx + 1].copy()
-        df_daily_window = _slice_mtf_df(df_daily_full, current_dt, ROLLING_WINDOW_DAILY)
+        df_daily_window = _slice_mtf_df(df_daily_full, TF_DAILY,  current_4h_close, ROLLING_WINDOW_DAILY)
 
-        # MTF slices (no-lookahead: only data up to current_dt)
+        # MTF slices — only fully-closed bars (close_time <= current_4h_close)
         mtf_dfs = {
-            "1h":     _slice_mtf_df(df_1h_full,    current_dt, 100),
+            "1h":     _slice_mtf_df(df_1h_full,    TF_1H,    current_4h_close, 100),
             "4h":     df_4h_window,
             "1day":   df_daily_window,
-            "1week":  _slice_mtf_df(df_weekly_full, current_dt, 52),
+            "1week":  _slice_mtf_df(df_weekly_full, TF_WEEKLY, current_4h_close, 52),
         }
+
+        # ── Diagnostic: MTF slice proof every 100 candles ────────────────────
+        if (idx - WARMUP_CANDLES) % 100 == 0:
+            for tf_label, tf_key in [("1h", TF_1H), ("1day", TF_DAILY), ("1week", TF_WEEKLY)]:
+                tf_df = mtf_dfs.get(tf_label)
+                if tf_df is not None and not tf_df.empty:
+                    last_bar_dt   = tf_df["datetime"].iloc[-1]
+                    bar_close_t   = _get_bar_close_time(last_bar_dt, tf_key)
+                    fully_closed  = bar_close_t <= current_4h_close
+                    print(
+                        f"  [MTF proof idx={idx}] {tf_label}: "
+                        f"last_dt={last_bar_dt.strftime('%Y-%m-%d %H:%M')}  "
+                        f"close_time={bar_close_t.strftime('%Y-%m-%d %H:%M')}  "
+                        f"4h_close={current_4h_close.strftime('%Y-%m-%d %H:%M')}  "
+                        f"fully_closed={'✅' if fully_closed else '❌ LOOKAHEAD'}",
+                        flush=True,
+                    )
 
         # ── Call production signal ───────────────────────────────────────────
         try:
@@ -765,6 +853,21 @@ async def _run_walkforward(
 
         result.signals_used += 1
         entry = float(df_4h_full["close"].iloc[idx])
+
+        # ── Diagnostic: first signal — print Correlation Engine asset count ──
+        if not _first_signal_printed:
+            _first_signal_printed = True
+            try:
+                ce = getattr(system, "correlation_engine", None)
+                asset_count = len(getattr(ce, "assets", [])) if ce is not None else "N/A"
+                print(
+                    f"  [First signal] idx={idx}  {signal} @ {entry:.2f}  "
+                    f"conf={confidence:.1f}%  "
+                    f"Correlation Engine assets={asset_count}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
         # ── Build TP / SL levels ─────────────────────────────────────────────
         if signal == "BUY":
