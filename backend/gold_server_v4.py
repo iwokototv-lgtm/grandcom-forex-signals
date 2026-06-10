@@ -48,35 +48,64 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # V4.1 Safety Modules — candle-close confirmation, freshness guard, trade mgmt
 # ---------------------------------------------------------------------------
+# NOTE: Each import is wrapped in a broad except Exception (not just
+# ImportError) so that any module-level crash — including transitive
+# dependency failures, NameError, AttributeError, or constructor errors —
+# is caught here rather than silently killing the process before uvicorn
+# starts.  The full traceback is logged so the broken module is identifiable
+# from startup logs.  All flags default to False; features degrade gracefully.
+# ---------------------------------------------------------------------------
+_logger_bootstrap = logging.getLogger("gold_server_v4")
+
+# -- candle_utils ------------------------------------------------------------
+_CANDLE_UTILS_AVAILABLE = False
 try:
     from candle_utils import is_candle_closed
     _CANDLE_UTILS_AVAILABLE = True
-except ImportError:
-    _CANDLE_UTILS_AVAILABLE = False
-    logger_bootstrap = logging.getLogger("gold_server_v4")
-    logger_bootstrap.warning("candle_utils not available — candle-close check disabled")
+    _logger_bootstrap.info("candle_utils loaded OK")
+except Exception as _e:
+    _logger_bootstrap.warning(
+        "candle_utils failed to import — candle-close check disabled. "
+        "Error: %s", _e, exc_info=True
+    )
 
+# -- data_freshness ----------------------------------------------------------
+_freshness_guard = None  # type: ignore
+_FRESHNESS_GUARD_AVAILABLE = False
 try:
     from data_freshness import DataFreshnessGuard
     _freshness_guard = DataFreshnessGuard()
     _FRESHNESS_GUARD_AVAILABLE = True
-except ImportError:
-    _freshness_guard = None  # type: ignore
-    _FRESHNESS_GUARD_AVAILABLE = False
+    _logger_bootstrap.info("data_freshness loaded OK")
+except Exception as _e:
+    _logger_bootstrap.warning(
+        "data_freshness failed to import — freshness guard disabled. "
+        "Error: %s", _e, exc_info=True
+    )
 
+# -- trade_manager -----------------------------------------------------------
+_TRADE_MANAGER_AVAILABLE = False
 try:
     from trade_manager import TradeManager, get_trade_manager
     _TRADE_MANAGER_AVAILABLE = True
-except ImportError:
-    _TRADE_MANAGER_AVAILABLE = False
+    _logger_bootstrap.info("trade_manager loaded OK")
+except Exception as _e:
+    _logger_bootstrap.warning(
+        "trade_manager failed to import — trade management disabled. "
+        "Error: %s", _e, exc_info=True
+    )
 
+# -- signal_deduplicator -----------------------------------------------------
+_DEDUPLICATOR_AVAILABLE = False
 try:
     from signal_deduplicator import SignalDeduplicator
     _DEDUPLICATOR_AVAILABLE = True
-except ImportError:
-    _DEDUPLICATOR_AVAILABLE = False
-    logger_bootstrap = logging.getLogger("gold_server_v4")
-    logger_bootstrap.warning("signal_deduplicator not available — deduplication disabled")
+    _logger_bootstrap.info("signal_deduplicator loaded OK")
+except Exception as _e:
+    _logger_bootstrap.warning(
+        "signal_deduplicator failed to import — deduplication disabled. "
+        "Error: %s", _e, exc_info=True
+    )
 
 # ---------------------------------------------------------------------------
 # Logging
