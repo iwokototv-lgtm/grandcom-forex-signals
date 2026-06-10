@@ -164,6 +164,19 @@ TF_1H     = "1h"
 TF_DAILY  = "1day"
 TF_WEEKLY = "1week"
 
+# Correlation assets fetched alongside primary symbols for USD-regime filtering.
+# XAUUSD is highly correlated with DXY; without these the correlation engine
+# receives price_data=None and is completely disabled.
+CORRELATION_ASSETS = ["DXY", "EURUSD", "GBPUSD", "USDJPY"]
+
+# TwelveData symbol strings for correlation assets (as accepted by the API)
+_CORR_SYMBOL_MAP: Dict[str, str] = {
+    "DXY":    "DXY",
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
+}
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -355,6 +368,53 @@ def fetch_all_timeframes(
             result[tf] = None
             print(f"      ✗ No data for {symbol_td}/{tf}", flush=True)
         time.sleep(rate_limit_sleep)
+    return result
+
+
+def fetch_correlation_assets(
+    api_key: str,
+    outputsize: int = FETCH_OUTPUTSIZE,
+    rate_limit_sleep: float = 1.2,
+) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    Fetch 4H candles for DXY, EURUSD, GBPUSD, USDJPY.
+
+    These are used to build the price_data dict passed to generate_signal()
+    so the correlation engine can filter signals based on USD-regime changes.
+    Only 4H is fetched (matching the primary signal timeframe) to keep the
+    backtest fast.
+
+    Returns a dict keyed by short symbol name (e.g. "DXY", "EURUSD").
+    """
+    result: Dict[str, Optional[pd.DataFrame]] = {}
+    print(f"\n  Fetching correlation assets ({', '.join(CORRELATION_ASSETS)}) …", flush=True)
+    for short_name in CORRELATION_ASSETS:
+        td_symbol = _CORR_SYMBOL_MAP[short_name]
+        print(f"    → Fetching {outputsize} {TF_4H} candles for {td_symbol} …", flush=True)
+        raw = _fetch_raw(td_symbol, TF_4H, outputsize, api_key)
+        if raw:
+            df = _raw_to_df(raw)
+            if len(df) > 0:
+                result[short_name] = df
+                print(
+                    f"      ✓ {len(df)} candles  "
+                    f"({df['datetime'].iloc[0].date()} → {df['datetime'].iloc[-1].date()})",
+                    flush=True,
+                )
+            else:
+                result[short_name] = None
+                print(f"      ✗ No valid candles for {td_symbol}/{TF_4H}", flush=True)
+        else:
+            result[short_name] = None
+            print(f"      ✗ No data for {td_symbol}/{TF_4H}", flush=True)
+        time.sleep(rate_limit_sleep)
+
+    fetched = [k for k, v in result.items() if v is not None]
+    print(
+        f"  Correlation assets fetched: {len(fetched)}/{len(CORRELATION_ASSETS)}"
+        + (f"  ({', '.join(fetched)})" if fetched else "  (none — correlation engine will be disabled)"),
+        flush=True,
+    )
     return result
 
 
@@ -722,9 +782,18 @@ async def _run_walkforward(
     tfs: Dict[str, Optional[pd.DataFrame]],
     system: "HybridPortfolioSystemV3",
     rng: random.Random,
+    corr_dfs: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
 ) -> PairResult:
     """
     Walk forward one 4H candle at a time and call the production signal.
+
+    Parameters
+    ----------
+    corr_dfs : Optional dict of correlation asset DataFrames keyed by short
+               symbol name (e.g. "DXY", "EURUSD").  When provided, a
+               price_data dict is built at each step and passed to
+               generate_signal() so the correlation engine can filter
+               signals based on USD-regime changes.
 
     Returns a PairResult with all trades and split statistics.
     """
@@ -811,6 +880,31 @@ async def _run_walkforward(
                         flush=True,
                     )
 
+        # ── Build price_data for correlation engine ──────────────────────────
+        # Construct a dict of close-price Series aligned to the current bar.
+        # The primary symbol is always included; correlation assets are sliced
+        # to only include candles whose datetime <= current bar's datetime so
+        # there is no lookahead bias.
+        price_data: Dict[str, pd.Series] = {}
+
+        # Primary symbol — use the rolling 4H window already built above
+        if len(df_4h_window) > 0:
+            price_data[pair] = df_4h_window["close"].reset_index(drop=True)
+
+        # Correlation assets — align by datetime to avoid lookahead
+        if corr_dfs:
+            for corr_symbol, corr_df in corr_dfs.items():
+                if corr_df is None or len(corr_df) == 0:
+                    continue
+                # Keep only candles whose datetime <= current 4H bar datetime
+                mask = corr_df["datetime"] <= current_dt
+                aligned = corr_df.loc[mask, "close"]
+                if len(aligned) > 0:
+                    price_data[corr_symbol] = aligned.reset_index(drop=True)
+
+        # Only pass price_data when we have the primary symbol + ≥1 corr asset
+        _price_data_arg = price_data if len(price_data) >= 2 else None
+
         # ── Call production signal ───────────────────────────────────────────
         try:
             # Patch MTF confirmation to use pre-fetched data (no live API calls)
@@ -832,6 +926,7 @@ async def _run_walkforward(
                     symbol=pair,
                     df_4h=df_4h_window,
                     df_daily=df_daily_window,
+                    price_data=_price_data_arg,
                 ),
                 timeout=15.0,
             )
@@ -864,10 +959,14 @@ async def _run_walkforward(
             try:
                 ce = getattr(system, "correlation_engine", None)
                 asset_count = len(getattr(ce, "assets", [])) if ce is not None else "N/A"
+                corr_keys = [k for k in price_data if k != pair]
                 print(
                     f"  [First signal] idx={idx}  {signal} @ {entry:.2f}  "
                     f"conf={confidence:.1f}%  "
-                    f"Correlation Engine assets={asset_count}",
+                    f"Correlation Engine assets={asset_count}  "
+                    f"price_data keys={list(price_data.keys())}  "
+                    f"corr_assets_in_price_data={len(corr_keys)}/{len(CORRELATION_ASSETS)}"
+                    + (f"  ({', '.join(corr_keys)})" if corr_keys else "  (none — engine disabled)"),
                     flush=True,
                 )
             except Exception:
@@ -1303,6 +1402,24 @@ async def _main_async() -> None:
     system = HybridPortfolioSystemV3(account_balance=ACCOUNT_BALANCE)
     rng    = random.Random(42)   # Fixed seed for reproducible random baseline
 
+    # ── Fetch correlation assets once (shared across all pairs) ─────────────
+    # DXY, EURUSD, GBPUSD, USDJPY are fetched at 4H so the correlation engine
+    # can filter XAUUSD signals based on USD-regime changes.  Fetching once
+    # avoids redundant API calls when multiple pairs are backtested.
+    print(f"\n{'─'*72}", flush=True)
+    corr_dfs = fetch_correlation_assets(
+        api_key=api_key,
+        outputsize=FETCH_OUTPUTSIZE,
+        rate_limit_sleep=1.2,
+    )
+    n_corr_fetched = sum(1 for v in corr_dfs.values() if v is not None)
+    print(
+        f"\n  Correlation engine status: "
+        f"{n_corr_fetched}/{len(CORRELATION_ASSETS)} assets available"
+        + (" — engine ENABLED ✅" if n_corr_fetched > 0 else " — engine DISABLED ⚠️"),
+        flush=True,
+    )
+
     all_results: List[PairResult] = []
 
     for pair, cfg in PAIRS.items():
@@ -1323,7 +1440,7 @@ async def _main_async() -> None:
             continue
 
         print(f"\n  Running walk-forward backtest …", flush=True)
-        result = await _run_walkforward(pair, cfg, tfs, system, rng)
+        result = await _run_walkforward(pair, cfg, tfs, system, rng, corr_dfs=corr_dfs)
         all_results.append(result)
 
         print_pair_report(result)
