@@ -104,7 +104,9 @@ except ValueError:
 
 SIGNAL_INTERVAL_MINUTES = int(os.environ.get("SIGNAL_INTERVAL_MINUTES", "2"))
 MIN_CONFIDENCE          = int(os.environ.get("MIN_CONFIDENCE", "62"))   # Raised from 60 → 62 for V4
-ACCOUNT_BALANCE         = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
+# ACCOUNT_BALANCE reads from ACCOUNT_BALANCE first, then falls back to DEFAULT_ACCOUNT_BALANCE.
+# Set ACCOUNT_BALANCE env var to reflect the live account size for accurate position sizing.
+ACCOUNT_BALANCE         = float(os.environ.get("ACCOUNT_BALANCE", os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0")))
 STRATEGY_MODE           = os.environ.get("STRATEGY_MODE", "price_action")  # Backtest winner: +7.85% return, 45.1% win rate
 
 # V4 Risk Management Constants
@@ -114,6 +116,38 @@ TRAILING_ATR_MULT       = float(os.environ.get("TRAILING_ATR_MULT", "1.0"))    #
 RETRAIN_INTERVAL_HOURS  = int(os.environ.get("RETRAIN_INTERVAL_HOURS", "24"))  # 24-48 h full retrain
 RETRAIN_SYNC_HOURS      = int(os.environ.get("RETRAIN_SYNC_HOURS", "6"))       # 6 h MongoDB win-rate sync
 ENABLE_TRAILING_STOP    = os.environ.get("ENABLE_TRAILING_STOP", "true").lower() in ("1", "true", "yes")
+
+# ---------------------------------------------------------------------------
+# Risk Management — Drawdown & Daily Loss Controls
+# ---------------------------------------------------------------------------
+MAX_TOTAL_DRAWDOWN_PCT  = float(os.environ.get("MAX_TOTAL_DRAWDOWN_PCT", "15.0"))  # Hard stop: 15% of account
+MAX_DAILY_LOSS_PCT      = float(os.environ.get("MAX_DAILY_DRAWDOWN_PCT", "5.0"))   # Daily limit: 5% of account
+MAX_CONCURRENT_PER_PAIR = int(os.environ.get("MAX_CONCURRENT_POSITIONS_PER_PAIR", "5"))
+SL_ATR_MULTIPLIER       = float(os.environ.get("SL_ATR_MULTIPLIER", "2.0"))        # SL at 2x ATR from entry
+TRAILING_PROFIT_TRIGGER = float(os.environ.get("TRAILING_STOP_PROFIT_TRIGGER_PCT", "1.0"))  # Activate trailing at +1%
+TRAILING_SL_ATR_MULT    = float(os.environ.get("TRAILING_STOP_ATR_MULT", "0.5"))   # Move SL by 0.5x ATR
+
+# ---------------------------------------------------------------------------
+# Confidence-Based Position Sizing
+# ---------------------------------------------------------------------------
+# Base: 1 unit per $1,000 account balance
+# Scale factor applied on top of base size based on signal confidence:
+#   60-70% → 0.5x  |  70-80% → 1.0x  |  80-90% → 1.5x  |  90-100% → 2.0x
+POSITION_SIZE_BASE_PER_1K = float(os.environ.get("POSITION_SIZE_BASE_PER_1K", "1.0"))
+POSITION_SCALE_60_70      = float(os.environ.get("POSITION_SCALE_60_70", "0.5"))
+POSITION_SCALE_70_80      = float(os.environ.get("POSITION_SCALE_70_80", "1.0"))
+POSITION_SCALE_80_90      = float(os.environ.get("POSITION_SCALE_80_90", "1.5"))
+POSITION_SCALE_90_100     = float(os.environ.get("POSITION_SCALE_90_100", "2.0"))
+POSITION_SIZE_MAX_UNITS   = float(os.environ.get("POSITION_SIZE_MAX_UNITS", "10.0"))  # Hard cap
+POSITION_SIZE_MIN_UNITS   = float(os.environ.get("POSITION_SIZE_MIN_UNITS", "0.1"))   # Floor
+
+# ---------------------------------------------------------------------------
+# Price Action Engine Thresholds (env-var configurable for A/B testing)
+# ---------------------------------------------------------------------------
+# Per-pair overrides: PRICE_ACTION_MOMENTUM_THRESHOLD_XAUUSD, etc.
+PRICE_ACTION_MOMENTUM_THRESHOLD  = float(os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD", "0.65"))
+PRICE_ACTION_VOLATILITY_THRESHOLD = float(os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", "0.55"))
+PRICE_ACTION_CONFLUENCE_WEIGHT   = float(os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", "0.40"))
 
 # V4 Advanced Position Sizing — Volatility Regime Constants
 # Regimes: SQUEEZE → NORMAL → EXPANDING → HIGH_EXPANDING → EXTREME_HIGH
@@ -517,6 +551,312 @@ async def maybe_retrain_model() -> dict:
             logger.error(f"❌ V4 retraining failed: {exc}", exc_info=True)
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Live Risk Manager — Drawdown & Daily Loss Controls
+# ---------------------------------------------------------------------------
+class LiveRiskManager:
+    """
+    Tracks cumulative P&L and enforces hard risk limits:
+
+      - Max total drawdown : 15% of account balance (hard stop)
+      - Daily loss limit   : 5% of account balance (resets at UTC midnight)
+      - Max concurrent positions per pair : 5
+
+    When a limit is breached, ``is_trading_allowed()`` returns False and
+    all new signal generation is paused until the condition clears or the
+    daily counter resets.
+
+    Thread-safe via asyncio.Lock for concurrent scheduler access.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        # Cumulative P&L tracking (in account currency)
+        self._total_pnl: float = 0.0          # Lifetime P&L since last restart
+        self._daily_pnl: float = 0.0          # P&L since last UTC midnight reset
+        self._daily_reset_date: str = ""       # ISO date of last daily reset
+        # Per-pair open position count
+        self._open_positions: dict[str, int] = {}
+        # Breach flags
+        self._drawdown_breached: bool = False
+        self._daily_limit_breached: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def is_trading_allowed(self, pair: str) -> tuple[bool, str]:
+        """
+        Return (allowed, reason).  Checks:
+          1. Total drawdown ≤ MAX_TOTAL_DRAWDOWN_PCT
+          2. Daily loss ≤ MAX_DAILY_LOSS_PCT
+          3. Open positions for pair < MAX_CONCURRENT_PER_PAIR
+        """
+        self._maybe_reset_daily()
+
+        account = ACCOUNT_BALANCE
+        max_total_loss = account * (MAX_TOTAL_DRAWDOWN_PCT / 100.0)
+        max_daily_loss = account * (MAX_DAILY_LOSS_PCT / 100.0)
+
+        if self._total_pnl <= -max_total_loss:
+            self._drawdown_breached = True
+            return False, (
+                f"MAX_DRAWDOWN_BREACHED: cumulative_loss=${abs(self._total_pnl):.2f} "
+                f">= {MAX_TOTAL_DRAWDOWN_PCT}% of ${account:.0f}"
+            )
+
+        if self._daily_pnl <= -max_daily_loss:
+            self._daily_limit_breached = True
+            return False, (
+                f"DAILY_LOSS_LIMIT_BREACHED: daily_loss=${abs(self._daily_pnl):.2f} "
+                f">= {MAX_DAILY_LOSS_PCT}% of ${account:.0f}"
+            )
+
+        open_count = self._open_positions.get(pair, 0)
+        if open_count >= MAX_CONCURRENT_PER_PAIR:
+            return False, (
+                f"MAX_CONCURRENT_POSITIONS: {pair} already has "
+                f"{open_count}/{MAX_CONCURRENT_PER_PAIR} open positions"
+            )
+
+        return True, "OK"
+
+    def record_trade_close(self, pair: str, pnl: float) -> None:
+        """Record a closed trade's P&L and update counters."""
+        self._maybe_reset_daily()
+        self._total_pnl += pnl
+        self._daily_pnl += pnl
+        # Decrement open position count (floor at 0)
+        if pair in self._open_positions:
+            self._open_positions[pair] = max(0, self._open_positions[pair] - 1)
+        logger.info(
+            f"[RiskManager] Trade closed: pair={pair} pnl=${pnl:+.2f} "
+            f"daily_pnl=${self._daily_pnl:+.2f} total_pnl=${self._total_pnl:+.2f}"
+        )
+
+    def record_trade_open(self, pair: str) -> None:
+        """Increment open position count when a new trade is opened."""
+        self._open_positions[pair] = self._open_positions.get(pair, 0) + 1
+
+    def get_state(self) -> dict:
+        """Return a snapshot of current risk state for logging/API."""
+        self._maybe_reset_daily()
+        account = ACCOUNT_BALANCE
+        return {
+            "account_balance":        account,
+            "total_pnl":              round(self._total_pnl, 2),
+            "daily_pnl":              round(self._daily_pnl, 2),
+            "total_drawdown_pct":     round(self._total_pnl / account * 100, 2) if account else 0.0,
+            "daily_loss_pct":         round(self._daily_pnl / account * 100, 2) if account else 0.0,
+            "max_total_drawdown_pct": MAX_TOTAL_DRAWDOWN_PCT,
+            "max_daily_loss_pct":     MAX_DAILY_LOSS_PCT,
+            "drawdown_breached":      self._drawdown_breached,
+            "daily_limit_breached":   self._daily_limit_breached,
+            "open_positions":         dict(self._open_positions),
+            "max_concurrent_per_pair": MAX_CONCURRENT_PER_PAIR,
+            "daily_reset_date":       self._daily_reset_date,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _maybe_reset_daily(self) -> None:
+        """Reset daily P&L counter at UTC midnight."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self._daily_reset_date:
+            if self._daily_reset_date:  # Not the first call
+                logger.info(
+                    f"[RiskManager] Daily reset — previous day P&L: "
+                    f"${self._daily_pnl:+.2f} | resetting for {today}"
+                )
+            self._daily_pnl = 0.0
+            self._daily_limit_breached = False
+            self._daily_reset_date = today
+
+
+# Module-level singleton
+_live_risk_manager = LiveRiskManager()
+
+
+def get_live_risk_manager() -> LiveRiskManager:
+    return _live_risk_manager
+
+
+# ---------------------------------------------------------------------------
+# Confidence-Based Position Sizing
+# ---------------------------------------------------------------------------
+def compute_confidence_position_size(
+    confidence: float,
+    account_balance: float = ACCOUNT_BALANCE,
+) -> dict:
+    """
+    Compute position size (units) based on account balance and signal confidence.
+
+    Formula:
+      base_units = account_balance / 1000 * POSITION_SIZE_BASE_PER_1K
+      scale_factor = confidence tier (0.5x / 1.0x / 1.5x / 2.0x)
+      units = clamp(base_units * scale_factor, MIN_UNITS, MAX_UNITS)
+
+    Confidence tiers:
+      60-70%  → 0.5x  (cautious — low conviction)
+      70-80%  → 1.0x  (baseline)
+      80-90%  → 1.5x  (elevated conviction)
+      90-100% → 2.0x  (high conviction)
+
+    Returns a dict with units, scale_factor, base_units, and tier label.
+    """
+    base_units = (account_balance / 1000.0) * POSITION_SIZE_BASE_PER_1K
+
+    if confidence >= 90.0:
+        scale_factor = POSITION_SCALE_90_100
+        tier = "HIGH_CONVICTION_90_100"
+    elif confidence >= 80.0:
+        scale_factor = POSITION_SCALE_80_90
+        tier = "ELEVATED_80_90"
+    elif confidence >= 70.0:
+        scale_factor = POSITION_SCALE_70_80
+        tier = "BASELINE_70_80"
+    else:
+        scale_factor = POSITION_SCALE_60_70
+        tier = "CAUTIOUS_60_70"
+
+    raw_units = base_units * scale_factor
+    units = round(
+        max(POSITION_SIZE_MIN_UNITS, min(POSITION_SIZE_MAX_UNITS, raw_units)),
+        2,
+    )
+    capped = raw_units > POSITION_SIZE_MAX_UNITS or raw_units < POSITION_SIZE_MIN_UNITS
+
+    logger.info(
+        f"[ConfidenceSizing] confidence={confidence:.1f}% tier={tier} "
+        f"base={base_units:.2f} scale={scale_factor}x → units={units} "
+        f"(capped={capped})"
+    )
+
+    return {
+        "units":          units,
+        "base_units":     round(base_units, 2),
+        "scale_factor":   scale_factor,
+        "tier":           tier,
+        "confidence":     round(confidence, 1),
+        "account_balance": account_balance,
+        "capped":         capped,
+        "max_units":      POSITION_SIZE_MAX_UNITS,
+        "min_units":      POSITION_SIZE_MIN_UNITS,
+    }
+
+
+# ---------------------------------------------------------------------------
+# JSON Signal Logger — structured log for MongoDB storage & monitoring
+# ---------------------------------------------------------------------------
+def log_signal_json(
+    pair: str,
+    signal_type: str,
+    confidence: float,
+    entry: float,
+    tps: list,
+    sl: float,
+    rr: float,
+    pos_size: dict,
+    conf_sizing: dict,
+    be_ts: dict,
+    regime: str,
+    smc_score: int,
+    mtf_alignment: float,
+    mtf_direction: str,
+    strategy_mode: str,
+    pa_thresholds: dict,
+    risk_state: dict,
+    analysis: str,
+) -> dict:
+    """
+    Emit a structured JSON log entry for every generated signal.
+
+    This record is:
+      - Logged at INFO level (JSON string) for log aggregators
+      - Returned as a dict for MongoDB storage alongside the signal document
+      - Designed for easy parsing, dashboarding, and performance analysis
+
+    Fields cover all four monitoring dimensions:
+      1. Signal identity   — timestamp, pair, direction, confidence
+      2. Price levels      — entry, TP1/2/3, SL, R:R
+      3. Position sizing   — units (confidence-based + vol-adjusted), risk $
+      4. Risk context      — regime, drawdown state, PA thresholds used
+    """
+    now = datetime.now(timezone.utc)
+    record = {
+        # ── Signal identity ──────────────────────────────────────────
+        "log_type":         "SIGNAL_GENERATED",
+        "timestamp":        now.isoformat(),
+        "timestamp_unix":   int(now.timestamp()),
+        "pair":             pair,
+        "direction":        signal_type,          # "BUY" or "SELL"
+        "confidence_pct":   round(confidence, 1),
+        "strategy_mode":    strategy_mode,
+
+        # ── Price levels ─────────────────────────────────────────────
+        "entry_price":      entry,
+        "tp1":              tps[0] if len(tps) > 0 else None,
+        "tp2":              tps[1] if len(tps) > 1 else None,
+        "tp3":              tps[2] if len(tps) > 2 else None,
+        "sl_price":         sl,
+        "risk_reward":      rr,
+
+        # ── Breakeven / trailing stop levels ─────────────────────────
+        "be_trigger":       be_ts.get("be_trigger"),
+        "be_sl":            be_ts.get("be_sl"),
+        "ts_start":         be_ts.get("ts_start"),
+        "ts_distance":      be_ts.get("ts_distance"),
+        "ts_enabled":       be_ts.get("ts_enabled"),
+
+        # ── Position sizing (confidence-based) ───────────────────────
+        "position_units":   conf_sizing.get("units"),
+        "position_tier":    conf_sizing.get("tier"),
+        "position_scale":   conf_sizing.get("scale_factor"),
+        "position_base":    conf_sizing.get("base_units"),
+
+        # ── Position sizing (vol-adjusted, from advanced sizing) ──────
+        "lots":             pos_size.get("lots"),
+        "dollar_risk":      pos_size.get("dollar_risk"),
+        "risk_pct":         pos_size.get("risk_pct"),
+        "vol_regime":       pos_size.get("vol_regime"),
+        "vol_regime_mult":  pos_size.get("vol_regime_mult"),
+        "conf_mult":        pos_size.get("conf_mult"),
+        "stop_distance":    pos_size.get("stop_distance"),
+
+        # ── Market context ────────────────────────────────────────────
+        "regime":           regime,
+        "smc_score":        smc_score,
+        "mtf_alignment_pct": round(mtf_alignment, 1),
+        "mtf_direction":    mtf_direction,
+
+        # ── Price action thresholds used (for A/B analysis) ───────────
+        "pa_momentum_threshold":   pa_thresholds.get("momentum_threshold"),
+        "pa_volatility_threshold": pa_thresholds.get("volatility_threshold"),
+        "pa_confluence_weight":    pa_thresholds.get("confluence_weight"),
+
+        # ── Risk management state at signal time ──────────────────────
+        "account_balance":        risk_state.get("account_balance"),
+        "daily_pnl":              risk_state.get("daily_pnl"),
+        "total_pnl":              risk_state.get("total_pnl"),
+        "daily_loss_pct":         risk_state.get("daily_loss_pct"),
+        "total_drawdown_pct":     risk_state.get("total_drawdown_pct"),
+        "open_positions_pair":    risk_state.get("open_positions", {}).get(pair, 0),
+
+        # ── Analysis text ─────────────────────────────────────────────
+        "analysis":         analysis,
+
+        # ── System metadata ───────────────────────────────────────────
+        "system_version":   "4.0.0",
+        "signal_engine":    "grandcom_gold_v4",
+    }
+
+    # Emit as a single-line JSON string so log aggregators can parse it
+    logger.info(f"SIGNAL_JSON {json.dumps(record, default=str)}")
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -1267,6 +1607,16 @@ async def generate_signal_v4(pair: str) -> None:
     #     direction).
     _candle_ts: str = str(df.iloc[-1].get("datetime", df.iloc[-1].name))
 
+    # 1d. Risk management gate — check drawdown and daily loss limits BEFORE
+    #     any expensive API calls.  Pauses trading automatically if limits hit.
+    _risk_mgr = get_live_risk_manager()
+    _trading_allowed, _risk_reason = _risk_mgr.is_trading_allowed(pair)
+    if not _trading_allowed:
+        logger.warning(
+            f"[{pair}] 🛑 Risk gate BLOCKED — {_risk_reason} — signal suppressed"
+        )
+        return
+
     # 2. Indicators
     ind = compute_indicators(df, cfg["decimals"])
     if ind is None:
@@ -1433,6 +1783,54 @@ async def generate_signal_v4(pair: str) -> None:
     )
     lots = pos_size.get("lots", 0.01)
 
+    # 11b. Confidence-based position sizing (scales units by conviction tier)
+    conf_sizing = compute_confidence_position_size(
+        confidence=confidence,
+        account_balance=ACCOUNT_BALANCE,
+    )
+
+    # 11c. Collect price action thresholds used (for A/B analysis in signal logs)
+    _pair_upper = pair.upper()
+    _pa_thresholds = {
+        "momentum_threshold":  float(os.environ.get(
+            f"PRICE_ACTION_MOMENTUM_THRESHOLD_{_pair_upper}",
+            os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD", str(PRICE_ACTION_MOMENTUM_THRESHOLD)),
+        )),
+        "volatility_threshold": float(os.environ.get(
+            f"PRICE_ACTION_VOLATILITY_THRESHOLD_{_pair_upper}",
+            os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", str(PRICE_ACTION_VOLATILITY_THRESHOLD)),
+        )),
+        "confluence_weight": float(os.environ.get(
+            f"PRICE_ACTION_CONFLUENCE_WEIGHT_{_pair_upper}",
+            os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", str(PRICE_ACTION_CONFLUENCE_WEIGHT)),
+        )),
+    }
+
+    # 11d. Capture risk state snapshot at signal time
+    _risk_state = _risk_mgr.get_state()
+
+    # 11e. Emit structured JSON signal log (for monitoring, MongoDB, and analysis)
+    _signal_log = log_signal_json(
+        pair=pair,
+        signal_type=signal_type,
+        confidence=confidence,
+        entry=entry,
+        tps=tps,
+        sl=sl,
+        rr=rr,
+        pos_size=pos_size,
+        conf_sizing=conf_sizing,
+        be_ts=be_ts,
+        regime=hybrid_ctx.get("regime", "UNKNOWN"),
+        smc_score=hybrid_ctx.get("smc_score", 0),
+        mtf_alignment=mtf_ctx.get("alignment_score", 0),
+        mtf_direction=mtf_ctx.get("dominant_direction", "NEUTRAL"),
+        strategy_mode=STRATEGY_MODE,
+        pa_thresholds=_pa_thresholds,
+        risk_state=_risk_state,
+        analysis=analysis,
+    )
+
     # 12. Store in MongoDB (V4 collection)
     db = get_db()
     if db is not None:
@@ -1465,7 +1863,7 @@ async def generate_signal_v4(pair: str) -> None:
                 "ts_start":         be_ts["ts_start"],
                 "ts_distance":      be_ts["ts_distance"],
                 "ts_enabled":       be_ts["ts_enabled"],
-                # V4 Position sizing
+                # V4 Position sizing (vol-adjusted)
                 "lots":             lots,
                 "dollar_risk":      pos_size.get("dollar_risk", 0),
                 "risk_pct":         pos_size.get("risk_pct", 0),
@@ -1473,7 +1871,21 @@ async def generate_signal_v4(pair: str) -> None:
                 "vol_regime_mult":  pos_size.get("vol_regime_mult", 1.0),
                 "conf_mult":        pos_size.get("conf_mult", 1.0),
                 "hard_cap_applied": pos_size.get("hard_cap_applied", False),
+                # Confidence-based sizing
+                "position_units":   conf_sizing.get("units"),
+                "position_tier":    conf_sizing.get("tier"),
+                "position_scale":   conf_sizing.get("scale_factor"),
+                # Price action thresholds used
+                "pa_momentum_threshold":   _pa_thresholds["momentum_threshold"],
+                "pa_volatility_threshold": _pa_thresholds["volatility_threshold"],
+                "pa_confluence_weight":    _pa_thresholds["confluence_weight"],
+                # Risk state at signal time
+                "risk_daily_pnl":          _risk_state.get("daily_pnl"),
+                "risk_total_pnl":          _risk_state.get("total_pnl"),
+                "risk_daily_loss_pct":     _risk_state.get("daily_loss_pct"),
+                "risk_total_drawdown_pct": _risk_state.get("total_drawdown_pct"),
                 # Meta
+                "strategy_mode":    STRATEGY_MODE,
                 "system_version":   "4.0.0",
                 "created_at":       datetime.now(timezone.utc),
             }
@@ -1484,6 +1896,9 @@ async def generate_signal_v4(pair: str) -> None:
             if _TRADE_MANAGER_AVAILABLE:
                 trade_doc = {**doc, "indicators": ind}
                 get_trade_manager().register_new_trade(str(result.inserted_id), trade_doc)
+
+            # Update risk manager: increment open position count for this pair
+            _risk_mgr.record_trade_open(pair)
 
             # V4.2 Mark this (candle, pair, direction) as signalled so
             # subsequent scheduler runs within the same 4H window are
@@ -1863,6 +2278,7 @@ async def health():
         },
         "v4_metrics":          _v4_metrics,
         "trade_manager":       tm_metrics,
+        "risk_manager":        get_live_risk_manager().get_state(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2379,6 +2795,52 @@ async def get_open_trades(pair: Optional[str] = None):
         "pair":    pair,
         "version": "4.1.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 19: V4 Risk Manager State
+# ---------------------------------------------------------------------------
+@app.get("/api/v4/risk")
+async def get_risk_state():
+    """
+    Return the current LiveRiskManager state.
+
+    Shows cumulative P&L, daily P&L, drawdown percentages, open position
+    counts per pair, and whether any risk limits have been breached.
+
+    Use this endpoint to monitor live risk exposure and verify that the
+    automatic trading pause (max drawdown / daily loss) is working correctly.
+    """
+    risk_mgr = get_live_risk_manager()
+    state = risk_mgr.get_state()
+    return {
+        "version":   "4.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **state,
+        "limits": {
+            "max_total_drawdown_pct":  MAX_TOTAL_DRAWDOWN_PCT,
+            "max_daily_loss_pct":      MAX_DAILY_LOSS_PCT,
+            "max_concurrent_per_pair": MAX_CONCURRENT_PER_PAIR,
+            "sl_atr_multiplier":       SL_ATR_MULTIPLIER,
+            "trailing_profit_trigger_pct": TRAILING_PROFIT_TRIGGER,
+            "trailing_sl_atr_mult":    TRAILING_SL_ATR_MULT,
+        },
+        "position_sizing": {
+            "account_balance":       ACCOUNT_BALANCE,
+            "base_per_1k":           POSITION_SIZE_BASE_PER_1K,
+            "scale_60_70":           POSITION_SCALE_60_70,
+            "scale_70_80":           POSITION_SCALE_70_80,
+            "scale_80_90":           POSITION_SCALE_80_90,
+            "scale_90_100":          POSITION_SCALE_90_100,
+            "max_units":             POSITION_SIZE_MAX_UNITS,
+            "min_units":             POSITION_SIZE_MIN_UNITS,
+        },
+        "pa_thresholds": {
+            "momentum_threshold":   PRICE_ACTION_MOMENTUM_THRESHOLD,
+            "volatility_threshold": PRICE_ACTION_VOLATILITY_THRESHOLD,
+            "confluence_weight":    PRICE_ACTION_CONFLUENCE_WEIGHT,
+        },
     }
 
 

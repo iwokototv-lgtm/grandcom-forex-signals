@@ -24,6 +24,7 @@ strategy_mode options:
 """
 
 import asyncio
+import os
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Optional
@@ -42,6 +43,52 @@ from .price_action_core import PriceActionCore
 from .macro_filter import MacroFilter
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Price Action Engine — Configurable Thresholds
+# ---------------------------------------------------------------------------
+# These values are read from environment variables so they can be tuned
+# without code changes.  Per-pair overrides follow the pattern:
+#   PRICE_ACTION_MOMENTUM_THRESHOLD_XAUUSD=0.70
+#   PRICE_ACTION_VOLATILITY_THRESHOLD_XAUEUR=0.60
+# If no per-pair override is set, the global default is used.
+
+_PA_MOMENTUM_THRESHOLD_DEFAULT   = float(os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD",  "0.65"))
+_PA_VOLATILITY_THRESHOLD_DEFAULT = float(os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", "0.55"))
+_PA_CONFLUENCE_WEIGHT_DEFAULT    = float(os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT",    "0.40"))
+
+logger.info(
+    f"PriceAction thresholds loaded — "
+    f"momentum={_PA_MOMENTUM_THRESHOLD_DEFAULT} "
+    f"volatility={_PA_VOLATILITY_THRESHOLD_DEFAULT} "
+    f"confluence_weight={_PA_CONFLUENCE_WEIGHT_DEFAULT}"
+)
+
+
+def _get_pa_thresholds(symbol: str) -> Dict[str, float]:
+    """
+    Return price action thresholds for *symbol*, applying per-pair overrides
+    from environment variables when present.
+
+    Per-pair env var pattern (symbol uppercased, slashes stripped):
+      PRICE_ACTION_MOMENTUM_THRESHOLD_XAUUSD
+      PRICE_ACTION_VOLATILITY_THRESHOLD_XAUEUR
+
+    Returns a dict with keys: momentum_threshold, volatility_threshold,
+    confluence_weight.
+    """
+    sym = symbol.upper().replace("/", "")
+
+    momentum   = float(os.environ.get(f"PRICE_ACTION_MOMENTUM_THRESHOLD_{sym}",   _PA_MOMENTUM_THRESHOLD_DEFAULT))
+    volatility = float(os.environ.get(f"PRICE_ACTION_VOLATILITY_THRESHOLD_{sym}", _PA_VOLATILITY_THRESHOLD_DEFAULT))
+    confluence = float(os.environ.get(f"PRICE_ACTION_CONFLUENCE_WEIGHT_{sym}",    _PA_CONFLUENCE_WEIGHT_DEFAULT))
+
+    return {
+        "momentum_threshold":   momentum,
+        "volatility_threshold": volatility,
+        "confluence_weight":    confluence,
+    }
 
 
 class HybridPortfolioSystemV3:
@@ -345,6 +392,7 @@ class HybridPortfolioSystemV3:
         df: pd.DataFrame,
         symbol: str,
         df_daily: Optional[pd.DataFrame] = None,
+        pa_thresholds: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         """
         Price Action signal via S/R breaks, order block rejections,
@@ -352,9 +400,56 @@ class HybridPortfolioSystemV3:
 
         Confidence:
           Base 65% + up to +20% for volume / MTF / multi-test bonuses.
+
+        pa_thresholds (optional):
+          Dict with keys momentum_threshold, volatility_threshold,
+          confluence_weight.  When provided, these override the engine's
+          default values for this call (used for A/B testing per pair).
+          If None, the global env-var defaults are used.
         """
         try:
-            return self.price_action_engine.analyze(df, symbol, df_daily)
+            # Resolve thresholds: per-call override → env-var defaults
+            thresholds = pa_thresholds or _get_pa_thresholds(symbol)
+
+            logger.debug(
+                f"PA [{symbol}] thresholds — "
+                f"momentum={thresholds['momentum_threshold']} "
+                f"volatility={thresholds['volatility_threshold']} "
+                f"confluence_weight={thresholds['confluence_weight']}"
+            )
+
+            result = self.price_action_engine.analyze(df, symbol, df_daily)
+
+            # Attach the thresholds used to the result for downstream logging
+            # and MongoDB storage (enables A/B analysis without code changes).
+            result["pa_thresholds_used"] = thresholds
+
+            # Apply confluence weight: scale confidence by the weight factor
+            # when multiple sub-signals agree (confluence_weight acts as a
+            # bonus multiplier on top of the base confidence).
+            if result.get("valid") and result.get("vote") in ("BUY", "SELL"):
+                buy_votes  = result.get("buy_votes",  0)
+                sell_votes = result.get("sell_votes", 0)
+                agreeing   = max(buy_votes, sell_votes)
+                if agreeing >= 2:
+                    # Two or more sub-strategies agree — apply confluence bonus
+                    confluence_bonus = thresholds["confluence_weight"] * (agreeing - 1) * 0.05
+                    raw_conf = result.get("confidence", 0.0)
+                    result["confidence"] = round(min(1.0, raw_conf + confluence_bonus), 4)
+                    result["confluence_bonus_applied"] = round(confluence_bonus, 4)
+
+                # Apply momentum threshold: suppress signal if confidence is
+                # below the momentum threshold (stricter than the base 65%).
+                if result["confidence"] < thresholds["momentum_threshold"]:
+                    logger.debug(
+                        f"PA [{symbol}] suppressed — confidence={result['confidence']:.3f} "
+                        f"< momentum_threshold={thresholds['momentum_threshold']}"
+                    )
+                    result["vote"] = "NEUTRAL"
+                    result["suppressed_by"] = "momentum_threshold"
+
+            return result
+
         except Exception as exc:
             logger.error(f"Component PA error [{symbol}]: {exc}")
             return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
@@ -586,9 +681,20 @@ class HybridPortfolioSystemV3:
             # PRICE ACTION MODE
             # ==============================================================
             elif strategy_mode == "price_action":
-                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily)
+                # Resolve per-pair thresholds (supports A/B testing via env vars)
+                pa_thresholds = _get_pa_thresholds(symbol)
+                logger.info(
+                    f"HybridPortfolioV3 [{symbol}] price_action thresholds — "
+                    f"momentum={pa_thresholds['momentum_threshold']} "
+                    f"volatility={pa_thresholds['volatility_threshold']} "
+                    f"confluence_weight={pa_thresholds['confluence_weight']}"
+                )
+
+                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily, pa_thresholds)
                 result["components"]["price_action"] = comp_pa
                 result["component_votes"] = {"PA": comp_pa["vote"]}
+                # Store thresholds in result for downstream signal logging
+                result["pa_thresholds"] = pa_thresholds
 
                 signal        = comp_pa.get("vote", "NEUTRAL")
                 composite_pct = round(comp_pa.get("confidence", 0.0) * 100, 1)
@@ -621,7 +727,7 @@ class HybridPortfolioSystemV3:
             elif strategy_mode == "macro_filtered":
                 # Run both MR and PA; take whichever fires, then apply macro filter
                 comp_mr = self._component_mr_mean_reversion(df_4h, symbol, df_daily)
-                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily)
+                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily, _get_pa_thresholds(symbol))
                 result["components"]["mean_reversion"] = comp_mr
                 result["components"]["price_action"]   = comp_pa
 
@@ -684,7 +790,7 @@ class HybridPortfolioSystemV3:
             # ==============================================================
             elif strategy_mode == "consensus":
                 comp_mr = self._component_mr_mean_reversion(df_4h, symbol, df_daily)
-                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily)
+                comp_pa = self._component_pa_price_action(df_4h, symbol, df_daily, _get_pa_thresholds(symbol))
 
                 # Macro filter uses the MR vote as the primary signal direction
                 primary_vote = comp_mr.get("vote") if comp_mr.get("vote") != "NEUTRAL" else comp_pa.get("vote", "NEUTRAL")
