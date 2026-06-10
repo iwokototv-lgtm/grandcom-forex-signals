@@ -115,10 +115,10 @@ PAIRS: Dict[str, Dict] = {
         "symbol":     "XAU/USD",
         "decimals":   2,
         "pip_value":  0.1,
-        "atr_sl":     1.0,
-        "atr_tp1":    0.40,
-        "atr_tp2":    0.80,
-        "atr_tp3":    1.40,
+        "atr_sl":     1.5,   # SL = 1.5 × ATR (matches position_calculator)
+        "atr_tp1":    0.5,   # TP1 = 0.5 × ATR (quick profit)
+        "atr_tp2":    1.0,   # TP2 = 1.0 × ATR (medium target)
+        "atr_tp3":    1.5,   # TP3 = 1.5 × ATR (1:1 R:R)
         "spread":     0.30,
         "commission": 0.10,
         "slippage":   0.10,
@@ -127,10 +127,10 @@ PAIRS: Dict[str, Dict] = {
         "symbol":     "XAU/EUR",
         "decimals":   2,
         "pip_value":  0.1,
-        "atr_sl":     1.0,
-        "atr_tp1":    0.40,
-        "atr_tp2":    0.80,
-        "atr_tp3":    1.40,
+        "atr_sl":     1.5,
+        "atr_tp1":    0.5,
+        "atr_tp2":    1.0,
+        "atr_tp3":    1.5,
         "spread":     0.35,
         "commission": 0.10,
         "slippage":   0.12,
@@ -145,7 +145,7 @@ PARTIAL_SIZES: Dict[str, float] = {
 }
 
 # Backtest parameters
-CONFIDENCE_THRESHOLD  = 62.0    # Minimum confidence % to take a trade
+CONFIDENCE_THRESHOLD  = 70.0    # Minimum confidence % to take a trade (raised from 62%)
 ATR_PERIOD            = 14      # Wilder ATR period
 WARMUP_CANDLES        = 100     # Candles skipped at start for indicator warmup
 ROLLING_WINDOW_4H     = 100     # Rolling 4H window fed to generate_signal()
@@ -946,31 +946,52 @@ async def _run_walkforward(
         signal     = signal_result.get("signal", "NEUTRAL")
         confidence = float(signal_result.get("confidence", 0.0))
 
+        # ── Diagnostic: log every signal evaluation with component votes ─────
+        _votes = signal_result.get("component_votes", {})
+        _conf_components = signal_result.get("confidence_components", {})
+        _quality = signal_result.get("signal_quality", "N/A")
+        _rejection = signal_result.get("rejection_reason", "")
+
+        _vote_str = (
+            f"A={_votes.get('A_trend', '?')} "
+            f"B={_votes.get('B_sr', '?')} "
+            f"C={_votes.get('C_mtf', '?')}"
+            if _votes else "votes=N/A"
+        )
+        _conf_str = (
+            f"A={_conf_components.get('A_trend', 0):.0f}% "
+            f"B={_conf_components.get('B_sr', 0):.0f}% "
+            f"C={_conf_components.get('C_mtf', 0):.0f}%"
+            if _conf_components else ""
+        )
+
+        if signal in ("BUY", "SELL") and confidence >= CONFIDENCE_THRESHOLD:
+            print(
+                f"  [SIGNAL idx={idx}] {signal} conf={confidence:.1f}% "
+                f"quality={_quality}  {_vote_str}  {_conf_str}",
+                flush=True,
+            )
+        elif signal in ("BUY", "SELL"):
+            # Unanimous but below threshold
+            print(
+                f"  [FILTERED idx={idx}] {signal} conf={confidence:.1f}% "
+                f"(below {CONFIDENCE_THRESHOLD}%)  {_vote_str}  {_conf_str}",
+                flush=True,
+            )
+        elif _rejection:
+            # Rejected — log reason every 50 candles to avoid spam
+            if (idx - WARMUP_CANDLES) % 50 == 0:
+                print(
+                    f"  [REJECTED idx={idx}] {_rejection}  {_vote_str}",
+                    flush=True,
+                )
+
         # ── Confidence filter ────────────────────────────────────────────────
         if signal not in ("BUY", "SELL") or confidence < CONFIDENCE_THRESHOLD:
             continue
 
         result.signals_used += 1
         entry = float(df_4h_full["close"].iloc[idx])
-
-        # ── Diagnostic: first signal — print Correlation Engine asset count ──
-        if not _first_signal_printed:
-            _first_signal_printed = True
-            try:
-                ce = getattr(system, "correlation_engine", None)
-                asset_count = len(getattr(ce, "assets", [])) if ce is not None else "N/A"
-                corr_keys = [k for k in price_data if k != pair]
-                print(
-                    f"  [First signal] idx={idx}  {signal} @ {entry:.2f}  "
-                    f"conf={confidence:.1f}%  "
-                    f"Correlation Engine assets={asset_count}  "
-                    f"price_data keys={list(price_data.keys())}  "
-                    f"corr_assets_in_price_data={len(corr_keys)}/{len(CORRELATION_ASSETS)}"
-                    + (f"  ({', '.join(corr_keys)})" if corr_keys else "  (none — engine disabled)"),
-                    flush=True,
-                )
-            except Exception:
-                pass
 
         # ── Build TP / SL levels ─────────────────────────────────────────────
         if signal == "BUY":
@@ -1373,12 +1394,13 @@ async def _main_async() -> None:
     ).strip()
 
     print(_SEP2)
-    print("  PRODUCTION SIGNAL BACKTEST — HybridPortfolioSystemV3")
+    print("  PRODUCTION SIGNAL BACKTEST — HybridPortfolioSystemV3 (3-Component Core)")
     print(f"  Pairs     : {', '.join(PAIRS)}")
-    print(f"  Confidence: ≥{CONFIDENCE_THRESHOLD:.0f}%  |  Warmup: {WARMUP_CANDLES} candles")
+    print(f"  Confidence: ≥{CONFIDENCE_THRESHOLD:.0f}%  |  Warmup: {WARMUP_CANDLES} candles  |  Logic: unanimous AND-gate")
     print(f"  Fetch size: {FETCH_OUTPUTSIZE} candles/TF  |  Timeout: {TIMEOUT_CANDLES} candles")
     print(f"  Split     : {IN_SAMPLE_RATIO*100:.0f}% in-sample / "
           f"{(1-IN_SAMPLE_RATIO)*100:.0f}% out-of-sample")
+
     print(f"  Account   : ${ACCOUNT_BALANCE:,.0f}  |  Risk/trade: {RISK_PER_TRADE_PCT}%")
     print(_SEP2)
 

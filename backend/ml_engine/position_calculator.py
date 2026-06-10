@@ -1,6 +1,16 @@
 """
 Position Calculator
-Comprehensive position sizing with multiple methods
+Fixed 1% risk per trade with ATR-based SL and TP levels.
+
+Design:
+  - Fixed 1% risk per trade (no volatility multipliers, no drawdown adjustments)
+  - SL = Entry ± (1.5 × ATR)
+  - TP1 = Entry ± (0.5 × ATR)  — quick profit
+  - TP2 = Entry ± (1.0 × ATR)  — medium target
+  - TP3 = Entry ± (1.5 × ATR)  — extended target (1:1 R:R)
+
+Rationale: Complexity in position sizing was adding noise, not edge.
+A simple fixed-risk approach is more robust and easier to diagnose.
 """
 
 import pandas as pd
@@ -11,33 +21,40 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Default risk per trade — fixed, no multipliers
+DEFAULT_RISK_PCT = 1.0
+
+# ATR multipliers for SL and TP levels
+ATR_SL_MULT = 1.5
+ATR_TP1_MULT = 0.5
+ATR_TP2_MULT = 1.0
+ATR_TP3_MULT = 1.5
+
 
 class PositionCalculator:
     """
-    Institutional Position Sizing Calculator.
+    Fixed-Risk Position Sizing Calculator v3.1
 
-    Methods:
-    1. Fixed Risk % — Risk a fixed % of account per trade
-    2. ATR-based — Size based on ATR stop distance
-    3. Kelly Criterion — Optimal sizing based on win rate and R:R
-    4. Volatility-Adjusted — Scale by realized volatility
-    5. Risk Parity — Equal risk contribution
+    Core method: fixed_risk_atr
+      - Risk exactly 1% of account balance per trade
+      - SL distance = 1.5 × ATR(14)
+      - TP1 = 0.5 × ATR (quick profit, 1:3 risk)
+      - TP2 = 1.0 × ATR (medium target, 1:1.5 risk)
+      - TP3 = 1.5 × ATR (extended target, 1:1 risk)
 
-    Constraints:
-    - Maximum position size (lots)
-    - Minimum position size (lots)
-    - Maximum account risk per trade
-    - Maximum total open risk
+    Legacy methods (fixed_risk, atr_based, kelly, volatility_adjusted,
+    risk_parity) are kept for backward compatibility but all internally
+    use the same fixed 1% risk calculation — multipliers are ignored.
     """
 
     def __init__(
         self,
-        default_risk_pct: float = 2.0,
-        max_risk_pct: float = 5.0,
+        default_risk_pct: float = DEFAULT_RISK_PCT,
+        max_risk_pct: float = 2.0,          # Hard cap — never risk more than 2%
         min_lot: float = 0.01,
         max_lot: float = 10.0,
-        pip_value_per_lot: float = 1.0,  # USD per pip per lot (gold: $1 per pip per lot)
-        contract_size: float = 100.0,    # oz per lot for gold
+        pip_value_per_lot: float = 1.0,
+        contract_size: float = 100.0,       # oz per lot for gold
     ):
         self.default_risk_pct = default_risk_pct
         self.max_risk_pct = max_risk_pct
@@ -45,7 +62,7 @@ class PositionCalculator:
         self.max_lot = max_lot
         self.pip_value_per_lot = pip_value_per_lot
         self.contract_size = contract_size
-        self.version = "3.0.0"
+        self.version = "3.1.0"
 
     # ------------------------------------------------------------------
     # Main Calculation
@@ -61,55 +78,45 @@ class PositionCalculator:
         risk_pct: Optional[float] = None,
         win_rate: Optional[float] = None,
         avg_rr: Optional[float] = None,
-        volatility_multiplier: float = 1.0,
-        risk_parity_weight: float = 1.0,
+        volatility_multiplier: float = 1.0,   # Accepted but ignored — fixed risk
+        risk_parity_weight: float = 1.0,       # Accepted but ignored — fixed risk
     ) -> Dict[str, Any]:
         """
-        Calculate position size.
+        Calculate position size using fixed 1% risk.
+
+        All methods now resolve to fixed_risk with 1% risk.
+        Volatility and risk-parity multipliers are accepted for backward
+        compatibility but are NOT applied — they were identified as a root
+        cause of over-sizing and inconsistent risk.
 
         Args:
             account_balance: Account balance in USD
             entry_price: Trade entry price
             sl_price: Stop loss price
             symbol: Trading symbol
-            method: Sizing method
-            risk_pct: Risk percentage (overrides default)
-            win_rate: Historical win rate (for Kelly)
-            avg_rr: Average risk/reward ratio (for Kelly)
-            volatility_multiplier: Vol adjustment factor (from VolatilityAdjustment)
-            risk_parity_weight: Weight from risk parity allocation
+            method: Sizing method (all resolve to fixed_risk internally)
+            risk_pct: Risk % — capped at max_risk_pct (default 1%)
+            win_rate: Unused (kept for API compatibility)
+            avg_rr: Unused (kept for API compatibility)
+            volatility_multiplier: Accepted but ignored
+            risk_parity_weight: Accepted but ignored
 
         Returns:
             Position size recommendation with full breakdown
         """
         try:
-            risk_pct = min(risk_pct or self.default_risk_pct, self.max_risk_pct)
+            # Always use fixed 1% risk — ignore multipliers
+            effective_risk_pct = min(
+                risk_pct if risk_pct is not None else self.default_risk_pct,
+                self.max_risk_pct,
+            )
             stop_distance = abs(entry_price - sl_price)
 
             if stop_distance <= 0:
                 return {"error": "Invalid stop distance", "valid": False}
 
-            # Calculate using selected method
-            if method == "fixed_risk":
-                lots = self._fixed_risk(account_balance, risk_pct, stop_distance, entry_price)
-            elif method == "atr_based":
-                lots = self._atr_based(account_balance, risk_pct, stop_distance, entry_price)
-            elif method == "kelly":
-                lots = self._kelly_criterion(
-                    account_balance, risk_pct, stop_distance, entry_price,
-                    win_rate or 0.5, avg_rr or 2.0
-                )
-            elif method == "volatility_adjusted":
-                base = self._fixed_risk(account_balance, risk_pct, stop_distance, entry_price)
-                lots = base * volatility_multiplier
-            elif method == "risk_parity":
-                base = self._fixed_risk(account_balance, risk_pct, stop_distance, entry_price)
-                lots = base * risk_parity_weight
-            else:
-                lots = self._fixed_risk(account_balance, risk_pct, stop_distance, entry_price)
-
-            # Apply all adjustments
-            lots = lots * volatility_multiplier * risk_parity_weight
+            # Fixed risk calculation — no multipliers applied
+            lots = self._fixed_risk(account_balance, effective_risk_pct, stop_distance, entry_price)
 
             # Enforce constraints
             lots = max(self.min_lot, min(self.max_lot, round(lots, 2)))
@@ -121,7 +128,7 @@ class PositionCalculator:
             result = {
                 "valid": True,
                 "symbol": symbol,
-                "method": method,
+                "method": "fixed_risk",          # Always fixed_risk
                 "lots": lots,
                 "entry_price": round(entry_price, 5),
                 "sl_price": round(sl_price, 5),
@@ -129,12 +136,9 @@ class PositionCalculator:
                 "stop_distance_pct": round(stop_distance / entry_price * 100, 4),
                 "dollar_risk": round(dollar_risk, 2),
                 "risk_pct_actual": round(risk_pct_actual, 4),
-                "risk_pct_target": risk_pct,
+                "risk_pct_target": effective_risk_pct,
                 "account_balance": round(account_balance, 2),
-                "adjustments": {
-                    "volatility_multiplier": round(volatility_multiplier, 4),
-                    "risk_parity_weight": round(risk_parity_weight, 4),
-                },
+                "sizing_note": "Fixed 1% risk — no volatility or drawdown multipliers",
                 "constraints": {
                     "min_lot": self.min_lot,
                     "max_lot": self.max_lot,
@@ -145,8 +149,8 @@ class PositionCalculator:
             }
 
             logger.info(
-                f"PositionCalc [{symbol}/{method}]: lots={lots} "
-                f"risk=${dollar_risk:.2f} ({risk_pct_actual:.2f}%)"
+                f"PositionCalc [{symbol}]: lots={lots} "
+                f"risk=${dollar_risk:.2f} ({risk_pct_actual:.2f}%) fixed_1pct"
             )
             return result
 
@@ -259,15 +263,44 @@ class PositionCalculator:
         sl_price: float,
         direction: str,
         rr_ratios: Optional[List[float]] = None,
+        atr: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Calculate take profit levels based on R:R ratios.
+        Calculate take profit levels.
 
-        Default: TP1=2R, TP2=3.5R, TP3=5R
+        When atr is provided (preferred), uses ATR-based multiples:
+          TP1 = 0.5 × ATR  (quick profit)
+          TP2 = 1.0 × ATR  (medium target)
+          TP3 = 1.5 × ATR  (extended target, 1:1 R:R with 1.5×ATR SL)
+
+        When atr is not provided, falls back to R:R ratios from sl_price.
+        Default R:R fallback: [0.33, 0.67, 1.0] (matching ATR-based targets).
         """
-        rr_ratios = rr_ratios or [2.0, 3.5, 5.0]
         risk = abs(entry_price - sl_price)
 
+        if atr is not None and atr > 0:
+            # ATR-based TP levels (preferred)
+            atr_mults = [ATR_TP1_MULT, ATR_TP2_MULT, ATR_TP3_MULT]
+            tps = []
+            for mult in atr_mults:
+                if direction.upper() == "BUY":
+                    tp = entry_price + atr * mult
+                else:
+                    tp = entry_price - atr * mult
+                tps.append(round(tp, 5))
+            used_rr = [round(atr * m / risk, 2) if risk > 0 else 0 for m in atr_mults]
+            return {
+                "tp_levels": tps,
+                "rr_ratios": used_rr,
+                "atr_multiples": atr_mults,
+                "risk_distance": round(risk, 5),
+                "atr": round(atr, 5),
+                "direction": direction.upper(),
+                "method": "atr_based",
+            }
+
+        # R:R fallback
+        rr_ratios = rr_ratios or [0.33, 0.67, 1.0]
         tps = []
         for rr in rr_ratios:
             if direction.upper() == "BUY":
@@ -281,6 +314,7 @@ class PositionCalculator:
             "rr_ratios": rr_ratios,
             "risk_distance": round(risk, 5),
             "direction": direction.upper(),
+            "method": "rr_ratio",
         }
 
 
