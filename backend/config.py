@@ -87,15 +87,55 @@ MIN_MTF_CONFLUENCE: int = int(os.environ.get("MIN_MTF_CONFLUENCE", "2"))
 STRATEGY_MODE: str = os.environ.get("STRATEGY_MODE", "price_action")
 
 # ---------------------------------------------------------------------------
+# Account & Position Sizing
+# ---------------------------------------------------------------------------
+# Current live account balance — read from env var ACCOUNT_BALANCE.
+# Used for dynamic position sizing: base = 1 unit per $1,000 balance.
+ACCOUNT_BALANCE: float = float(os.environ.get("ACCOUNT_BALANCE", os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0")))
+
+# Confidence-based position scale factors (applied on top of base size)
+#   60-70% confidence → 0.5x  (cautious)
+#   70-80% confidence → 1.0x  (baseline)
+#   80-90% confidence → 1.5x  (elevated)
+#   90-100% confidence → 2.0x (high conviction)
+POSITION_SCALE_60_70: float = float(os.environ.get("POSITION_SCALE_60_70", "0.5"))
+POSITION_SCALE_70_80: float = float(os.environ.get("POSITION_SCALE_70_80", "1.0"))
+POSITION_SCALE_80_90: float = float(os.environ.get("POSITION_SCALE_80_90", "1.5"))
+POSITION_SCALE_90_100: float = float(os.environ.get("POSITION_SCALE_90_100", "2.0"))
+
+# Hard limits on position size (units)
+POSITION_SIZE_MAX_UNITS: float = float(os.environ.get("POSITION_SIZE_MAX_UNITS", "10.0"))
+POSITION_SIZE_MIN_UNITS: float = float(os.environ.get("POSITION_SIZE_MIN_UNITS", "0.1"))
+POSITION_SIZE_BASE_PER_1K: float = float(os.environ.get("POSITION_SIZE_BASE_PER_1K", "1.0"))  # 1 unit per $1,000
+
+# ---------------------------------------------------------------------------
 # Risk Management
 # ---------------------------------------------------------------------------
-MAX_ACCOUNT_RISK_PCT: float = float(os.environ.get("MAX_ACCOUNT_RISK_PCT", "2.0"))
+MAX_ACCOUNT_RISK_PCT: float = float(os.environ.get("MAX_ACCOUNT_RISK_PCT", "1.0"))
 MAX_DAILY_DRAWDOWN_PCT: float = float(os.environ.get("MAX_DAILY_DRAWDOWN_PCT", "5.0"))
 MAX_TOTAL_DRAWDOWN_PCT: float = float(os.environ.get("MAX_TOTAL_DRAWDOWN_PCT", "15.0"))
 DEFAULT_ACCOUNT_BALANCE: float = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
 RISK_PARITY_LOOKBACK: int = int(os.environ.get("RISK_PARITY_LOOKBACK", "60"))
 VOLATILITY_LOOKBACK: int = int(os.environ.get("VOLATILITY_LOOKBACK", "20"))
 DRAWDOWN_RECOVERY_FACTOR: float = float(os.environ.get("DRAWDOWN_RECOVERY_FACTOR", "0.5"))
+
+# Stop-loss rules
+SL_ATR_MULTIPLIER: float = float(os.environ.get("SL_ATR_MULTIPLIER", "2.0"))          # SL at 2x ATR from entry
+TRAILING_STOP_ATR_MULT: float = float(os.environ.get("TRAILING_STOP_ATR_MULT", "0.5")) # Trail SL by 0.5x ATR after +1% profit
+TRAILING_STOP_PROFIT_TRIGGER_PCT: float = float(os.environ.get("TRAILING_STOP_PROFIT_TRIGGER_PCT", "1.0"))  # Activate trailing at +1%
+
+# Concurrent position limits
+MAX_CONCURRENT_POSITIONS_PER_PAIR: int = int(os.environ.get("MAX_CONCURRENT_POSITIONS_PER_PAIR", "5"))
+
+# ---------------------------------------------------------------------------
+# Price Action Engine Thresholds (configurable for A/B testing)
+# ---------------------------------------------------------------------------
+# These thresholds control the price_action strategy engine in hybrid_portfolio_system_v3.
+# They can be tuned without code changes via environment variables.
+# Per-pair overrides use the pattern: PRICE_ACTION_MOMENTUM_THRESHOLD_XAUUSD, etc.
+PRICE_ACTION_MOMENTUM_THRESHOLD: float = float(os.environ.get("PRICE_ACTION_MOMENTUM_THRESHOLD", "0.65"))
+PRICE_ACTION_VOLATILITY_THRESHOLD: float = float(os.environ.get("PRICE_ACTION_VOLATILITY_THRESHOLD", "0.55"))
+PRICE_ACTION_CONFLUENCE_WEIGHT: float = float(os.environ.get("PRICE_ACTION_CONFLUENCE_WEIGHT", "0.40"))
 
 # ---------------------------------------------------------------------------
 # Regime Detection
