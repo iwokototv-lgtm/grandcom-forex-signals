@@ -48,7 +48,7 @@ PAIRS = {
     #     "atr_tp3": 5.0,
     #     "pip_value": 0.01,
     #     "min_lot": 0.01,
-    #     "max_lot": 10.0,
+    #     "max_lot": 2.0,  # REDUCED from 10.0 — risk control during investigation
     # },
     "XAUEUR": {
         "symbol": "XAU/EUR",
