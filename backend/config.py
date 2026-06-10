@@ -39,17 +39,20 @@ except ValueError:
 # Trading Pairs
 # ---------------------------------------------------------------------------
 PAIRS = {
-    # "XAUUSD": {  # DISABLED — Backtest shows severe overfit (-40.60% OOS, -21.87% vs random)
-    #     "symbol": "XAU/USD",
-    #     "decimals": 2,
-    #     "atr_sl": 1.5,
-    #     "atr_tp1": 2.0,
-    #     "atr_tp2": 3.5,
-    #     "atr_tp3": 5.0,
-    #     "pip_value": 0.01,
-    #     "min_lot": 0.01,
-    #     "max_lot": 2.0,  # REDUCED from 10.0 — risk control during investigation
-    # },
+    # Re-enabled for live testing — V4 backtest complete with correlation engine
+    # (DXY, EURUSD, GBPUSD, USDJPY). Backtest result: -22.64% on real data.
+    # Moving to live validation over 1-2 weeks. max_lot capped at 2 (PR #165).
+    "XAUUSD": {
+        "symbol": "XAU/USD",
+        "decimals": 2,
+        "atr_sl": 1.5,
+        "atr_tp1": 2.0,
+        "atr_tp2": 3.5,
+        "atr_tp3": 5.0,
+        "pip_value": 0.01,
+        "min_lot": 0.01,
+        "max_lot": 2.0,  # Hard cap — risk control (PR #165)
+    },
     "XAUEUR": {
         "symbol": "XAU/EUR",
         "decimals": 2,
