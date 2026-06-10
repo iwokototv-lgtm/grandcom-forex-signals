@@ -563,6 +563,49 @@ async def fetch_ohlcv(
         return None, None
 
 
+async def fetch_correlation_ohlcv(
+    symbol: str,
+    interval: str = "4h",
+    outputsize: int = 100,
+    timeout: int = 10,
+) -> pd.DataFrame | None:
+    """Fetch OHLCV for an arbitrary symbol (e.g. DXY, EURUSD) from TwelveData.
+
+    Unlike fetch_ohlcv, this function accepts any symbol string directly and
+    is used to retrieve correlation assets that are not in the PAIRS config.
+    Returns a DataFrame on success, or None on failure.
+    """
+    url = (
+        f"https://api.twelvedata.com/time_series"
+        f"?symbol={symbol}&interval={interval}&outputsize={outputsize}"
+        f"&apikey={TWELVE_DATA_API_KEY}"
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as resp:
+                data = await resp.json()
+
+        if "values" not in data:
+            logger.warning(
+                f"[corr:{symbol}] TwelveData error: {data.get('message', data)}"
+            )
+            return None
+
+        df = pd.DataFrame(data["values"])
+        for col in ("open", "high", "low", "close"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.iloc[::-1].reset_index(drop=True)
+        logger.info(f"[corr:{symbol}] Fetched {len(df)} {interval} candles")
+        return df
+
+    except Exception as exc:
+        logger.warning(f"[corr:{symbol}] fetch_correlation_ohlcv failed: {exc}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Technical Indicators
 # ---------------------------------------------------------------------------
@@ -1228,6 +1271,34 @@ async def generate_signal_v4(pair: str) -> None:
     if ind is None:
         return
 
+    # 2a. Daily candles for pivot-point analysis
+    df_daily, _ = await fetch_ohlcv(pair, interval="1day", outputsize=60)
+
+    # 2b. Correlation assets — DXY + major USD pairs for USD-regime filtering
+    # XAUUSD is highly correlated with USD strength; without these the
+    # correlation engine receives price_data=None and is completely disabled.
+    _CORRELATION_ASSETS = ["DXY", "EURUSD", "GBPUSD", "USDJPY"]
+    price_data: dict[str, pd.Series] = {}
+
+    # Seed with primary symbol close series
+    if df is not None and len(df) > 0:
+        price_data[pair] = df["close"]
+
+    # Fetch each correlation asset independently so one failure doesn't block
+    for _corr_sym in _CORRELATION_ASSETS:
+        try:
+            _corr_df = await fetch_correlation_ohlcv(_corr_sym, interval="4h", outputsize=100, timeout=10)
+            if _corr_df is not None and len(_corr_df) > 0:
+                price_data[_corr_sym] = _corr_df["close"]
+        except Exception as _corr_exc:
+            logger.warning(f"[{pair}] Failed to fetch correlation asset {_corr_sym}: {_corr_exc}")
+
+    _n_corr = len(price_data) - 1  # exclude primary symbol
+    logger.info(
+        f"[{pair}] Correlation data: {_n_corr}/{len(_CORRELATION_ASSETS)} assets fetched "
+        f"({', '.join(k for k in price_data if k != pair)})"
+    )
+
     # 3. Hybrid system analysis (regime, SMC, pivot)
     hybrid_ctx = {
         "regime":     "UNKNOWN",
@@ -1238,7 +1309,12 @@ async def generate_signal_v4(pair: str) -> None:
     hybrid = get_hybrid_system()
     if hybrid is not None:
         try:
-            hybrid_result = await hybrid.generate_signal(symbol=pair, df_4h=df)
+            hybrid_result = await hybrid.generate_signal(
+                symbol=pair,
+                df_4h=df,
+                df_daily=df_daily,
+                price_data=price_data if len(price_data) >= 2 else None,
+            )
             hybrid_ctx = {
                 "regime":           hybrid_result.get("regime", "UNKNOWN"),
                 "smc_score":        hybrid_result.get("smc_score", 0),
