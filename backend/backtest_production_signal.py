@@ -152,7 +152,35 @@ PARTIAL_SIZES: Dict[str, float] = {
 #               "consensus", "original", "all"
 # "all" runs mean_reversion, price_action, and macro_filtered sequentially
 # and prints a comparison table.  Default: "mean_reversion".
-STRATEGY_MODE: str = os.environ.get("STRATEGY_MODE", "mean_reversion").strip().lower()
+
+# Capture the raw env value before any normalisation so we can log it.
+_STRATEGY_MODE_RAW: str = os.environ.get("STRATEGY_MODE", "")
+STRATEGY_MODE: str = _STRATEGY_MODE_RAW.strip().lower() if _STRATEGY_MODE_RAW.strip() else "mean_reversion"
+
+# All recognised mode values (used for validation).
+_VALID_STRATEGY_MODES: frozenset = frozenset({
+    "original",
+    "mean_reversion",
+    "price_action",
+    "macro_filtered",
+    "consensus",
+    "all",
+})
+
+# Emit a startup diagnostic immediately so the log always shows which mode
+# was selected, regardless of whether the env var was set correctly.
+print(
+    f"[STRATEGY_MODE] raw env value: {_STRATEGY_MODE_RAW!r}  →  resolved: {STRATEGY_MODE!r}",
+    flush=True,
+)
+if STRATEGY_MODE not in _VALID_STRATEGY_MODES:
+    print(
+        f"[STRATEGY_MODE] ⚠  WARNING: {STRATEGY_MODE!r} is not a recognised mode.\n"
+        f"  Valid modes: {sorted(_VALID_STRATEGY_MODES)}\n"
+        f"  Defaulting to 'mean_reversion'.",
+        flush=True,
+    )
+    STRATEGY_MODE = "mean_reversion"
 
 # Per-mode confidence thresholds (lower than the original 70% because these
 # engines have lower base confidence by design)
@@ -171,6 +199,9 @@ def _confidence_threshold_for_mode(mode: str) -> float:
 
 
 # Backtest parameters
+# NOTE: CONFIDENCE_THRESHOLD is set here for the initial/single-mode case.
+# When STRATEGY_MODE="all", each mode uses its own per-mode threshold via
+# _confidence_threshold_for_mode(mode) inside _run_single_mode().
 CONFIDENCE_THRESHOLD  = _confidence_threshold_for_mode(STRATEGY_MODE)
 ATR_PERIOD            = 14      # Wilder ATR period
 WARMUP_CANDLES        = 100     # Candles skipped at start for indicator warmup
@@ -279,19 +310,21 @@ class SplitStats:
 @dataclass
 class PairResult:
     """Full backtest result for one pair."""
-    pair:         str
-    data_source:  str
-    candles_4h:   int
-    split_idx:    int           # Index where out-of-sample begins
-    in_sample:    SplitStats = field(default_factory=lambda: SplitStats("in-sample"))
-    out_sample:   SplitStats = field(default_factory=lambda: SplitStats("out-of-sample"))
-    random_is:    SplitStats = field(default_factory=lambda: SplitStats("random-in-sample"))
-    random_oos:   SplitStats = field(default_factory=lambda: SplitStats("random-out-of-sample"))
-    atr_mean:     float = 0.0
-    atr_min:      float = 0.0
-    atr_max:      float = 0.0
-    signals_raw:  int   = 0     # Signals before confidence filter
-    signals_used: int   = 0     # Signals after confidence filter
+    pair:                 str
+    data_source:          str
+    candles_4h:           int
+    split_idx:            int           # Index where out-of-sample begins
+    in_sample:            SplitStats = field(default_factory=lambda: SplitStats("in-sample"))
+    out_sample:           SplitStats = field(default_factory=lambda: SplitStats("out-of-sample"))
+    random_is:            SplitStats = field(default_factory=lambda: SplitStats("random-in-sample"))
+    random_oos:           SplitStats = field(default_factory=lambda: SplitStats("random-out-of-sample"))
+    atr_mean:             float = 0.0
+    atr_min:              float = 0.0
+    atr_max:              float = 0.0
+    signals_raw:          int   = 0     # Signals before confidence filter
+    signals_used:         int   = 0     # Signals after confidence filter
+    strategy_mode:        str   = ""    # Mode used for this result (e.g. "mean_reversion")
+    confidence_threshold: float = 0.0  # Confidence threshold applied for this mode
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +894,8 @@ async def _run_walkforward(
         atr_mean=atr_mean,
         atr_min=atr_min,
         atr_max=atr_max,
+        strategy_mode=strategy_mode,
+        confidence_threshold=confidence_threshold,
     )
 
     strategy_trades_is:  List[Trade] = []
@@ -1193,8 +1228,15 @@ def _print_overfit_check(is_stats: SplitStats, oos_stats: SplitStats) -> None:
 
 def print_pair_report(result: PairResult) -> None:
     """Print the full report for one pair."""
+    # Use the per-result threshold (set when the walk-forward ran) so that
+    # multi-mode runs ("all") display the correct threshold for each mode
+    # rather than the stale module-level CONFIDENCE_THRESHOLD constant.
+    _threshold = result.confidence_threshold if result.confidence_threshold > 0 else CONFIDENCE_THRESHOLD
+    _mode_label = result.strategy_mode.upper() if result.strategy_mode else STRATEGY_MODE.upper()
+
     print(f"\n{_SEP2}")
-    print(f"  PRODUCTION SIGNAL BACKTEST — {result.pair}  [{result.data_source.upper()} DATA]")
+    print(f"  PRODUCTION SIGNAL BACKTEST — {result.pair}  [{result.data_source.upper()} DATA]"
+          f"  [MODE: {_mode_label}]")
     print(f"{_SEP2}")
 
     print(f"\n  DATA SUMMARY")
@@ -1206,7 +1248,7 @@ def print_pair_report(result: PairResult) -> None:
     print(f"  {'ATR mean / min / max':<30} "
           f"{result.atr_mean:.2f} / {result.atr_min:.2f} / {result.atr_max:.2f}")
     print(f"  {'Signals generated (raw)':<30} {result.signals_raw:>8}")
-    print(f"  {'Signals after ≥{:.0f}% filter'.format(CONFIDENCE_THRESHOLD):<30} "
+    print(f"  {'Signals after ≥{:.0f}% filter'.format(_threshold):<30} "
           f"{result.signals_used:>8}  "
           f"({result.signals_used / result.signals_raw * 100:.1f}% pass rate)"
           if result.signals_raw > 0 else
@@ -1555,20 +1597,47 @@ async def _main_async() -> None:
         or os.environ.get("TWELVE_DATA_API_KEY", "")
     ).strip()
 
-    # Determine which modes to run
-    run_all   = STRATEGY_MODE == "all"
-    run_modes = (
-        ["mean_reversion", "price_action", "macro_filtered"]
-        if run_all
-        else [STRATEGY_MODE]
+    # ── Determine which modes to run ─────────────────────────────────────────
+    # Re-read the raw env var here so the log is unambiguous even if the
+    # module-level STRATEGY_MODE was already normalised/defaulted above.
+    _raw_mode_main = os.environ.get("STRATEGY_MODE", "")
+    print(
+        f"[main] STRATEGY_MODE env var: {_raw_mode_main!r}  →  resolved module value: {STRATEGY_MODE!r}",
+        flush=True,
     )
+
+    run_all = STRATEGY_MODE == "all"
+
+    if run_all:
+        run_modes: List[str] = ["mean_reversion", "price_action", "macro_filtered"]
+    elif STRATEGY_MODE == "mean_reversion":
+        run_modes = ["mean_reversion"]
+    elif STRATEGY_MODE == "price_action":
+        run_modes = ["price_action"]
+    elif STRATEGY_MODE == "macro_filtered":
+        run_modes = ["macro_filtered"]
+    elif STRATEGY_MODE == "consensus":
+        run_modes = ["consensus"]
+    elif STRATEGY_MODE == "original":
+        run_modes = ["original"]
+    else:
+        # Should never reach here because the module-level guard already
+        # defaulted unrecognised values to "mean_reversion", but be explicit.
+        print(
+            f"[main] ⚠  Unrecognised STRATEGY_MODE {STRATEGY_MODE!r} — "
+            f"valid modes: {sorted(_VALID_STRATEGY_MODES - {'all'})}\n"
+            f"  Falling back to 'mean_reversion'.",
+            flush=True,
+        )
+        run_modes = ["mean_reversion"]
+
     active_threshold = _confidence_threshold_for_mode(run_modes[0]) if not run_all else 60.0
 
     print(_SEP2)
     print("  PRODUCTION SIGNAL BACKTEST — HybridPortfolioSystemV3 v3.2")
     print(f"  Pairs        : {', '.join(PAIRS)}")
     print(f"  Strategy mode: {STRATEGY_MODE.upper()}"
-          + (f"  (running: {', '.join(run_modes)})" if run_all else ""))
+          + (f"  (running: {', '.join(run_modes)})" if run_all else f"  (running: {run_modes[0]})"))
     print(f"  Confidence   : ≥{active_threshold:.0f}%  |  Warmup: {WARMUP_CANDLES} candles")
     print(f"  Fetch size   : {FETCH_OUTPUTSIZE} candles/TF  |  Timeout: {TIMEOUT_CANDLES} candles")
     print(f"  Split        : {IN_SAMPLE_RATIO*100:.0f}% in-sample / "
