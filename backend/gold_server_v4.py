@@ -2833,265 +2833,85 @@ async def run_trade_management_loop() -> None:
 # ---------------------------------------------------------------------------
 scheduler = AsyncIOScheduler()
 
-
-# Tracks startup errors so /healthz can surface them without crashing
+# Startup status flags (used by /healthz)
 _startup_errors: list[str] = []
 _startup_complete: bool = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _mongo_client, _db, _startup_complete, _startup_errors
+    global _mongo_client, _db, _startup_complete
 
-    logger.info("🚀 Gold Signals Server v4.0 lifespan startup BEGIN")
+    logger.info("🚀 Gold Signals Server v4.0 startup BEGIN")
 
-    try:
-        # ------------------------------------------------------------------
-        # Startup validation
-        # ------------------------------------------------------------------
-        missing = []
-        if not MONGO_URL:
-            missing.append("MONGO_URL")
-        if not TELEGRAM_BOT_TOKEN:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        if not TWELVE_DATA_API_KEY:
-            missing.append("TWELVE_DATA_API_KEY")
-        if not OPENAI_API_KEY:
-            missing.append("OPENAI_API_KEY / EMERGENT_LLM_KEY")
+    # --- Startup validation ---
+    missing = []
+    if not MONGO_URL:
+        missing.append("MONGO_URL")
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not TWELVE_DATA_API_KEY:
+        missing.append("TWELVE_DATA_API_KEY")
+    if not OPENAI_API_KEY:
+        missing.append("OPENAI_API_KEY / EMERGENT_LLM_KEY")
 
-        if missing:
-            msg = f"Missing env vars: {missing}"
-            logger.error(f"❌ {msg}")
-            _startup_errors.append(msg)
-        else:
-            logger.info("✅ All required environment variables present")
+    if missing:
+        logger.error(f"❌ Missing required environment variables: {missing}")
+        logger.error("Server will start but signal generation will fail until these are set.")
+    else:
+        logger.info("✅ All required environment variables present")
 
-        # ------------------------------------------------------------------
-        # MongoDB — hard 10 s timeout on the ping so a hung DNS/TCP
-        # connection never blocks the entire startup sequence.
-        # ------------------------------------------------------------------
-        if MONGO_URL:
-            try:
-                logger.info("⏳ Connecting to MongoDB …")
-                _mongo_client = AsyncIOMotorClient(
-                    MONGO_URL,
-                    serverSelectionTimeoutMS=8000,
-                    connectTimeoutMS=8000,
-                    socketTimeoutMS=8000,
-                )
-                _db = _mongo_client[DB_NAME]
-                await asyncio.wait_for(_db.command("ping"), timeout=10.0)
-                logger.info(f"✅ MongoDB connected — db={DB_NAME}")
-            except asyncio.TimeoutError:
-                msg = "MongoDB ping timed out after 10 s"
-                logger.error(f"❌ {msg}")
-                _startup_errors.append(msg)
-                _db = None
-            except Exception as exc:
-                msg = f"MongoDB connection failed: {exc!r}"
-                logger.error(f"❌ {msg}", exc_info=True)
-                _startup_errors.append(msg)
-                _db = None
-        else:
-            logger.warning("⚠️ MONGO_URL not set — MongoDB disabled")
-
-        # ------------------------------------------------------------------
-        # Telegram — 15 s timeout; non-fatal
-        # ------------------------------------------------------------------
-        if TELEGRAM_BOT_TOKEN:
-            try:
-                logger.info("⏳ Verifying Telegram bot …")
-                bot = get_bot()
-                me  = await asyncio.wait_for(bot.get_me(), timeout=15.0)
-                logger.info(f"✅ Telegram bot ready — @{me.username}")
-            except asyncio.TimeoutError:
-                msg = "Telegram bot.get_me() timed out after 15 s"
-                logger.error(f"❌ {msg}")
-                _startup_errors.append(msg)
-            except Exception as exc:
-                msg = f"Telegram bot init failed: {exc!r}"
-                logger.error(f"❌ {msg}", exc_info=True)
-                _startup_errors.append(msg)
-        else:
-            logger.warning("⚠️ TELEGRAM_BOT_TOKEN not set — Telegram disabled")
-
-        # ------------------------------------------------------------------
-        # HybridPortfolioSystemV3 — synchronous but may raise on import
-        # ------------------------------------------------------------------
+    # --- MongoDB ---
+    if MONGO_URL:
         try:
-            logger.info("⏳ Initialising HybridPortfolioSystemV3 …")
-            get_hybrid_system()
-            if _hybrid_system is not None:
-                logger.info("✅ HybridPortfolioSystemV3 ready")
-            else:
-                msg = "HybridPortfolioSystemV3 returned None — check ml_engine imports"
-                logger.error(f"❌ {msg}")
-                _startup_errors.append(msg)
+            _mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+            _db = _mongo_client[DB_NAME]
+            await _db.command("ping")
+            logger.info(f"✅ MongoDB connected — db={DB_NAME}")
         except Exception as exc:
-            msg = f"HybridPortfolioSystemV3 init raised: {exc!r}"
-            logger.error(f"❌ {msg}", exc_info=True)
-            _startup_errors.append(msg)
+            logger.error(f"❌ MongoDB connection failed: {exc}")
+            _db = None
 
-        # ------------------------------------------------------------------
-        # WinRateTracker sync — best-effort, 20 s timeout
-        # ------------------------------------------------------------------
-        if _db is not None:
-            try:
-                logger.info("⏳ WinRateTracker startup sync …")
-                sync_result = await asyncio.wait_for(
-                    _win_rate_tracker.sync_from_mongodb(_db), timeout=20.0
-                )
-                logger.info(
-                    f"✅ WinRateTracker startup sync — "
-                    f"{sync_result.get('signals_processed', 0)} signals, "
-                    f"{sync_result.get('buckets_updated', 0)} buckets"
-                )
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ WinRateTracker startup sync timed out (non-fatal)")
-            except Exception as exc:
-                logger.warning(f"⚠️ WinRateTracker startup sync failed (non-fatal): {exc!r}")
+    # --- Telegram bot ---
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            bot = get_bot()
+            me = await bot.get_me()
+            logger.info(f"✅ Telegram bot ready — @{me.username} → channel {TELEGRAM_CHANNEL_ID}")
+        except Exception as exc:
+            logger.error(f"❌ Telegram bot init failed: {exc}")
 
-        # ------------------------------------------------------------------
-        # TradeManager sync — best-effort, 20 s timeout
-        # ------------------------------------------------------------------
-        if _TRADE_MANAGER_AVAILABLE and _db is not None:
-            try:
-                logger.info("⏳ TradeManager startup sync …")
-                tm_sync = await asyncio.wait_for(
-                    get_trade_manager().sync_from_mongodb(_db), timeout=20.0
-                )
-                logger.info(
-                    f"✅ TradeManager startup sync — "
-                    f"{tm_sync.get('open_trades', 0)} open trade(s) loaded"
-                )
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ TradeManager startup sync timed out (non-fatal)")
-            except Exception as exc:
-                logger.warning(f"⚠️ TradeManager startup sync failed (non-fatal): {exc!r}")
+    # --- Hybrid system ---
+    get_hybrid_system()
 
-        # ------------------------------------------------------------------
-        # SignalDeduplicator — best-effort, 15 s timeout
-        # ------------------------------------------------------------------
-        global _deduplicator
-        if _DEDUPLICATOR_AVAILABLE:
-            try:
-                logger.info("⏳ Initialising SignalDeduplicator …")
-                _deduplicator = SignalDeduplicator(db=_db)
-                await asyncio.wait_for(_deduplicator.setup(), timeout=15.0)
-                logger.info("✅ SignalDeduplicator initialised (4H TTL deduplication active)")
-            except asyncio.TimeoutError:
-                logger.warning("⚠️ SignalDeduplicator setup timed out (non-fatal)")
-                _deduplicator = None
-            except Exception as exc:
-                logger.warning(f"⚠️ SignalDeduplicator init failed (non-fatal): {exc!r}")
-                _deduplicator = None
+    # --- Scheduler ---
+    scheduler.add_job(
+        run_all_signals_v4,
+        "interval",
+        minutes=SIGNAL_INTERVAL_MINUTES,
+        id="gold_signals_v4",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.start()
+    logger.info(
+        f"✅ Scheduler started — pairs={list(PAIRS.keys())} "
+        f"interval={SIGNAL_INTERVAL_MINUTES}min"
+    )
 
-        # ------------------------------------------------------------------
-        # Scheduler
-        # ------------------------------------------------------------------
-        scheduler.add_job(
-            run_all_signals_v4,
-            "interval",
-            minutes=SIGNAL_INTERVAL_MINUTES,
-            id="gold_signals_v4",
-            max_instances=1,
-            coalesce=True,
-        )
+    # Run immediately on startup
+    asyncio.create_task(run_all_signals_v4())
 
-        # WinRateTracker sync scheduler (every RETRAIN_SYNC_HOURS = 6 h)
-        scheduler.add_job(
-            run_sync_job,
-            "interval",
-            hours=RETRAIN_SYNC_HOURS,
-            id="win_rate_sync_v4",
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # Light retraining scheduler (every RETRAIN_INTERVAL_HOURS = 24-48 h)
-        scheduler.add_job(
-            run_retrain_job,
-            "interval",
-            hours=RETRAIN_INTERVAL_HOURS,
-            id="model_retrain_v4",
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # V4.1 Trade management loop (every 2 minutes — BE/TS/partial management)
-        scheduler.add_job(
-            run_trade_management_loop,
-            "interval",
-            minutes=2,
-            id="trade_management_v4",
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # AI market commentary (every 4 hours)
-        scheduler.add_job(
-            run_market_commentary_job,
-            "interval",
-            hours=4,
-            id="ai_market_commentary_v4",
-            max_instances=1,
-            coalesce=True,
-        )
-
-        # AI daily performance review (every day at UTC midnight)
-        scheduler.add_job(
-            run_daily_review_job,
-            "cron",
-            hour=0,
-            minute=5,
-            id="ai_daily_review_v4",
-            max_instances=1,
-            coalesce=True,
-        )
-
-        scheduler.start()
-        logger.info(
-            f"✅ V4.1 Scheduler started — pairs={list(PAIRS.keys())} "
-            f"signal_interval={SIGNAL_INTERVAL_MINUTES}min "
-            f"trade_mgmt_interval=2min "
-            f"sync_interval={RETRAIN_SYNC_HOURS}h "
-            f"retrain_interval={RETRAIN_INTERVAL_HOURS}h "
-            f"ai_commentary_interval=4h "
-            f"ai_daily_review=00:05 UTC"
-        )
-
-        asyncio.create_task(run_all_signals_v4())
-
-        _startup_complete = True
-        if _startup_errors:
-            logger.warning(
-                f"⚠️ Startup completed with {len(_startup_errors)} non-fatal error(s): "
-                f"{_startup_errors}"
-            )
-        else:
-            logger.info("✅ Gold Signals Server v4.0 startup complete — all systems nominal")
-
-    except Exception as exc:
-        # Catch-all: log the full traceback so Railway surfaces it in the
-        # deployment logs, then re-raise so the process exits with a non-zero
-        # code (which Railway will flag as a failed deploy rather than a
-        # silent exit).
-        logger.critical(
-            f"💥 FATAL: lifespan startup crashed — {exc!r}",
-            exc_info=True,
-        )
-        _startup_errors.append(f"FATAL startup crash: {exc!r}")
-        raise
+    _startup_complete = True
+    logger.info("✅ Gold Signals Server v4.0 startup complete")
 
     yield
 
-    # ------------------------------------------------------------------
-    # Shutdown
-    # ------------------------------------------------------------------
+    # --- Shutdown ---
     scheduler.shutdown(wait=False)
     if _mongo_client:
         _mongo_client.close()
-    logger.info("Gold Signals Server v4.0 Balanced shut down")
+    logger.info("Gold Signals Server v4.0 shut down")
 
 
 app = FastAPI(
