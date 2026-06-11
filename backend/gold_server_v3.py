@@ -29,6 +29,7 @@ from ml_engine.risk_manager import RiskManager
 from ml_engine.economic_calendar_filter import EconomicCalendarFilter, economic_calendar_filter as _ecf_singleton
 from ml_engine.drawdown_recovery import DrawdownRecoveryManager, drawdown_recovery as _ddr_singleton
 from ml_engine.position_monitor import PositionMonitor, position_monitor as _position_monitor_singleton
+from ml_engine.candle_tracker import CandleTracker, candle_tracker as _candle_tracker_singleton
 
 load_dotenv()
 
@@ -66,6 +67,8 @@ POSITION_MONITORING_INTERVAL_MINUTES = int(
 )
 MIN_CONFIDENCE = int(os.environ.get("MIN_CONFIDENCE", "60"))
 ACCOUNT_BALANCE = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
+# Smart 4H candle detection — skip signal if same candle as last processed
+CANDLE_TRACKING_ENABLED = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Trading Pairs
@@ -109,6 +112,7 @@ _risk_manager: RiskManager = RiskManager()
 _calendar_filter: EconomicCalendarFilter = _ecf_singleton
 _drawdown_recovery: DrawdownRecoveryManager = _ddr_singleton
 _pos_monitor: PositionMonitor = _position_monitor_singleton
+_candle_tracker: CandleTracker = _candle_tracker_singleton
 
 
 # ---------------------------------------------------------------------------
@@ -755,18 +759,97 @@ async def generate_signal(pair: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — Signal Generation (every 30 min)
+# Scheduler — Signal Generation (every 30 min, NEW 4H candle gate)
 # ---------------------------------------------------------------------------
 async def run_signal_generation() -> None:
-    """Generate new signals every 30 minutes. Full pipeline per pair."""
-    logger.info("[SIGNAL_GEN] Starting 30-min signal generation cycle")
+    """Generate signals only on NEW H4 candle confirmation.
+
+    The scheduler fires every 30 minutes, but the full signal pipeline is
+    only executed when a *new* 4H candle has closed since the last processed
+    one.  This eliminates redundant signals, wasted API calls, and Telegram
+    spam while keeping the 30-min scan cadence for responsiveness.
+
+    Set ``CANDLE_TRACKING_ENABLED=false`` to revert to the legacy behaviour
+    (signal on every 30-min tick regardless of candle state).
+    """
+    logger.info("[SIGNAL_GEN] Starting 30-min market scan")
+
     for pair in PAIRS:
         try:
+            if CANDLE_TRACKING_ENABLED:
+                # ── Fetch just the latest few candles to check the timestamp ──
+                logger.info(f"[SIGNAL_GEN] [{pair}] Fetching latest 4H candle")
+                df_check = await fetch_ohlcv(pair, interval="4h", outputsize=5)
+                if df_check is None or len(df_check) < 1:
+                    logger.warning(
+                        f"[SIGNAL_GEN] [{pair}] Could not fetch candle data — skipping"
+                    )
+                    await asyncio.sleep(2)
+                    continue
+
+                # TwelveData returns candles newest-first before our reversal;
+                # after fetch_ohlcv the df is oldest-first, so iloc[-1] is the
+                # most-recently *closed* candle.
+                raw_time = df_check.iloc[-1].get("time") or df_check.iloc[-1].get("datetime")
+                if raw_time is None:
+                    logger.warning(
+                        f"[SIGNAL_GEN] [{pair}] Candle has no 'time' field — skipping"
+                    )
+                    await asyncio.sleep(2)
+                    continue
+
+                # Normalise to a timezone-aware datetime
+                if isinstance(raw_time, str):
+                    try:
+                        current_candle_time = datetime.fromisoformat(raw_time)
+                    except ValueError:
+                        import dateutil.parser
+                        current_candle_time = dateutil.parser.parse(raw_time)
+                else:
+                    current_candle_time = raw_time  # already a datetime
+
+                if current_candle_time.tzinfo is None:
+                    current_candle_time = current_candle_time.replace(tzinfo=timezone.utc)
+
+                logger.info(
+                    f"[SIGNAL_GEN] [{pair}] Current candle: {current_candle_time}"
+                )
+
+                last_time = await _candle_tracker.get_last_candle_time(pair)
+                if last_time is not None:
+                    logger.info(
+                        f"[SIGNAL_GEN] [{pair}] Last processed: {last_time}"
+                    )
+
+                # ── Gate: skip if same candle ──────────────────────────────
+                is_new = await _candle_tracker.is_new_candle(pair, current_candle_time)
+                if not is_new:
+                    logger.info(
+                        f"[SIGNAL_GEN] [{pair}] Same 4H candle as last signal — skipping"
+                    )
+                    await asyncio.sleep(2)
+                    continue
+
+                logger.info(
+                    f"[SIGNAL_GEN] [{pair}] NEW 4H candle detected — generating signal"
+                )
+
+            # ── Full signal pipeline ───────────────────────────────────────
             await generate_signal(pair)
+
+            # ── Update tracker after successful pipeline run ───────────────
+            if CANDLE_TRACKING_ENABLED:
+                await _candle_tracker.update_candle_time(pair, current_candle_time)
+                logger.info(f"[SIGNAL_GEN] [{pair}] Candle tracker updated")
+
         except Exception as exc:
-            logger.error(f"[SIGNAL_GEN] [{pair}] Unhandled error: {exc}", exc_info=True)
+            logger.error(
+                f"[SIGNAL_GEN] [{pair}] Unhandled error: {exc}", exc_info=True
+            )
+
         await asyncio.sleep(2)
-    logger.info("[SIGNAL_GEN] 30-min signal generation cycle complete")
+
+    logger.info("[SIGNAL_GEN] 30-min market scan complete")
 
 
 # Keep legacy alias so any external callers / manual triggers still work
@@ -847,6 +930,7 @@ async def lifespan(app: FastAPI):
         _position_manager.set_db(_db)
         _calendar_filter.set_db(_db)
         _risk_manager.set_db(_db)
+        _candle_tracker.set_db(_db)
         logger.info("✅ Risk/position modules connected to MongoDB")
 
     if TELEGRAM_BOT_TOKEN:

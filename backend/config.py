@@ -83,6 +83,11 @@ POSITION_MONITORING_INTERVAL_MINUTES: int = int(
     os.environ.get("POSITION_MONITORING_INTERVAL_MINUTES", "2")
 )
 MIN_CONFIDENCE: int = int(os.environ.get("MIN_CONFIDENCE", "60"))
+
+# Smart 4H candle detection — when True, run_signal_generation() only fires
+# the full signal pipeline when a NEW 4H candle has closed since the last
+# processed one.  Set to "false" to revert to the legacy every-30-min behaviour.
+CANDLE_TRACKING_ENABLED: bool = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lower() == "true"
 MIN_SMC_SCORE: int = int(os.environ.get("MIN_SMC_SCORE", "4"))
 MIN_MTF_CONFLUENCE: int = int(os.environ.get("MIN_MTF_CONFLUENCE", "2"))
 
