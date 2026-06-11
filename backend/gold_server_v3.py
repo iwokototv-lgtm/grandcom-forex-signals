@@ -859,11 +859,11 @@ async def run_all_signals() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — Position Monitoring (every 2 min)
+# Scheduler — Position Monitoring (every 30 min)
 # ---------------------------------------------------------------------------
 async def run_position_monitoring() -> None:
-    """Monitor all open positions every 2 minutes for SL/TP/reversal/risk."""
-    logger.info("[POSITION_MON] Starting 2-min position monitoring cycle")
+    """Monitor all open positions every 30 minutes for SL/TP/reversal/risk."""
+    logger.info("[POSITION_MON] Starting 30-min position monitoring cycle")
     try:
         summary = await _pos_monitor.run_cycle()
         logger.info(
@@ -974,12 +974,12 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
     )
-    # Job 2 — Position monitoring: every 2 minutes (real-time risk management)
+    # Job 2 — Position monitoring: every 30 minutes (aligned with signal generation)
     scheduler.add_job(
         run_position_monitoring,
         "interval",
         minutes=POSITION_MONITORING_INTERVAL_MINUTES,
-        id="position_monitoring_2min",
+        id="position_monitoring_30min",
         max_instances=1,
         coalesce=True,
     )
@@ -1030,7 +1030,7 @@ async def health():
     # Build enriched job list with interval labels
     _interval_labels = {
         "signal_generation_30min": f"{SIGNAL_GENERATION_INTERVAL_MINUTES} minutes",
-        "position_monitoring_2min": f"{POSITION_MONITORING_INTERVAL_MINUTES} minutes",
+        "position_monitoring_30min": f"{POSITION_MONITORING_INTERVAL_MINUTES} minutes",
     }
     jobs = [
         {

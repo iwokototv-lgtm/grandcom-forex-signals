@@ -75,12 +75,12 @@ CORRELATION_ASSETS = ["XAUUSD", "XAUEUR", "DXY", "EURUSD", "GBPUSD", "USDJPY"]
 SIGNAL_INTERVAL_MINUTES: int = int(os.environ.get("SIGNAL_INTERVAL_MINUTES", "2"))
 # Hybrid scheduler intervals
 # SIGNAL_GENERATION_INTERVAL_MINUTES: how often new signals are generated (default 30 min)
-# POSITION_MONITORING_INTERVAL_MINUTES: how often open positions are checked (default 2 min)
+# POSITION_MONITORING_INTERVAL_MINUTES: how often open positions are checked (default 30 min)
 SIGNAL_GENERATION_INTERVAL_MINUTES: int = int(
     os.environ.get("SIGNAL_GENERATION_INTERVAL_MINUTES", "30")
 )
 POSITION_MONITORING_INTERVAL_MINUTES: int = int(
-    os.environ.get("POSITION_MONITORING_INTERVAL_MINUTES", "2")
+    os.environ.get("POSITION_MONITORING_INTERVAL_MINUTES", "30")
 )
 MIN_CONFIDENCE: int = int(os.environ.get("MIN_CONFIDENCE", "60"))
 
