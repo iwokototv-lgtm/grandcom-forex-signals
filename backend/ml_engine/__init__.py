@@ -23,6 +23,9 @@ from .risk_parity import RiskParityAllocator, risk_parity_allocator
 from .volatility_adjustment import VolatilityAdjustment, volatility_adjustment
 from .drawdown_recovery import DrawdownRecoveryManager, drawdown_recovery
 from .economic_calendar import EconomicCalendar, economic_calendar
+from .position_manager import PositionManager, position_manager
+from .reversal_detector import ReversalDetector, reversal_detector
+from .economic_calendar_filter import EconomicCalendarFilter, economic_calendar_filter
 from .performance_attribution import PerformanceAttribution, performance_attribution
 from .trade_journal import TradeJournal, trade_journal
 from .position_calculator import PositionCalculator, position_calculator
@@ -93,6 +96,12 @@ __all__ = [
     'drawdown_recovery',
     'EconomicCalendar',
     'economic_calendar',
+    'PositionManager',
+    'position_manager',
+    'ReversalDetector',
+    'reversal_detector',
+    'EconomicCalendarFilter',
+    'economic_calendar_filter',
     'PerformanceAttribution',
     'performance_attribution',
     'TradeJournal',
