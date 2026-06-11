@@ -22,6 +22,13 @@ from fastapi import FastAPI, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Bot
 
+# Risk & position management modules
+from ml_engine.position_manager import PositionManager, position_manager as _pm_singleton
+from ml_engine.reversal_detector import ReversalDetector, reversal_detector as _rd_singleton
+from ml_engine.risk_manager import RiskManager
+from ml_engine.economic_calendar_filter import EconomicCalendarFilter, economic_calendar_filter as _ecf_singleton
+from ml_engine.drawdown_recovery import DrawdownRecoveryManager, drawdown_recovery as _ddr_singleton
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -83,6 +90,16 @@ _db = None
 
 def get_db():
     return _db
+
+
+# ---------------------------------------------------------------------------
+# Risk / Position Management Singletons
+# ---------------------------------------------------------------------------
+_position_manager: PositionManager = _pm_singleton
+_reversal_detector: ReversalDetector = _rd_singleton
+_risk_manager: RiskManager = RiskManager()
+_calendar_filter: EconomicCalendarFilter = _ecf_singleton
+_drawdown_recovery: DrawdownRecoveryManager = _ddr_singleton
 
 
 # ---------------------------------------------------------------------------
@@ -355,8 +372,11 @@ async def send_to_telegram(
     regime: str = "UNKNOWN",
     smc_score: int = 0,
     mtf_alignment: float = 0.0,
+    position_count: int = 0,
+    exposure_pct: float = 0.0,
+    risk_status: Optional[dict] = None,
 ) -> None:
-    """Send signal to Telegram with v3.0 context."""
+    """Send signal to Telegram with v3.0 context + risk/position data."""
     try:
         bot = get_bot()
         emoji = "🟢" if signal == "BUY" else "🔴"
@@ -376,12 +396,24 @@ async def send_to_telegram(
             f"SL: {sl}\n"
         )
 
+        rs = risk_status or {}
+        daily_pnl = rs.get("daily_pnl", 0.0)
+        daily_loss_pct = rs.get("daily_loss_pct", 0.0)
+        drawdown_pct = rs.get("drawdown_pct", 0.0)
+        risk_level = rs.get("risk_level", "GREEN")
+        risk_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(risk_level, "⚪")
+
         info_msg = (
             f"<b>📊 R:R:</b> 1:{rr}  "
             f"<b>⚡ Confidence:</b> {confidence}%\n"
             f"<b>🎯 Regime:</b> {regime}  "
             f"<b>📐 SMC:</b> {smc_score}/10  "
             f"<b>🔗 MTF:</b> {mtf_alignment:.0f}%\n"
+            f"<b>📈 Positions:</b> {position_count}/5  "
+            f"<b>💰 Exposure:</b> {exposure_pct:.1f}%\n"
+            f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
+            f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
+            f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
             f"<b>📝</b> {_html_escape(analysis)}\n"
             f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
             f"| Grandcom Gold Engine v3.0</i>"
@@ -395,13 +427,111 @@ async def send_to_telegram(
         logger.error(f"[{pair}] Telegram delivery failed: {exc}")
 
 
+async def send_reversal_alert(pair: str, reason: str, closed_count: int, total_pnl: float) -> None:
+    """Send an immediate reversal / close-all alert to Telegram."""
+    try:
+        bot = get_bot()
+        msg = (
+            f"🔄 <b>REVERSAL DETECTED — {pair}</b>\n"
+            f"\n"
+            f"<b>Reason:</b> {_html_escape(reason)}\n"
+            f"<b>Positions closed:</b> {closed_count}\n"
+            f"<b>Total P&L:</b> ${total_pnl:+.2f}\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+    except Exception as exc:
+        logger.error(f"Reversal alert failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Close All Positions
+# ---------------------------------------------------------------------------
+async def close_all_positions(reason: str = "SYSTEM") -> dict:
+    """
+    Close every open position across all pairs.
+    Called on reversal detection, daily loss limit, or drawdown limit.
+    Sends a Telegram notification for each pair closed.
+    """
+    # Fetch current prices for P&L calculation
+    price_map: dict = {}
+    for pair in PAIRS:
+        try:
+            df = await fetch_ohlcv(pair, interval="4h", outputsize=5)
+            if df is not None and len(df) > 0:
+                price_map[pair] = float(df.iloc[-1]["close"])
+        except Exception:
+            pass
+
+    result = await _position_manager.close_all_positions(
+        exit_price_map=price_map,
+        reason=reason,
+    )
+
+    closed = result.get("closed", 0)
+    total_pnl = result.get("total_pnl", 0.0)
+
+    logger.warning(
+        f"close_all_positions: reason={reason} closed={closed} pnl={total_pnl:.2f}"
+    )
+
+    # Telegram notification
+    try:
+        bot = get_bot()
+        msg = (
+            f"🛑 <b>ALL POSITIONS CLOSED</b>\n"
+            f"\n"
+            f"<b>Reason:</b> {_html_escape(reason)}\n"
+            f"<b>Positions closed:</b> {closed}\n"
+            f"<b>Total P&L:</b> ${total_pnl:+.2f}\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+    except Exception as exc:
+        logger.error(f"close_all_positions Telegram alert failed: {exc}")
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Core Signal Generation
 # ---------------------------------------------------------------------------
 async def generate_signal(pair: str) -> None:
-    """Full v3.0 pipeline: fetch → hybrid analysis → GPT → validate → store → send."""
+    """Full v3.0 pipeline: fetch → risk checks → hybrid analysis → GPT → validate → store → send."""
     cfg = PAIRS[pair]
     logger.info(f"[{pair}] Starting v3.0 signal generation")
+
+    # ── PRE-SIGNAL GUARDS ────────────────────────────────────────────────────
+
+    # Guard 1: Economic calendar blackout
+    try:
+        if await _calendar_filter.is_blackout_period(pair):
+            next_ev = await _calendar_filter.get_next_high_impact_event(pair)
+            ev_name = next_ev.get("event", "?") if next_ev else "?"
+            ev_min = next_ev.get("minutes_away", "?") if next_ev else "?"
+            logger.info(
+                f"[{pair}] NEWS BLACKOUT — skipping signal "
+                f"(next event: {ev_name} in {ev_min} min)"
+            )
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Calendar check error (fail-open): {exc}")
+
+    # Guard 2: Daily loss / drawdown limits
+    try:
+        risk_check = await _risk_manager.enforce_risk_limits()
+        if not risk_check.get("trading_allowed", True):
+            reason = risk_check.get("reason", "RISK_LIMIT")
+            logger.warning(f"[{pair}] Trading halted by risk manager: {reason}")
+            # Close all open positions if not already done
+            open_count = await _position_manager.get_position_count()
+            if open_count > 0:
+                await close_all_positions(reason=reason)
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Risk manager check error (fail-open): {exc}")
+
+    # ── PRICE DATA ───────────────────────────────────────────────────────────
 
     # 1. Price data
     df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
@@ -413,6 +543,41 @@ async def generate_signal(pair: str) -> None:
     ind = compute_indicators(df, cfg["decimals"])
     if ind is None:
         return
+
+    # ── REVERSAL DETECTION ───────────────────────────────────────────────────
+
+    # Guard 3: Reversal detection — check BEFORE generating new signal
+    try:
+        # Use hybrid signal as the "current" regime if available; else use trend
+        current_regime = ind.get("trend", "NEUTRAL")
+        reversal = await _reversal_detector.detect_reversal(pair, df, current_regime)
+        if reversal.get("reversal_detected"):
+            rev_reason = reversal.get("reason", "REVERSAL")
+            logger.warning(f"[{pair}] {rev_reason} — closing all positions")
+            close_result = await close_all_positions(reason=f"REVERSAL: {rev_reason}")
+            await send_reversal_alert(
+                pair,
+                rev_reason,
+                close_result.get("closed", 0),
+                close_result.get("total_pnl", 0.0),
+            )
+            # Don't open new positions this cycle — let the market settle
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Reversal detection error (fail-open): {exc}")
+
+    # Guard 4: Position count hard cap
+    try:
+        pos_count = await _position_manager.get_position_count(pair)
+        if pos_count >= 5:
+            logger.info(
+                f"[{pair}] Position cap reached ({pos_count}/5) — skipping new signal"
+            )
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Position count check error: {exc}")
+
+    # ── HYBRID ANALYSIS ──────────────────────────────────────────────────────
 
     # 3. Hybrid system analysis
     hybrid_ctx = {"regime": "UNKNOWN", "smc_score": 0, "mtf_alignment": 0, "pivot_zone": "UNKNOWN"}
@@ -436,6 +601,8 @@ async def generate_signal(pair: str) -> None:
         except Exception as exc:
             logger.error(f"[{pair}] Hybrid system error: {exc}")
 
+    # ── GPT SIGNAL ───────────────────────────────────────────────────────────
+
     # 4. GPT analysis
     gpt = await gpt_signal(pair, ind, cfg, hybrid_ctx)
     if gpt is None:
@@ -453,6 +620,8 @@ async def generate_signal(pair: str) -> None:
     if confidence < MIN_CONFIDENCE:
         logger.info(f"[{pair}] Confidence {confidence}% < {MIN_CONFIDENCE}% — skipping")
         return
+
+    # ── LEVELS & GEOMETRY ────────────────────────────────────────────────────
 
     # 6. Levels
     entry = float(gpt.get("entry_price") or ind["price"])
@@ -473,47 +642,97 @@ async def generate_signal(pair: str) -> None:
     reward = abs(tps[0] - entry)
     rr     = round(reward / risk, 1) if risk > 0 else 2.0
 
-    # 8. Store in MongoDB
+    # ── DRAWDOWN RECOVERY SIZE MULTIPLIER ────────────────────────────────────
+
+    size_multiplier = 1.0
+    try:
+        dd_assessment = _drawdown_recovery.assess(
+            current_balance=_risk_manager.current_equity
+        )
+        if dd_assessment.get("trading_halted"):
+            halt_reason = dd_assessment.get("halt_reason", "DRAWDOWN_HALT")
+            logger.warning(f"[{pair}] DrawdownRecovery halt: {halt_reason}")
+            await close_all_positions(reason=halt_reason)
+            return
+        size_multiplier = dd_assessment.get("size_multiplier", 1.0)
+    except Exception as exc:
+        logger.warning(f"[{pair}] Drawdown recovery check error: {exc}")
+
+    # ── POSITION MANAGEMENT ──────────────────────────────────────────────────
+
+    # 8. Register position with position manager
+    position_size = round(1.0 * size_multiplier, 4)  # base 1 unit × recovery multiplier
+    pos_result = await _position_manager.add_position(
+        pair=pair,
+        entry=entry,
+        tp_levels=tps,
+        sl=sl,
+        size=position_size,
+        confidence=confidence,
+        signal_type=signal_type,
+        analysis=analysis,
+    )
+    if not pos_result.get("allowed", True):
+        logger.warning(f"[{pair}] Position rejected: {pos_result.get('reason')}")
+        return
+
+    # ── STORE IN MONGODB ─────────────────────────────────────────────────────
+
+    # 9. Store signal in MongoDB
     db = get_db()
     if db is not None:
         try:
             doc = {
-                "pair":           pair,
-                "type":           signal_type,
-                "entry_price":    entry,
-                "current_price":  ind["price"],
-                "tp_levels":      tps,
-                "sl_price":       sl,
-                "confidence":     round(confidence, 1),
-                "analysis":       analysis,
-                "risk_reward":    rr,
-                "timeframe":      "4H",
-                "status":         "ACTIVE",
-                "indicators":     ind,
-                "regime":         hybrid_ctx.get("regime", "UNKNOWN"),
-                "smc_score":      hybrid_ctx.get("smc_score", 0),
-                "mtf_alignment":  hybrid_ctx.get("mtf_alignment", 0),
-                "pivot_zone":     hybrid_ctx.get("pivot_zone", "UNKNOWN"),
-                "system_version": "3.0.0",
-                "created_at":     datetime.now(timezone.utc),
+                "pair":             pair,
+                "type":             signal_type,
+                "entry_price":      entry,
+                "current_price":    ind["price"],
+                "tp_levels":        tps,
+                "sl_price":         sl,
+                "confidence":       round(confidence, 1),
+                "analysis":         analysis,
+                "risk_reward":      rr,
+                "timeframe":        "4H",
+                "status":           "ACTIVE",
+                "indicators":       ind,
+                "regime":           hybrid_ctx.get("regime", "UNKNOWN"),
+                "smc_score":        hybrid_ctx.get("smc_score", 0),
+                "mtf_alignment":    hybrid_ctx.get("mtf_alignment", 0),
+                "pivot_zone":       hybrid_ctx.get("pivot_zone", "UNKNOWN"),
+                "position_id":      pos_result.get("position_id"),
+                "position_size":    position_size,
+                "size_multiplier":  size_multiplier,
+                "system_version":   "3.0.0",
+                "created_at":       datetime.now(timezone.utc),
             }
             result = await db.gold_signals.insert_one(doc)
             logger.info(f"[{pair}] Signal stored — id={result.inserted_id}")
         except Exception as exc:
             logger.error(f"[{pair}] MongoDB insert failed: {exc}")
 
-    # 9. Send to Telegram
+    # ── TELEGRAM ─────────────────────────────────────────────────────────────
+
+    # 10. Gather risk context for alert
+    pos_summary = await _position_manager.get_positions_summary()
+    risk_status = _risk_manager.get_risk_status()
+
+    # 11. Send to Telegram
     await send_to_telegram(
         pair, signal_type, entry, tps, sl,
         round(confidence, 1), rr, analysis,
         regime=hybrid_ctx.get("regime", "UNKNOWN"),
         smc_score=hybrid_ctx.get("smc_score", 0),
         mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
+        position_count=pos_summary.get("total_open", 0),
+        exposure_pct=pos_summary.get("exposure_pct", 0.0),
+        risk_status=risk_status,
     )
 
     logger.info(
         f"[{pair}] ✅ {signal_type} @ {entry} | "
-        f"TP: {tps} | SL: {sl} | R:R 1:{rr} | Conf: {confidence}%"
+        f"TP: {tps} | SL: {sl} | R:R 1:{rr} | Conf: {confidence}% | "
+        f"Positions: {pos_summary.get('total_open', 0)}/5 | "
+        f"Risk: {risk_status.get('risk_level', 'GREEN')}"
     )
 
 
@@ -579,6 +798,31 @@ async def lifespan(app: FastAPI):
 
     # Hybrid system
     get_hybrid_system()
+
+    # ── Inject DB + Telegram into risk/position modules ──────────────────────
+    if _db is not None:
+        _position_manager.set_db(_db)
+        _calendar_filter.set_db(_db)
+        _risk_manager.set_db(_db)
+        logger.info("✅ Risk/position modules connected to MongoDB")
+
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            _risk_manager.set_telegram(get_bot(), TELEGRAM_CHANNEL_ID)
+            logger.info("✅ Risk manager Telegram alerts enabled")
+        except Exception as exc:
+            logger.warning(f"Risk manager Telegram setup failed: {exc}")
+
+    # Initialise risk manager with account balance
+    _risk_manager.set_account_balance(ACCOUNT_BALANCE)
+    _drawdown_recovery.reset_all(ACCOUNT_BALANCE)
+
+    # Pre-fetch economic calendar
+    try:
+        await _calendar_filter.fetch_calendar()
+        logger.info("✅ Economic calendar pre-fetched")
+    except Exception as exc:
+        logger.warning(f"Economic calendar pre-fetch failed: {exc}")
 
     # Scheduler
     scheduler.add_job(
@@ -866,6 +1110,73 @@ async def trigger_signal(pair: Optional[str] = None):
     else:
         asyncio.create_task(run_all_signals())
         return {"message": "Signal generation triggered for all pairs", "timestamp": datetime.utcnow().isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 12: Open Positions
+# ---------------------------------------------------------------------------
+@app.get("/api/positions")
+async def get_positions(pair: Optional[str] = None):
+    """List all open positions, optionally filtered by pair."""
+    positions = await _position_manager.get_open_positions(pair=pair.upper() if pair else None)
+    summary = await _position_manager.get_positions_summary()
+    # Strip MongoDB _id for JSON serialisation
+    clean = []
+    for pos in positions:
+        p = {k: v for k, v in pos.items() if k != "_id"}
+        if "opened_at" in p and hasattr(p["opened_at"], "isoformat"):
+            p["opened_at"] = p["opened_at"].isoformat()
+        clean.append(p)
+    return {
+        "positions": clean,
+        "summary": summary,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 13: Risk Status
+# ---------------------------------------------------------------------------
+@app.get("/api/risk-status")
+async def get_risk_status():
+    """Return current daily P&L, drawdown, exposure, and risk level."""
+    risk = _risk_manager.get_risk_status()
+    pos_summary = await _position_manager.get_positions_summary()
+    calendar_status = await _calendar_filter.get_blackout_status("XAUUSD")
+    dd_assessment = _drawdown_recovery.assess(
+        current_balance=_risk_manager.current_equity
+    )
+    return {
+        "risk": risk,
+        "positions": pos_summary,
+        "calendar": {
+            "safe_to_trade": calendar_status.get("safe_to_trade", True),
+            "reason": calendar_status.get("reason", "CLEAR"),
+            "next_event": calendar_status.get("next_event"),
+        },
+        "drawdown_recovery": {
+            "size_multiplier": dd_assessment.get("size_multiplier", 1.0),
+            "recovery_level": dd_assessment.get("recovery_level", "FULL_CAPACITY"),
+            "trading_halted": dd_assessment.get("trading_halted", False),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 14: Close All Positions (manual)
+# ---------------------------------------------------------------------------
+@app.post("/api/close-all")
+async def manual_close_all(reason: str = "MANUAL"):
+    """Manually close all open positions."""
+    result = await close_all_positions(reason=f"MANUAL: {reason}")
+    return {
+        "success": result.get("success", False),
+        "closed": result.get("closed", 0),
+        "total_pnl": result.get("total_pnl", 0.0),
+        "reason": result.get("reason"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
