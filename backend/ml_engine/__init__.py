@@ -33,6 +33,7 @@ from .portfolio_manager import PortfolioManager, portfolio_manager
 from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
 from .geometry_rating import GeometryRating, geometry_rater
+from .candle_tracker import CandleTracker, candle_tracker
 
 # ── Phase 2: Signal Quality V2 ────────────────────────────────────────────
 # Imported with graceful degradation so that a broken Phase 2 module never
@@ -117,6 +118,9 @@ __all__ = [
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',
+    # Candle Tracker
+    'CandleTracker',
+    'candle_tracker',
     # Phase 2: Signal Quality V2
     'SignalQualityV2',
     'signal_quality_v2',
