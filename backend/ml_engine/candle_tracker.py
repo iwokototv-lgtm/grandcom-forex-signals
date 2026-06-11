@@ -47,6 +47,12 @@ class CandleTracker:
     # Public API
     # ------------------------------------------------------------------
 
+    def _ensure_aware(self, dt: datetime) -> datetime:
+        """Convert naive datetime to UTC-aware."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
     async def is_new_candle(self, pair: str, current_time: datetime) -> bool:
         """
         Return ``True`` if *current_time* is strictly newer than the last
@@ -63,6 +69,10 @@ class CandleTracker:
                 f"treating as NEW (first run)"
             )
             return True
+
+        # Normalize both to UTC-aware for safe comparison
+        current_time = self._ensure_aware(current_time)
+        last_time = self._ensure_aware(last_time)
 
         is_new = current_time > last_time
         if not is_new:
