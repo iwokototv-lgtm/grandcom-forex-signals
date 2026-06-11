@@ -28,6 +28,7 @@ from ml_engine.reversal_detector import ReversalDetector, reversal_detector as _
 from ml_engine.risk_manager import RiskManager
 from ml_engine.economic_calendar_filter import EconomicCalendarFilter, economic_calendar_filter as _ecf_singleton
 from ml_engine.drawdown_recovery import DrawdownRecoveryManager, drawdown_recovery as _ddr_singleton
+from ml_engine.position_monitor import PositionMonitor, position_monitor as _position_monitor_singleton
 
 load_dotenv()
 
@@ -56,6 +57,13 @@ except ValueError:
     TELEGRAM_CHANNEL_ID = _raw_channel
 
 SIGNAL_INTERVAL_MINUTES = int(os.environ.get("SIGNAL_INTERVAL_MINUTES", "2"))
+# Hybrid scheduler: separate signal generation (30 min) from position monitoring (2 min)
+SIGNAL_GENERATION_INTERVAL_MINUTES = int(
+    os.environ.get("SIGNAL_GENERATION_INTERVAL_MINUTES", "30")
+)
+POSITION_MONITORING_INTERVAL_MINUTES = int(
+    os.environ.get("POSITION_MONITORING_INTERVAL_MINUTES", "2")
+)
 MIN_CONFIDENCE = int(os.environ.get("MIN_CONFIDENCE", "60"))
 ACCOUNT_BALANCE = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
 
@@ -100,6 +108,7 @@ _reversal_detector: ReversalDetector = _rd_singleton
 _risk_manager: RiskManager = RiskManager()
 _calendar_filter: EconomicCalendarFilter = _ecf_singleton
 _drawdown_recovery: DrawdownRecoveryManager = _ddr_singleton
+_pos_monitor: PositionMonitor = _position_monitor_singleton
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +453,15 @@ async def send_reversal_alert(pair: str, reason: str, closed_count: int, total_p
         logger.error(f"Reversal alert failed: {exc}")
 
 
+async def send_position_monitor_alert(msg: str) -> None:
+    """Send a position-monitor close alert to Telegram (HTML parse mode)."""
+    try:
+        bot = get_bot()
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+    except Exception as exc:
+        logger.error(f"[POSITION_MON] Telegram alert failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Close All Positions
 # ---------------------------------------------------------------------------
@@ -737,17 +755,42 @@ async def generate_signal(pair: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler
+# Scheduler — Signal Generation (every 30 min)
 # ---------------------------------------------------------------------------
-async def run_all_signals() -> None:
-    logger.info("=== v3.0 Signal generation cycle START ===")
+async def run_signal_generation() -> None:
+    """Generate new signals every 30 minutes. Full pipeline per pair."""
+    logger.info("[SIGNAL_GEN] Starting 30-min signal generation cycle")
     for pair in PAIRS:
         try:
             await generate_signal(pair)
         except Exception as exc:
-            logger.error(f"[{pair}] Unhandled error: {exc}", exc_info=True)
+            logger.error(f"[SIGNAL_GEN] [{pair}] Unhandled error: {exc}", exc_info=True)
         await asyncio.sleep(2)
-    logger.info("=== v3.0 Signal generation cycle END ===")
+    logger.info("[SIGNAL_GEN] 30-min signal generation cycle complete")
+
+
+# Keep legacy alias so any external callers / manual triggers still work
+async def run_all_signals() -> None:
+    """Legacy alias for run_signal_generation — kept for backward compatibility."""
+    await run_signal_generation()
+
+
+# ---------------------------------------------------------------------------
+# Scheduler — Position Monitoring (every 2 min)
+# ---------------------------------------------------------------------------
+async def run_position_monitoring() -> None:
+    """Monitor all open positions every 2 minutes for SL/TP/reversal/risk."""
+    logger.info("[POSITION_MON] Starting 2-min position monitoring cycle")
+    try:
+        summary = await _pos_monitor.run_cycle()
+        logger.info(
+            f"[POSITION_MON] Cycle complete — "
+            f"checked={summary.get('checked', 0)} "
+            f"closed={summary.get('closed', 0)} "
+            f"errors={summary.get('errors', 0)}"
+        )
+    except Exception as exc:
+        logger.error(f"[POSITION_MON] Unhandled error in monitoring cycle: {exc}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -824,22 +867,47 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Economic calendar pre-fetch failed: {exc}")
 
-    # Scheduler
+    # ── Configure position monitor ────────────────────────────────────────────
+    _pos_monitor.configure(
+        position_manager=_position_manager,
+        reversal_detector=_reversal_detector,
+        risk_manager=_risk_manager,
+        drawdown_recovery=_drawdown_recovery,
+        fetch_ohlcv=fetch_ohlcv,
+        close_position_fn=_position_manager.close_position,
+        send_alert_fn=send_position_monitor_alert,
+        pairs=PAIRS,
+    )
+    logger.info("✅ Position monitor configured")
+
+    # ── Scheduler: two separate jobs ─────────────────────────────────────────
+    # Job 1 — Signal generation: every 30 minutes (high-quality signals only)
     scheduler.add_job(
-        run_all_signals,
+        run_signal_generation,
         "interval",
-        minutes=SIGNAL_INTERVAL_MINUTES,
-        id="gold_signals_v3",
+        minutes=SIGNAL_GENERATION_INTERVAL_MINUTES,
+        id="signal_generation_30min",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Job 2 — Position monitoring: every 2 minutes (real-time risk management)
+    scheduler.add_job(
+        run_position_monitoring,
+        "interval",
+        minutes=POSITION_MONITORING_INTERVAL_MINUTES,
+        id="position_monitoring_2min",
         max_instances=1,
         coalesce=True,
     )
     scheduler.start()
     logger.info(
-        f"✅ Scheduler started — pairs={list(PAIRS.keys())} "
-        f"interval={SIGNAL_INTERVAL_MINUTES}min"
+        f"✅ Scheduler started — pairs={list(PAIRS.keys())} | "
+        f"signal_generation={SIGNAL_GENERATION_INTERVAL_MINUTES}min | "
+        f"position_monitoring={POSITION_MONITORING_INTERVAL_MINUTES}min"
     )
 
-    asyncio.create_task(run_all_signals())
+    # Run an immediate signal generation cycle on startup
+    asyncio.create_task(run_signal_generation())
 
     yield
 
@@ -875,8 +943,17 @@ async def health():
     hybrid = get_hybrid_system()
     system_status = hybrid.get_system_status() if hybrid else {"status": "unavailable"}
 
+    # Build enriched job list with interval labels
+    _interval_labels = {
+        "signal_generation_30min": f"{SIGNAL_GENERATION_INTERVAL_MINUTES} minutes",
+        "position_monitoring_2min": f"{POSITION_MONITORING_INTERVAL_MINUTES} minutes",
+    }
     jobs = [
-        {"id": j.id, "next_run": str(j.next_run_time)}
+        {
+            "id": j.id,
+            "next_run": str(j.next_run_time),
+            "interval": _interval_labels.get(j.id, "unknown"),
+        }
         for j in scheduler.get_jobs()
     ]
 
@@ -888,6 +965,8 @@ async def health():
         "telegram_channel":  TELEGRAM_CHANNEL_ID,
         "scheduler_running": scheduler.running,
         "scheduler_jobs":    jobs,
+        "signal_generation_interval_minutes":  SIGNAL_GENERATION_INTERVAL_MINUTES,
+        "position_monitoring_interval_minutes": POSITION_MONITORING_INTERVAL_MINUTES,
         "mongo_connected":   mongo_ok,
         "system_components": system_status.get("total_components", 0),
         "timestamp":         datetime.now(timezone.utc).isoformat(),
