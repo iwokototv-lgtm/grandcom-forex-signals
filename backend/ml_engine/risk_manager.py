@@ -63,6 +63,7 @@ class RiskManager:
         self.consecutive_losses = 0
         self.equity_peak = 0.0  # Initialised on first set_account_balance call
         self.current_equity = 0.0
+        self.starting_balance = 0.0  # Set on first set_account_balance call
         self.open_positions: List[Dict] = []
         self.trade_history: List[Dict] = []
 
@@ -88,10 +89,15 @@ class RiskManager:
 
     def set_account_balance(self, balance: float) -> None:
         self.current_equity = balance
+        # Initialise starting_balance on first call only
+        if self.starting_balance == 0.0:
+            self.starting_balance = balance
+            logger.info(f"RiskManager: starting_balance set to {self.starting_balance:.2f}")
         # Initialise peak on first call, or update if balance is a new high
         if self.equity_peak == 0.0 or balance > self.equity_peak:
             self.equity_peak = balance
             logger.info(f"RiskManager: equity_peak initialised/updated to {self.equity_peak:.2f}")
+
 
     # ------------------------------------------------------------------
     # Daily reset (call at midnight UTC or on startup)
@@ -247,6 +253,64 @@ class RiskManager:
             })
         except Exception as exc:
             logger.error(f"risk_events insert failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # Validation & Auto-Recovery
+    # ------------------------------------------------------------------
+
+    async def validate_state(self) -> dict:
+        """Validate all critical state values."""
+        from ml_engine.validation import ValidationEngine
+
+        drawdown_result = await self.check_account_drawdown()
+        drawdown_pct = drawdown_result.get("drawdown_pct", 0.0)
+
+        validation = {
+            "balance": ValidationEngine.validate_account_balance(
+                self.current_equity,
+                self.starting_balance,
+            ),
+            "peak": ValidationEngine.validate_peak_balance(
+                self.equity_peak,
+                self.current_equity,
+                self.starting_balance,
+            ),
+            "drawdown": ValidationEngine.validate_drawdown(
+                drawdown_pct,
+                self.equity_peak,
+                self.current_equity,
+            ),
+            "positions": ValidationEngine.validate_position_count(
+                len(self.open_positions),
+                5,   # max per pair
+                2,   # num pairs
+            ),
+        }
+
+        # Log any errors or warnings
+        for check, result in validation.items():
+            if not result["valid"]:
+                logger.error(f"[VALIDATION] {check} FAILED: {result['errors']}")
+            if result.get("warnings"):
+                logger.warning(f"[VALIDATION] {check} WARNING: {result['warnings']}")
+
+        return validation
+
+    async def auto_recover_from_invalid_state(self) -> None:
+        """Automatically recover from invalid state."""
+        validation = await self.validate_state()
+
+        # If peak is wrong, reset it to current balance
+        if not validation["peak"]["valid"]:
+            logger.error("[AUTO_RECOVER] Resetting equity_peak to current balance")
+            self.equity_peak = self.current_equity
+
+        # If balance is invalid, send a critical alert
+        if not validation["balance"]["valid"]:
+            logger.critical("[AUTO_RECOVER] CRITICAL: Invalid balance detected!")
+            await self._send_risk_alert(
+                "🚨 CRITICAL: Invalid account balance detected!"
+            )
 
     def get_risk_status(self) -> Dict[str, Any]:
         """Return a compact risk status dict for Telegram alerts."""
