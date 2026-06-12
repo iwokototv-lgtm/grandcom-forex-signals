@@ -181,6 +181,124 @@ async def fetch_ohlcv(pair: str, interval: str = "4h", outputsize: int = 100) ->
         return None
 
 
+async def fetch_ohlcv_with_retry(
+    pair: str,
+    interval: str = "4h",
+    outputsize: int = 100,
+    max_retries: int = 3,
+    backoff_factor: float = 2.0,
+) -> pd.DataFrame | None:
+    """
+    Fetch OHLCV from TwelveData with exponential backoff retry.
+
+    Retries up to 3 times with exponential backoff:
+    - Attempt 1: Immediate
+    - Attempt 2: Wait 1 second
+    - Attempt 3: Wait 2 seconds
+    - Attempt 4: Wait 4 seconds
+
+    Total max time: ~7 seconds (well within 30-min cycle)
+    """
+    cfg = PAIRS[pair]
+    url = (
+        f"https://api.twelvedata.com/time_series"
+        f"?symbol={cfg['symbol']}&interval={interval}&outputsize={outputsize}"
+        f"&apikey={TWELVE_DATA_API_KEY}"
+    )
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"[{pair}] Fetching OHLCV (attempt {attempt + 1}/{max_retries})")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=30),  # Increased from 15s to 30s
+                ) as resp:
+                    data = await resp.json()
+
+            # Check for API error response
+            if "values" not in data:
+                error_msg = data.get("message", str(data))
+                logger.warning(
+                    f"[{pair}] TwelveData API error: {error_msg} "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                last_error = error_msg
+
+                # Retry on API error
+                if attempt < max_retries - 1:
+                    wait_time = backoff_factor ** attempt
+                    logger.info(f"[{pair}] Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                # All retries exhausted
+                return None
+
+            # Success
+            df = pd.DataFrame(data["values"])
+            for col in ("open", "high", "low", "close"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.iloc[::-1].reset_index(drop=True)
+
+            logger.info(
+                f"[{pair}] Fetched {len(df)} {interval} candles "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            return df
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[{pair}] API timeout (30s) "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            last_error = "API timeout (30s)"
+
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                logger.info(f"[{pair}] Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+
+            return None
+
+        except aiohttp.ClientError as exc:
+            logger.warning(
+                f"[{pair}] HTTP client error: {exc} "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            last_error = str(exc)
+
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                logger.info(f"[{pair}] Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+
+            return None
+
+        except Exception as exc:
+            logger.error(
+                f"[{pair}] Unexpected error: {exc} "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            last_error = str(exc)
+
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                logger.info(f"[{pair}] Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
+
+            return None
+
+    logger.error(f"[{pair}] All {max_retries} fetch attempts failed: {last_error}")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Technical Indicators
 # ---------------------------------------------------------------------------
@@ -466,6 +584,64 @@ async def send_position_monitor_alert(msg: str) -> None:
         logger.error(f"[POSITION_MON] Telegram alert failed: {exc}")
 
 
+async def send_signal_failure_alert(
+    pair: str,
+    reason: str,
+    cycle_time: datetime,
+) -> None:
+    """Send alert when signal generation fails."""
+    try:
+        bot = get_bot()
+        msg = (
+            f"⚠️ <b>SIGNAL GENERATION FAILED — {pair}</b>\n"
+            f"\n"
+            f"<b>Reason:</b> {_html_escape(reason)}\n"
+            f"<b>Cycle Time:</b> {cycle_time.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"<b>Action:</b> Waiting for next cycle...\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+        logger.warning(f"[{pair}] Failure alert sent: {reason}")
+    except Exception as exc:
+        logger.error(f"[{pair}] Failure alert failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Signal Metrics
+# ---------------------------------------------------------------------------
+class SignalMetrics:
+    """Track signal generation metrics."""
+
+    def __init__(self):
+        self.total_cycles = 0
+        self.successful_signals = 0
+        self.failed_cycles = 0
+        self.retry_attempts = 0
+        self.api_timeouts = 0
+        self.api_errors = 0
+
+    async def log_metrics(self) -> dict:
+        """Return current metrics."""
+        success_rate = (
+            (self.successful_signals / self.total_cycles * 100)
+            if self.total_cycles > 0
+            else 0
+        )
+        return {
+            "total_cycles": self.total_cycles,
+            "successful_signals": self.successful_signals,
+            "failed_cycles": self.failed_cycles,
+            "success_rate": f"{success_rate:.1f}%",
+            "retry_attempts": self.retry_attempts,
+            "api_timeouts": self.api_timeouts,
+            "api_errors": self.api_errors,
+        }
+
+
+# Singleton metrics tracker
+_signal_metrics = SignalMetrics()
+
+
 # ---------------------------------------------------------------------------
 # Close All Positions
 # ---------------------------------------------------------------------------
@@ -521,7 +697,10 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
 async def generate_signal(pair: str) -> None:
     """Full v3.0 pipeline: fetch → risk checks → hybrid analysis → GPT → validate → store → send."""
     cfg = PAIRS[pair]
-    logger.info(f"[{pair}] Starting v3.0 signal generation")
+    cycle_time = datetime.now(timezone.utc)
+    logger.info(f"[{pair}] Starting v3.0 signal generation at {cycle_time.isoformat()}")
+
+    _signal_metrics.total_cycles += 1
 
     # ── PRE-SIGNAL GUARDS ────────────────────────────────────────────────────
 
@@ -555,10 +734,13 @@ async def generate_signal(pair: str) -> None:
 
     # ── PRICE DATA ───────────────────────────────────────────────────────────
 
-    # 1. Price data
-    df = await fetch_ohlcv(pair, interval="4h", outputsize=100)
+    # 1. Price data — with retry and exponential backoff
+    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=100)
     if df is None or len(df) < 52:
-        logger.warning(f"[{pair}] Insufficient candles, skipping")
+        reason = "Insufficient candles or API failure"
+        logger.error(f"[{pair}] {reason}")
+        _signal_metrics.failed_cycles += 1
+        await send_signal_failure_alert(pair, reason, cycle_time)
         return
 
     # 2. Indicators
@@ -750,6 +932,7 @@ async def generate_signal(pair: str) -> None:
         risk_status=risk_status,
     )
 
+    _signal_metrics.successful_signals += 1
     logger.info(
         f"[{pair}] ✅ {signal_type} @ {entry} | "
         f"TP: {tps} | SL: {sl} | R:R 1:{rr} | Conf: {confidence}% | "
@@ -759,20 +942,21 @@ async def generate_signal(pair: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scheduler — Signal Generation (every 30 min, NEW 4H candle gate)
+# Scheduler — Signal Generation (cron-based, aligned to 4H candle closes)
 # ---------------------------------------------------------------------------
 async def run_signal_generation() -> None:
     """Generate signals only on NEW H4 candle confirmation.
 
-    The scheduler fires every 30 minutes, but the full signal pipeline is
-    only executed when a *new* 4H candle has closed since the last processed
-    one.  This eliminates redundant signals, wasted API calls, and Telegram
-    spam while keeping the 30-min scan cadence for responsiveness.
+    The scheduler fires via cron at exact 4H candle close times
+    (03:00, 07:00, 11:00, 15:00, 19:00, 23:00 UTC + 5 seconds), but the
+    full signal pipeline is only executed when a *new* 4H candle has closed
+    since the last processed one.  This eliminates redundant signals, wasted
+    API calls, and Telegram spam.
 
     Set ``CANDLE_TRACKING_ENABLED=false`` to revert to the legacy behaviour
-    (signal on every 30-min tick regardless of candle state).
+    (signal on every cron tick regardless of candle state).
     """
-    logger.info("[SIGNAL_GEN] Starting 30-min market scan")
+    logger.info("[SIGNAL_GEN] Starting cron-triggered market scan")
 
     for pair in PAIRS:
         try:
@@ -849,7 +1033,7 @@ async def run_signal_generation() -> None:
 
         await asyncio.sleep(2)
 
-    logger.info("[SIGNAL_GEN] 30-min market scan complete")
+    logger.info("[SIGNAL_GEN] Cron-triggered market scan complete")
 
 
 # Keep legacy alias so any external callers / manual triggers still work
@@ -1028,22 +1212,26 @@ async def lifespan(app: FastAPI):
     )
     logger.info("✅ Position monitor configured")
 
-    # ── Scheduler: two separate jobs ─────────────────────────────────────────
-    # Job 1 — Signal generation: every 30 minutes (high-quality signals only)
+    # ── Scheduler: cron-based jobs aligned to 4H candle closes ───────────────
+    # Job 1 — Signal generation: cron at exact 4H candle close times (UTC)
     scheduler.add_job(
         run_signal_generation,
-        "interval",
-        minutes=SIGNAL_GENERATION_INTERVAL_MINUTES,
-        id="signal_generation_30min",
+        "cron",
+        hour="3,7,11,15,19,23",  # Exact 4H candle close times
+        minute=0,
+        second=5,  # 5 seconds after candle closes
+        id="signal_generation_cron",
         max_instances=1,
         coalesce=True,
     )
-    # Job 2 — Position monitoring: every 30 minutes (aligned with signal generation)
+    # Job 2 — Position monitoring: 30 min after each candle close
     scheduler.add_job(
         run_position_monitoring,
-        "interval",
-        minutes=POSITION_MONITORING_INTERVAL_MINUTES,
-        id="position_monitoring_30min",
+        "cron",
+        hour="3,7,11,15,19,23",
+        minute=30,  # 30 min after candle closes
+        second=0,
+        id="position_monitoring_cron",
         max_instances=1,
         coalesce=True,
     )
@@ -1059,8 +1247,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info(
         f"✅ Scheduler started — pairs={list(PAIRS.keys())} | "
-        f"signal_generation={SIGNAL_GENERATION_INTERVAL_MINUTES}min | "
-        f"position_monitoring={POSITION_MONITORING_INTERVAL_MINUTES}min | "
+        f"signal_generation=cron(03,07,11,15,19,23:00:05 UTC) | "
+        f"position_monitoring=cron(03,07,11,15,19,23:30:00 UTC) | "
         f"validation=5min"
     )
 
@@ -1117,16 +1305,17 @@ async def health():
     hybrid = get_hybrid_system()
     system_status = hybrid.get_system_status() if hybrid else {"status": "unavailable"}
 
-    # Build enriched job list with interval labels
-    _interval_labels = {
-        "signal_generation_30min": f"{SIGNAL_GENERATION_INTERVAL_MINUTES} minutes",
-        "position_monitoring_30min": f"{POSITION_MONITORING_INTERVAL_MINUTES} minutes",
+    # Build enriched job list with schedule labels
+    _schedule_labels = {
+        "signal_generation_cron": "cron(03,07,11,15,19,23:00:05 UTC)",
+        "position_monitoring_cron": "cron(03,07,11,15,19,23:30:00 UTC)",
+        "validation_cycle_5min": "interval(5 minutes)",
     }
     jobs = [
         {
             "id": j.id,
             "next_run": str(j.next_run_time),
-            "interval": _interval_labels.get(j.id, "unknown"),
+            "schedule": _schedule_labels.get(j.id, "unknown"),
         }
         for j in scheduler.get_jobs()
     ]
@@ -1139,8 +1328,8 @@ async def health():
         "telegram_channel":  TELEGRAM_CHANNEL_ID,
         "scheduler_running": scheduler.running,
         "scheduler_jobs":    jobs,
-        "signal_generation_interval_minutes":  SIGNAL_GENERATION_INTERVAL_MINUTES,
-        "position_monitoring_interval_minutes": POSITION_MONITORING_INTERVAL_MINUTES,
+        "signal_generation_schedule": "cron(03,07,11,15,19,23:00:05 UTC)",
+        "position_monitoring_schedule": "cron(03,07,11,15,19,23:30:00 UTC)",
         "mongo_connected":   mongo_ok,
         "system_components": system_status.get("total_components", 0),
         "timestamp":         datetime.now(timezone.utc).isoformat(),
@@ -1468,6 +1657,15 @@ async def health_database():
         "integrity": result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 17: Signal Generation Metrics
+# ---------------------------------------------------------------------------
+@app.get("/api/metrics/signals")
+async def get_signal_metrics():
+    """Get signal generation metrics (success rate, retries, API errors)."""
+    return await _signal_metrics.log_metrics()
 
 
 # ---------------------------------------------------------------------------
