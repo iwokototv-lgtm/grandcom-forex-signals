@@ -859,6 +859,70 @@ async def run_all_signals() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler — Validation Cycle (every 5 min)
+# ---------------------------------------------------------------------------
+async def run_validation_cycle() -> None:
+    """Run validation checks every 5 minutes."""
+    logger.info("[VALIDATION] Starting 5-min validation cycle")
+
+    try:
+        validation = await _risk_manager.validate_state()
+
+        for check, result in validation.items():
+            if not result["valid"]:
+                logger.error(f"[VALIDATION] {check} FAILED: {result['errors']}")
+                # Attempt auto-recovery and send alert
+                await _risk_manager.auto_recover_from_invalid_state()
+                try:
+                    bot = get_bot()
+                    await bot.send_message(
+                        chat_id=TELEGRAM_CHANNEL_ID,
+                        text=f"🚨 Validation failed: {check} — {result['errors']}",
+                    )
+                except Exception as exc:
+                    logger.warning(f"[VALIDATION] Telegram alert failed: {exc}")
+
+            if result.get("warnings"):
+                logger.warning(f"[VALIDATION] {check}: {result['warnings']}")
+
+    except Exception as exc:
+        logger.error(f"[VALIDATION] Cycle error: {exc}", exc_info=True)
+
+    logger.info("[VALIDATION] 5-min validation cycle complete")
+
+
+# ---------------------------------------------------------------------------
+# Database Integrity Check
+# ---------------------------------------------------------------------------
+async def check_database_integrity() -> dict:
+    """Check MongoDB data integrity."""
+    db = get_db()
+    if db is None:
+        return {"valid": False, "error": "MongoDB not connected"}
+
+    try:
+        # Check positions collection
+        positions = await db.positions.find({}).to_list(None)
+
+        # Validate each position
+        for pos in positions:
+            if not pos.get("entry_price") or pos["entry_price"] <= 0:
+                logger.error(f"[DB_INTEGRITY] Invalid position entry_price: {pos.get('_id')}")
+
+        # Check signals collection
+        signals = await db.gold_signals.find({}).to_list(None)
+
+        return {
+            "valid": True,
+            "positions_count": len(positions),
+            "signals_count": len(signals),
+        }
+    except Exception as exc:
+        logger.error(f"[DB_INTEGRITY] Check failed: {exc}")
+        return {"valid": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Scheduler — Position Monitoring (every 30 min)
 # ---------------------------------------------------------------------------
 async def run_position_monitoring() -> None:
@@ -983,12 +1047,38 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
     )
+    # Job 3 — Validation cycle: every 5 minutes
+    scheduler.add_job(
+        run_validation_cycle,
+        "interval",
+        minutes=5,
+        id="validation_cycle_5min",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     logger.info(
         f"✅ Scheduler started — pairs={list(PAIRS.keys())} | "
         f"signal_generation={SIGNAL_GENERATION_INTERVAL_MINUTES}min | "
-        f"position_monitoring={POSITION_MONITORING_INTERVAL_MINUTES}min"
+        f"position_monitoring={POSITION_MONITORING_INTERVAL_MINUTES}min | "
+        f"validation=5min"
     )
+
+    # Validate system state on startup
+    logger.info("🔍 Running startup validation checks...")
+    try:
+        startup_validation = await _risk_manager.validate_state()
+        if not all(v["valid"] for v in startup_validation.values()):
+            logger.error("❌ Startup validation FAILED!")
+            for check, result in startup_validation.items():
+                if not result["valid"]:
+                    logger.error(f"  {check}: {result['errors']}")
+            # Attempt auto-recovery rather than hard-stopping
+            await _risk_manager.auto_recover_from_invalid_state()
+        else:
+            logger.info("✅ All startup validation checks passed")
+    except Exception as exc:
+        logger.warning(f"Startup validation error (non-fatal): {exc}")
 
     # Run an immediate signal generation cycle on startup
     asyncio.create_task(run_signal_generation())
@@ -1338,6 +1428,44 @@ async def manual_close_all(reason: str = "MANUAL"):
         "closed": result.get("closed", 0),
         "total_pnl": result.get("total_pnl", 0.0),
         "reason": result.get("reason"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 15: Validation Health Check
+# ---------------------------------------------------------------------------
+@app.get("/api/health/validation")
+async def health_validation():
+    """Comprehensive validation health check."""
+    try:
+        validation = await _risk_manager.validate_state()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    all_valid = all(v["valid"] for v in validation.values())
+
+    return {
+        "status": "healthy" if all_valid else "unhealthy",
+        "validation": validation,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 16: Database Integrity Check
+# ---------------------------------------------------------------------------
+@app.get("/api/health/database")
+async def health_database():
+    """Check MongoDB data integrity."""
+    result = await check_database_integrity()
+    return {
+        "status": "healthy" if result.get("valid") else "unhealthy",
+        "integrity": result,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
