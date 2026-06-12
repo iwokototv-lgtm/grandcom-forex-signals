@@ -61,8 +61,8 @@ class RiskManager:
         self.weekly_pnl = 0.0
         self.monthly_pnl = 0.0
         self.consecutive_losses = 0
-        self.equity_peak = 100000  # Assume $100k starting
-        self.current_equity = 100000
+        self.equity_peak = 0.0  # Initialised on first set_account_balance call
+        self.current_equity = 0.0
         self.open_positions: List[Dict] = []
         self.trade_history: List[Dict] = []
 
@@ -88,8 +88,10 @@ class RiskManager:
 
     def set_account_balance(self, balance: float) -> None:
         self.current_equity = balance
-        if self.equity_peak < balance:
+        # Initialise peak on first call, or update if balance is a new high
+        if self.equity_peak == 0.0 or balance > self.equity_peak:
             self.equity_peak = balance
+            logger.info(f"RiskManager: equity_peak initialised/updated to {self.equity_peak:.2f}")
 
     # ------------------------------------------------------------------
     # Daily reset (call at midnight UTC or on startup)
