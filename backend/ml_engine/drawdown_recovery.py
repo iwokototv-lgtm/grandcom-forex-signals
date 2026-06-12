@@ -46,7 +46,8 @@ class DrawdownRecoveryManager:
         self.version = "3.0.0"
 
         # State
-        self.peak_balance: float = 0.0
+        self.peak_balance: float = 0.0  # Initialised on first assess() call
+        self._peak_initialised: bool = False
         self.current_balance: float = 0.0
         self.daily_start_balance: float = 0.0
         self.trade_history: List[Dict] = []
@@ -74,9 +75,19 @@ class DrawdownRecoveryManager:
             Assessment with size multiplier and recovery status
         """
         try:
+            # Initialise peak on first call so it reflects the real starting balance
+            if not self._peak_initialised:
+                self.peak_balance = current_balance
+                self._peak_initialised = True
+                logger.info(
+                    f"[DRAWDOWN] Initialised — peak={self.peak_balance:.2f} "
+                    f"starting={current_balance:.2f}"
+                )
+
             # Update state
             if current_balance > self.peak_balance:
                 self.peak_balance = current_balance
+                logger.info(f"[DRAWDOWN] New peak — {self.peak_balance:.2f}")
             self.current_balance = current_balance
 
             if self.daily_start_balance == 0:
@@ -321,6 +332,7 @@ class DrawdownRecoveryManager:
     def reset_all(self, starting_balance: float) -> None:
         """Full reset (new account or manual override)."""
         self.peak_balance = starting_balance
+        self._peak_initialised = True
         self.current_balance = starting_balance
         self.daily_start_balance = starting_balance
         self.trade_history = []
