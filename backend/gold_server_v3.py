@@ -1207,6 +1207,12 @@ async def lifespan(app: FastAPI):
     # Hybrid system
     get_hybrid_system()
 
+    # Reset candle tracker on startup to clear stale state from previous run.
+    # Without this, the tracker loads the old timestamp from MongoDB and blocks
+    # the first signal after every restart (same candle → skip).
+    _candle_tracker.reset()
+    logger.info("✅ Candle tracker reset on startup")
+
     # ── Inject DB + Telegram into risk/position modules ──────────────────────
     if _db is not None:
         _position_manager.set_db(_db)
@@ -1367,6 +1373,8 @@ async def health():
         for j in scheduler.get_jobs()
     ]
 
+    candle_tracker_state = _candle_tracker.get_state()
+
     return {
         "status":            "ok",
         "service":           "gold_signals_v3",
@@ -1379,6 +1387,9 @@ async def health():
         "position_monitoring_schedule": "cron(03,07,11,15,19,23:30:00 UTC)",
         "mongo_connected":   mongo_ok,
         "system_components": system_status.get("total_components", 0),
+        "candle_tracker_state": {
+            pair: str(timestamp) for pair, timestamp in candle_tracker_state.items()
+        },
         "timestamp":         datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1755,6 +1766,44 @@ async def health_signals():
         "alerts": alerts,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 19: Admin — Reset Candle Tracker
+# ---------------------------------------------------------------------------
+@app.post("/api/admin/candle-tracker/reset")
+async def reset_candle_tracker(pair: Optional[str] = None):
+    """
+    Manually reset candle tracker state.
+
+    Use this if signals are being blocked by a stale candle timestamp
+    (e.g. after an unexpected restart mid-candle).
+
+    Query params:
+      - pair: Optional pair name (e.g. "XAUUSD").
+              If omitted, resets ALL pairs.
+
+    Examples:
+      POST /api/admin/candle-tracker/reset
+      POST /api/admin/candle-tracker/reset?pair=XAUUSD
+    """
+    if pair:
+        pair = pair.upper()
+        _candle_tracker.reset_pair(pair)
+        logger.info(f"[admin] Candle tracker reset for {pair} via API")
+        return {
+            "status": "success",
+            "message": f"Candle tracker reset for {pair}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        _candle_tracker.reset()
+        logger.info("[admin] Candle tracker reset for all pairs via API")
+        return {
+            "status": "success",
+            "message": "Candle tracker reset for all pairs",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------

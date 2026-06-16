@@ -44,6 +44,40 @@ class CandleTracker:
         self._db = db
 
     # ------------------------------------------------------------------
+    # Reset helpers
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """
+        Reset all tracked candles (call on startup to clear stale state).
+
+        Clears the in-process cache so every pair is treated as first-seen
+        on the next ``is_new_candle`` call, guaranteeing a signal is
+        generated immediately after a restart.
+        """
+        self._cache.clear()
+        logger.info(f"{_LOG_PREFIX} State reset on startup")
+
+    def reset_pair(self, pair: str) -> None:
+        """
+        Reset the tracked candle for a specific pair.
+
+        Removes the pair from the in-process cache so the next
+        ``is_new_candle`` call treats it as first-seen.
+        """
+        if pair in self._cache:
+            del self._cache[pair]
+            logger.info(f"{_LOG_PREFIX} [{pair}] State reset")
+
+    # ------------------------------------------------------------------
+    # State inspection
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> dict:
+        """Return a copy of the current in-process cache (for debugging)."""
+        return dict(self._cache)
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 

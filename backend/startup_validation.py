@@ -21,6 +21,9 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+# Import the candle tracker singleton for startup validation
+from ml_engine.candle_tracker import candle_tracker as _candle_tracker
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +55,7 @@ class StartupValidator:
             "guard_order":     self._check_guard_order,
             "strategies":      self._check_strategies,
             "database":        self._check_database,
+            "candle_tracker":  self._check_candle_tracker,
         }
 
         for name, fn in checks.items():
@@ -262,6 +266,43 @@ class StartupValidator:
                 "passed": False,
                 "error": f"Cannot import HybridPortfolioSystemV3: {exc}",
             }
+        except Exception as exc:
+            return {"passed": False, "error": str(exc)}
+
+    async def _check_candle_tracker(self) -> Dict[str, Any]:
+        """
+        Verify the candle tracker was reset on startup.
+
+        The lifespan handler calls ``_candle_tracker.reset()`` before this
+        check runs, so the in-process cache must be empty.  A non-empty
+        cache means the reset was skipped, which would cause the first
+        signal after restart to be blocked by a stale timestamp.
+        """
+        try:
+            state = _candle_tracker.get_state()
+
+            if len(state) == 0:
+                logger.info(
+                    "✅ [startup] Candle tracker: Empty on startup (correct)"
+                )
+                return {"passed": True, "tracked_pairs": 0}
+            else:
+                logger.warning(
+                    f"⚠️  [startup] Candle tracker: Has {len(state)} tracked "
+                    f"candle(s) — should be empty after startup reset. "
+                    f"State: {state}"
+                )
+                return {
+                    "passed": False,
+                    "error": (
+                        f"Candle tracker has {len(state)} stale entry/entries "
+                        f"after startup reset. Signals may be blocked. "
+                        f"State: {state}"
+                    ),
+                    "tracked_pairs": len(state),
+                    "state": {k: str(v) for k, v in state.items()},
+                }
+
         except Exception as exc:
             return {"passed": False, "error": str(exc)}
 
