@@ -12,7 +12,7 @@ Architecture:
   Component PA — Price Action       (S/R breaks, OB rejection, liq. sweeps)
   Component MC — Macro Filter       (DXY, real rates, inflation expectations)
 
-Signal logic: ALL 3 components must agree (AND gate, not averaging).
+Signal logic: 2/3 majority vote (2+ components must agree, not averaging).
 Minimum confidence threshold: 70%.
 
 strategy_mode options:
@@ -107,7 +107,7 @@ class HybridPortfolioSystemV3:
       Component C: Multi-Timeframe Alignment
           1H + 4H + Daily must all agree on direction
           Minimum alignment score: 65%
-      Signal gate: ALL 3 must agree (AND gate). Threshold: 70%.
+      Signal gate: 2/3 majority vote (2+ must agree). Threshold: 70%.
 
     Extended engines (v3.2):
       Component MR: Mean Reversion
@@ -576,42 +576,58 @@ class HybridPortfolioSystemV3:
                 comp_b = self._component_b_sr(df_4h, symbol, df_daily)
                 result["components"]["support_resistance"] = comp_b
 
-                # ── Unanimous Vote Gate (AND logic) ───────────────────
+                # ── Majority Vote Gate (2/3 logic) ────────────────────
+                signal_a = comp_a["vote"]
+                signal_b = comp_b["vote"]
+                signal_c = comp_c["vote"]
+
                 votes = {
-                    "A_trend": comp_a["vote"],
-                    "B_sr":    comp_b["vote"],
-                    "C_mtf":   comp_c["vote"],
+                    "A_trend": signal_a,
+                    "B_sr":    signal_b,
+                    "C_mtf":   signal_c,
                 }
                 result["component_votes"] = votes
 
-                vote_values = list(votes.values())
-                all_buy  = all(v == "BUY"  for v in vote_values)
-                all_sell = all(v == "SELL" for v in vote_values)
-                unanimous = all_buy or all_sell
+                signals = [signal_a, signal_b, signal_c]
+                buy_count  = signals.count("BUY")
+                sell_count = signals.count("SELL")
 
-                if not unanimous:
-                    disagreeing = [k for k, v in votes.items() if v != vote_values[0]]
+                if buy_count >= 2:
+                    signal = "BUY"
+                elif sell_count >= 2:
+                    signal = "SELL"
+                else:
+                    signal = "NEUTRAL"
+
+                logger.info(
+                    f"HybridPortfolioV3 [{symbol}]: "
+                    f"A={signal_a} B={signal_b} C={signal_c} → "
+                    f"CONSENSUS={signal} (BUY={buy_count}, SELL={sell_count})"
+                )
+
+                if signal == "NEUTRAL":
+                    disagreeing = [k for k, v in votes.items() if v != signal_a]
                     result.update({
                         "signal":                  "NEUTRAL",
                         "confidence":              0.0,
                         "meets_threshold":         False,
                         "rejection_reason":        f"NO_CONSENSUS: {votes}",
                         "disagreeing_components":  disagreeing,
+                        "consensus_votes":         {"buy": buy_count, "sell": sell_count},
                     })
-                    logger.info(
-                        f"HybridPortfolioV3 [{symbol}]: NEUTRAL — no consensus "
-                        f"A={votes['A_trend']} B={votes['B_sr']} C={votes['C_mtf']}"
-                    )
                     return result
 
-                signal = "BUY" if all_buy else "SELL"
                 conf_a = comp_a["confidence"]
                 conf_b = comp_b["confidence"]
                 conf_c = comp_c["confidence"]
 
-                # Geometric mean rewards consistent high confidence across all 3
-                composite_conf = (conf_a * conf_b * conf_c) ** (1.0 / 3.0)
-                composite_pct  = round(composite_conf * 100, 1)
+                # Confidence based on consensus strength
+                if buy_count == 3 or sell_count == 3:
+                    composite_pct = 90  # All 3 agree (strongest)
+                elif buy_count == 2 or sell_count == 2:
+                    composite_pct = 70  # 2 out of 3 agree (good)
+                else:
+                    composite_pct = 0   # No consensus (neutral)
 
                 MIN_CONFIDENCE = 70.0
                 quality_margin = composite_pct - MIN_CONFIDENCE
@@ -637,6 +653,7 @@ class HybridPortfolioSystemV3:
                     "signal_quality":          signal_quality,
                     "meets_threshold":         meets_threshold,
                     "min_confidence_threshold": MIN_CONFIDENCE,
+                    "consensus_votes":         {"buy": buy_count, "sell": sell_count},
                 })
 
                 if not meets_threshold:
