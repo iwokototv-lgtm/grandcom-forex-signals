@@ -559,7 +559,15 @@ async def send_to_telegram(
 
 
 async def send_reversal_alert(pair: str, reason: str, closed_count: int, total_pnl: float) -> None:
-    """Send an immediate reversal / close-all alert to Telegram."""
+    """Send an immediate reversal / close-all alert to Telegram.
+
+    Only sends alert if positions were actually closed (closed_count > 0).
+    """
+    # Guard: Don't send alert if no positions were closed
+    if closed_count == 0:
+        logger.debug(f"[{pair}] Reversal detected but no positions closed, skipping alert")
+        return
+
     try:
         bot = get_bot()
         msg = (
@@ -571,8 +579,9 @@ async def send_reversal_alert(pair: str, reason: str, closed_count: int, total_p
             f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
         )
         await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+        logger.info(f"[{pair}] Reversal alert sent: {reason} (closed {closed_count})")
     except Exception as exc:
-        logger.error(f"Reversal alert failed: {exc}")
+        logger.error(f"[{pair}] Reversal alert failed: {exc}")
 
 
 async def send_position_monitor_alert(msg: str) -> None:
@@ -649,7 +658,7 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
     """
     Close every open position across all pairs.
     Called on reversal detection, daily loss limit, or drawdown limit.
-    Sends a Telegram notification for each pair closed.
+    Sends a Telegram notification only if positions were actually closed.
     """
     # Fetch current prices for P&L calculation
     price_map: dict = {}
@@ -669,24 +678,32 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
     closed = result.get("closed", 0)
     total_pnl = result.get("total_pnl", 0.0)
 
-    logger.warning(
-        f"close_all_positions: reason={reason} closed={closed} pnl={total_pnl:.2f}"
-    )
-
-    # Telegram notification
-    try:
-        bot = get_bot()
-        msg = (
-            f"🛑 <b>ALL POSITIONS CLOSED</b>\n"
-            f"\n"
-            f"<b>Reason:</b> {_html_escape(reason)}\n"
-            f"<b>Positions closed:</b> {closed}\n"
-            f"<b>Total P&L:</b> ${total_pnl:+.2f}\n"
-            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+    # Log with appropriate level based on whether positions were closed
+    if closed > 0:
+        logger.warning(
+            f"close_all_positions: reason={reason} closed={closed} pnl={total_pnl:.2f}"
         )
-        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
-    except Exception as exc:
-        logger.error(f"close_all_positions Telegram alert failed: {exc}")
+    else:
+        logger.info(
+            f"close_all_positions: reason={reason} closed={closed} (no positions to close)"
+        )
+
+    # Only send Telegram notification if positions were actually closed
+    if closed > 0:
+        try:
+            bot = get_bot()
+            msg = (
+                f"🛑 <b>ALL POSITIONS CLOSED</b>\n"
+                f"\n"
+                f"<b>Reason:</b> {_html_escape(reason)}\n"
+                f"<b>Positions closed:</b> {closed}\n"
+                f"<b>Total P&L:</b> ${total_pnl:+.2f}\n"
+                f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+            )
+            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+            logger.info(f"close_all_positions: Telegram alert sent")
+        except Exception as exc:
+            logger.error(f"close_all_positions Telegram alert failed: {exc}")
 
     return result
 
@@ -750,23 +767,40 @@ async def generate_signal(pair: str) -> None:
 
     # ── REVERSAL DETECTION ───────────────────────────────────────────────────
 
-    # Guard 3: Reversal detection — check BEFORE generating new signal
+    # Guard 3: Reversal detection — ONLY if positions exist
     try:
-        # Use hybrid signal as the "current" regime if available; else use trend
-        current_regime = ind.get("trend", "NEUTRAL")
-        reversal = await _reversal_detector.detect_reversal(pair, df, current_regime)
-        if reversal.get("reversal_detected"):
-            rev_reason = reversal.get("reason", "REVERSAL")
-            logger.warning(f"[{pair}] {rev_reason} — closing all positions")
-            close_result = await close_all_positions(reason=f"REVERSAL: {rev_reason}")
-            await send_reversal_alert(
-                pair,
-                rev_reason,
-                close_result.get("closed", 0),
-                close_result.get("total_pnl", 0.0),
-            )
-            # Don't open new positions this cycle — let the market settle
-            return
+        # Check if any positions exist BEFORE running reversal detection
+        open_count = await _position_manager.get_position_count()
+
+        if open_count > 0:
+            # Only run reversal detection if positions exist
+            current_regime = ind.get("trend", "NEUTRAL")
+            reversal = await _reversal_detector.detect_reversal(pair, df, current_regime)
+
+            if reversal.get("reversal_detected"):
+                rev_reason = reversal.get("reason", "REVERSAL")
+                logger.warning(f"[{pair}] {rev_reason} — closing all positions")
+                close_result = await close_all_positions(reason=f"REVERSAL: {rev_reason}")
+
+                # Only send alert if positions were actually closed
+                closed_count = close_result.get("closed", 0)
+                if closed_count > 0:
+                    await send_reversal_alert(
+                        pair,
+                        rev_reason,
+                        closed_count,
+                        close_result.get("total_pnl", 0.0),
+                    )
+                    logger.info(f"[{pair}] Reversal alert sent (closed {closed_count} positions)")
+                else:
+                    logger.warning(f"[{pair}] Reversal detected but no positions to close")
+
+                # Don't open new positions this cycle — let the market settle
+                return
+        else:
+            # No positions exist — skip reversal detection entirely
+            logger.debug(f"[{pair}] No open positions, skipping reversal detection")
+
     except Exception as exc:
         logger.warning(f"[{pair}] Reversal detection error (fail-open): {exc}")
 
