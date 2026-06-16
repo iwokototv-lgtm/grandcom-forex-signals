@@ -341,6 +341,34 @@ class DrawdownRecoveryManager:
         self.halt_reason = ""
         logger.info(f"DrawdownRecovery: Full reset at balance={starting_balance:.2f}")
 
+    # ------------------------------------------------------------------
+    # Public helpers (used by tests and startup validation)
+    # ------------------------------------------------------------------
+
+    def reset_peak_balance(self, account_balance: float) -> None:
+        """
+        Reset peak balance to the given account balance.
+
+        Equivalent to reset_all() but named explicitly for test clarity —
+        makes it obvious that peak is being set to the real account balance
+        rather than a hardcoded value.
+        """
+        self.reset_all(account_balance)
+
+    def calculate_drawdown(self, current_balance: float) -> float:
+        """
+        Return current drawdown percentage relative to peak_balance.
+
+        Convenience wrapper around the private _calculate_drawdown() that
+        first updates current_balance so callers don't need to call assess().
+
+        Returns:
+            Drawdown as a percentage (0.0 = no drawdown, 100.0 = total loss).
+        """
+        self.current_balance = current_balance
+        dd = self._calculate_drawdown()
+        return dd["current_pct"]
+
 
 # Global instance
 drawdown_recovery = DrawdownRecoveryManager()

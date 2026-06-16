@@ -1286,19 +1286,32 @@ async def lifespan(app: FastAPI):
         f"validation=5min"
     )
 
-    # Validate system state on startup
-    logger.info("🔍 Running startup validation checks...")
+    # Validate system state on startup (risk manager checks)
+    logger.info("🔍 Running risk manager startup validation...")
     try:
         startup_validation = await _risk_manager.validate_state()
         if not all(v["valid"] for v in startup_validation.values()):
-            logger.error("❌ Startup validation FAILED!")
+            logger.error("❌ Risk manager startup validation FAILED!")
             for check, result in startup_validation.items():
                 if not result["valid"]:
                     logger.error(f"  {check}: {result['errors']}")
             # Attempt auto-recovery rather than hard-stopping
             await _risk_manager.auto_recover_from_invalid_state()
         else:
-            logger.info("✅ All startup validation checks passed")
+            logger.info("✅ Risk manager startup validation passed")
+    except Exception as exc:
+        logger.warning(f"Risk manager startup validation error (non-fatal): {exc}")
+
+    # Run comprehensive startup validation (edge-case checks for Bugs #188/#191/#192)
+    try:
+        from startup_validation import run_startup_validation
+        validation_results = await run_startup_validation()
+        if not validation_results["all_passed"]:
+            logger.error(
+                "❌ Startup validation failed — system may not work correctly. "
+                "Check logs above for details."
+            )
+            # Non-fatal: log and continue rather than preventing startup
     except Exception as exc:
         logger.warning(f"Startup validation error (non-fatal): {exc}")
 
@@ -1700,6 +1713,32 @@ async def health_database():
 async def get_signal_metrics():
     """Get signal generation metrics (success rate, retries, API errors)."""
     return await _signal_metrics.log_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 18: Signal Health Monitor
+# ---------------------------------------------------------------------------
+@app.get("/api/health/signals")
+async def get_signal_health():
+    """
+    Get signal generation health status and anomaly alerts.
+
+    Returns healthy=True when signals are being generated normally.
+    Fires CRITICAL alert when 0 signals produced across multiple cycles.
+    Fires WARNING alerts for low success rate or high API timeout counts.
+    """
+    try:
+        from signal_health_monitor import SignalHealthMonitor
+        monitor = SignalHealthMonitor(signal_metrics=_signal_metrics)
+        return await monitor.check_signal_health()
+    except Exception as exc:
+        logger.error(f"Signal health check failed: {exc}")
+        return {
+            "healthy": False,
+            "alerts": [{"severity": "ERROR", "message": str(exc)}],
+            "metrics": {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
