@@ -1716,29 +1716,45 @@ async def get_signal_metrics():
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 18: Signal Health Monitor
+# Endpoint 18: Signal Health Check
 # ---------------------------------------------------------------------------
 @app.get("/api/health/signals")
-async def get_signal_health():
+async def health_signals():
     """
-    Get signal generation health status and anomaly alerts.
+    Health check for the signal generation system.
 
-    Returns healthy=True when signals are being generated normally.
-    Fires CRITICAL alert when 0 signals produced across multiple cycles.
-    Fires WARNING alerts for low success rate or high API timeout counts.
+    Evaluates success rate and flags anomalies:
+      - CRITICAL: cycles ran but 0% success rate (no signals in 24 h)
+      - WARNING:  success rate below 50% (high failure rate)
+      - HEALTHY:  everything nominal
     """
+    metrics = await _signal_metrics.log_metrics()
+
+    # Parse success_rate string (e.g. "87.5%") to float
     try:
-        from signal_health_monitor import SignalHealthMonitor
-        monitor = SignalHealthMonitor(signal_metrics=_signal_metrics)
-        return await monitor.check_signal_health()
-    except Exception as exc:
-        logger.error(f"Signal health check failed: {exc}")
-        return {
-            "healthy": False,
-            "alerts": [{"severity": "ERROR", "message": str(exc)}],
-            "metrics": {},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        success_rate = float(metrics["success_rate"].rstrip("%"))
+    except (ValueError, AttributeError):
+        success_rate = 0.0
+
+    health_status = "HEALTHY"
+    alerts = []
+
+    # Alert: 0 signals generated despite cycles running
+    if metrics["total_cycles"] > 0 and success_rate == 0.0:
+        health_status = "CRITICAL"
+        alerts.append("No signals generated in 24 hours")
+
+    # Alert: high failure rate (but not zero — already caught above)
+    if 0.0 < success_rate < 50.0:
+        health_status = "WARNING"
+        alerts.append(f"Low success rate: {success_rate:.1f}%")
+
+    return {
+        "status": health_status,
+        "metrics": metrics,
+        "alerts": alerts,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
