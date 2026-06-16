@@ -1014,6 +1014,60 @@ class HybridPortfolioSystemV3:
         self.account_balance = balance
         logger.info(f"HybridPortfolioV3: account balance updated to {balance:.2f}")
 
+    # ------------------------------------------------------------------
+    # Consensus Logic Helper (used by tests and startup validation)
+    # ------------------------------------------------------------------
+
+    def _apply_consensus_logic(
+        self,
+        signal_a: str,
+        signal_b: str,
+        signal_c: str,
+    ) -> Dict[str, Any]:
+        """
+        Apply 2/3 majority vote across three component signals.
+
+        This is the same logic used in the "original" strategy_mode but
+        extracted as a standalone method so it can be unit-tested in
+        isolation without requiring live market data.
+
+        Args:
+            signal_a: Vote from Component A ("BUY", "SELL", or "NEUTRAL")
+            signal_b: Vote from Component B ("BUY", "SELL", or "NEUTRAL")
+            signal_c: Vote from Component C ("BUY", "SELL", or "NEUTRAL")
+
+        Returns:
+            Dict with keys:
+              signal     — "BUY", "SELL", or "NEUTRAL"
+              confidence — integer percentage (90 for 3/3, 70 for 2/3, 0 for no consensus)
+              buy_count  — number of BUY votes
+              sell_count — number of SELL votes
+        """
+        signals = [signal_a, signal_b, signal_c]
+        buy_count = signals.count("BUY")
+        sell_count = signals.count("SELL")
+
+        if buy_count >= 2:
+            signal = "BUY"
+        elif sell_count >= 2:
+            signal = "SELL"
+        else:
+            signal = "NEUTRAL"
+
+        if buy_count == 3 or sell_count == 3:
+            confidence = 90  # All 3 agree — strongest signal
+        elif buy_count == 2 or sell_count == 2:
+            confidence = 70  # 2 out of 3 agree — good signal
+        else:
+            confidence = 0   # No consensus
+
+        return {
+            "signal": signal,
+            "confidence": confidence,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+        }
+
 
 # Global instance
 hybrid_system_v3 = HybridPortfolioSystemV3()
