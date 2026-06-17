@@ -42,6 +42,34 @@ class PositionManager:
         self.account_balance = balance
 
     # ------------------------------------------------------------------
+    # Reset (clear phantom positions on startup)
+    # ------------------------------------------------------------------
+
+    async def reset(self) -> None:
+        """
+        Reset all open positions (call on startup to clear phantom positions).
+
+        Clears the open_positions MongoDB collection so the account starts
+        with 0% exposure on every restart.
+
+        Guarantees new signals can be sent immediately after a restart.
+        """
+        if self._db is not None:
+            try:
+                result = await self._db.open_positions.delete_many({})
+                logger.info(
+                    f"[POSITION_MANAGER] MongoDB open_positions cleared "
+                    f"({result.deleted_count} phantom positions removed)"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[POSITION_MANAGER] Failed to clear MongoDB open_positions: {exc} "
+                    f"(non-fatal, will retry on next signal)"
+                )
+        else:
+            logger.info("[POSITION_MANAGER] No DB configured, skipping reset")
+
+    # ------------------------------------------------------------------
     # Add position
     # ------------------------------------------------------------------
 

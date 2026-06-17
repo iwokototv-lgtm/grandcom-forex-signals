@@ -1242,6 +1242,13 @@ async def lifespan(app: FastAPI):
         _candle_tracker.set_db(_db)
         logger.info("✅ Risk/position modules connected to MongoDB")
 
+    # Reset position manager on startup to clear phantom positions from previous
+    # runs. set_db() must be called first so reset() can reach MongoDB.
+    # Without this, stale open_positions consume the 10% exposure cap and block
+    # every new signal immediately after restart.
+    await _position_manager.reset()
+    logger.info("✅ Position manager reset (phantom positions cleared)")
+
     # Reset candle tracker on startup to clear stale state from previous run.
     # set_db() must be called first so reset() can also clear MongoDB.
     # Without this, the tracker loads the old timestamp from MongoDB and blocks
