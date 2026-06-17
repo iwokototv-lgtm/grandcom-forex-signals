@@ -2905,6 +2905,7 @@ async def lifespan(app: FastAPI):
     if TELEGRAM_BOT_TOKEN:
         try:
             bot = get_bot()
+            await bot.initialize()  # ✅ Opens httpx session — must be called before use
             me = await bot.get_me()
             logger.info(f"✅ Telegram bot ready — @{me.username} → channel {TELEGRAM_CHANNEL_ID}")
         except Exception as exc:
@@ -2940,6 +2941,12 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
     if _mongo_client:
         _mongo_client.close()
+    if _bot is not None:
+        try:
+            await _bot.shutdown()  # ✅ Closes httpx session — prevents unclosed client warnings
+            logger.info("✅ Telegram bot shut down cleanly")
+        except Exception as exc:
+            logger.warning(f"Telegram bot shutdown error (non-fatal): {exc}")
     logger.info("Gold Signals Server v4.0 shut down")
 
 

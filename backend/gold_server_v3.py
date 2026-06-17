@@ -506,56 +506,78 @@ async def send_to_telegram(
     position_count: int = 0,
     exposure_pct: float = 0.0,
     risk_status: Optional[dict] = None,
-) -> None:
-    """Send signal to Telegram with v3.0 context + risk/position data."""
-    try:
-        bot = get_bot()
-        emoji = "🟢" if signal == "BUY" else "🔴"
-        action = signal.capitalize()
-        lo = round(entry - 0.50, 2)
-        hi = round(entry + 0.50, 2)
+    max_retries: int = 3,
+) -> bool:
+    """Send signal to Telegram with v3.0 context + risk/position data.
 
-        copier_msg = (
-            f"{emoji} #{pair} [SWING]\n"
-            f"\n"
-            f"{action} {lo} - {hi}\n"
-            f"\n"
-            f"TP1: {tps[0]}\n"
-            f"TP2: {tps[1]}\n"
-            f"TP3: {tps[2]}\n"
-            f"\n"
-            f"SL: {sl}\n"
-        )
+    Returns True if the signal was delivered successfully, False otherwise.
+    Retries up to max_retries times with exponential backoff (1s, 2s, 4s).
+    """
+    emoji = "🟢" if signal == "BUY" else "🔴"
+    action = signal.capitalize()
+    lo = round(entry - 0.50, 2)
+    hi = round(entry + 0.50, 2)
 
-        rs = risk_status or {}
-        daily_pnl = rs.get("daily_pnl", 0.0)
-        daily_loss_pct = rs.get("daily_loss_pct", 0.0)
-        drawdown_pct = rs.get("drawdown_pct", 0.0)
-        risk_level = rs.get("risk_level", "GREEN")
-        risk_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(risk_level, "⚪")
+    copier_msg = (
+        f"{emoji} #{pair} [SWING]\n"
+        f"\n"
+        f"{action} {lo} - {hi}\n"
+        f"\n"
+        f"TP1: {tps[0]}\n"
+        f"TP2: {tps[1]}\n"
+        f"TP3: {tps[2]}\n"
+        f"\n"
+        f"SL: {sl}\n"
+    )
 
-        info_msg = (
-            f"<b>📊 R:R:</b> 1:{rr}  "
-            f"<b>⚡ Confidence:</b> {confidence}%\n"
-            f"<b>🎯 Regime:</b> {regime}  "
-            f"<b>📐 SMC:</b> {smc_score}/10  "
-            f"<b>🔗 MTF:</b> {mtf_alignment:.0f}%\n"
-            f"<b>📈 Positions:</b> {position_count}/5  "
-            f"<b>💰 Exposure:</b> {exposure_pct:.1f}%\n"
-            f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
-            f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
-            f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
-            f"<b>📝</b> {_html_escape(analysis)}\n"
-            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-            f"| Grandcom Gold Engine v3.0</i>"
-        )
+    rs = risk_status or {}
+    daily_pnl = rs.get("daily_pnl", 0.0)
+    daily_loss_pct = rs.get("daily_loss_pct", 0.0)
+    drawdown_pct = rs.get("drawdown_pct", 0.0)
+    risk_level = rs.get("risk_level", "GREEN")
+    risk_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(risk_level, "⚪")
 
-        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=copier_msg)
-        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=info_msg, parse_mode="HTML")
-        logger.info(f"[{pair}] Signal sent to Telegram channel {TELEGRAM_CHANNEL_ID}")
+    info_msg = (
+        f"<b>📊 R:R:</b> 1:{rr}  "
+        f"<b>⚡ Confidence:</b> {confidence}%\n"
+        f"<b>🎯 Regime:</b> {regime}  "
+        f"<b>📐 SMC:</b> {smc_score}/10  "
+        f"<b>🔗 MTF:</b> {mtf_alignment:.0f}%\n"
+        f"<b>📈 Positions:</b> {position_count}/5  "
+        f"<b>💰 Exposure:</b> {exposure_pct:.1f}%\n"
+        f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
+        f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
+        f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
+        f"<b>📝</b> {_html_escape(analysis)}\n"
+        f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+        f"| Grandcom Gold Engine v3.0</i>"
+    )
 
-    except Exception as exc:
-        logger.error(f"[{pair}] Telegram delivery failed: {exc}")
+    for attempt in range(max_retries):
+        try:
+            bot = get_bot()
+            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=copier_msg)
+            await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=info_msg, parse_mode="HTML")
+            logger.info(
+                f"[{pair}] ✅ Signal sent to Telegram (attempt {attempt + 1}/{max_retries}) "
+                f"— {signal} confidence={confidence}%"
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"[{pair}] Telegram timeout (attempt {attempt + 1}/{max_retries})")
+        except Exception as exc:
+            logger.warning(f"[{pair}] Telegram delivery error (attempt {attempt + 1}/{max_retries}): {exc}")
+
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt  # 1s, 2s, 4s
+            logger.info(f"[{pair}] Retrying Telegram send in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+
+    logger.error(
+        f"[{pair}] ❌ Failed to send signal to Telegram after {max_retries} attempts "
+        f"— {signal} confidence={confidence}%"
+    )
+    return False
 
 
 async def send_reversal_alert(pair: str, reason: str, closed_count: int, total_pnl: float) -> None:
@@ -955,7 +977,7 @@ async def generate_signal(pair: str) -> None:
     risk_status = _risk_manager.get_risk_status()
 
     # 11. Send to Telegram
-    await send_to_telegram(
+    tg_sent = await send_to_telegram(
         pair, signal_type, entry, tps, sl,
         round(confidence, 1), rr, analysis,
         regime=hybrid_ctx.get("regime", "UNKNOWN"),
@@ -965,6 +987,10 @@ async def generate_signal(pair: str) -> None:
         exposure_pct=pos_summary.get("exposure_pct", 0.0),
         risk_status=risk_status,
     )
+    if tg_sent:
+        logger.info(f"[{pair}] ✅ Telegram notification delivered")
+    else:
+        logger.error(f"[{pair}] ❌ Telegram notification failed — signal generated but NOT sent")
 
     _signal_metrics.successful_signals += 1
     logger.info(
@@ -1199,6 +1225,7 @@ async def lifespan(app: FastAPI):
     if TELEGRAM_BOT_TOKEN:
         try:
             bot = get_bot()
+            await bot.initialize()  # ✅ Opens httpx session — must be called before use
             me = await bot.get_me()
             logger.info(f"✅ Telegram bot ready — @{me.username}")
         except Exception as exc:
@@ -1329,6 +1356,12 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
     if _mongo_client:
         _mongo_client.close()
+    if _bot is not None:
+        try:
+            await _bot.shutdown()  # ✅ Closes httpx session — prevents unclosed client warnings
+            logger.info("✅ Telegram bot shut down cleanly")
+        except Exception as exc:
+            logger.warning(f"Telegram bot shutdown error (non-fatal): {exc}")
     logger.info("Gold Signals Server v3.0 shut down")
 
 
