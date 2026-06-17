@@ -1234,12 +1234,6 @@ async def lifespan(app: FastAPI):
     # Hybrid system
     get_hybrid_system()
 
-    # Reset candle tracker on startup to clear stale state from previous run.
-    # Without this, the tracker loads the old timestamp from MongoDB and blocks
-    # the first signal after every restart (same candle → skip).
-    _candle_tracker.reset()
-    logger.info("✅ Candle tracker reset on startup")
-
     # ── Inject DB + Telegram into risk/position modules ──────────────────────
     if _db is not None:
         _position_manager.set_db(_db)
@@ -1247,6 +1241,13 @@ async def lifespan(app: FastAPI):
         _risk_manager.set_db(_db)
         _candle_tracker.set_db(_db)
         logger.info("✅ Risk/position modules connected to MongoDB")
+
+    # Reset candle tracker on startup to clear stale state from previous run.
+    # set_db() must be called first so reset() can also clear MongoDB.
+    # Without this, the tracker loads the old timestamp from MongoDB and blocks
+    # the first signal after every restart (same candle → skip).
+    await _candle_tracker.reset()
+    logger.info("✅ Candle tracker reset (cache + MongoDB)")
 
     if TELEGRAM_BOT_TOKEN:
         try:
@@ -1830,7 +1831,7 @@ async def reset_candle_tracker(pair: Optional[str] = None):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     else:
-        _candle_tracker.reset()
+        await _candle_tracker.reset()
         logger.info("[admin] Candle tracker reset for all pairs via API")
         return {
             "status": "success",
