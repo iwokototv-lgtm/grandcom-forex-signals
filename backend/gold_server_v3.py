@@ -30,6 +30,7 @@ from ml_engine.economic_calendar_filter import EconomicCalendarFilter, economic_
 from ml_engine.drawdown_recovery import DrawdownRecoveryManager, drawdown_recovery as _ddr_singleton
 from ml_engine.position_monitor import PositionMonitor, position_monitor as _position_monitor_singleton
 from ml_engine.candle_tracker import CandleTracker, candle_tracker as _candle_tracker_singleton
+from ml_engine.signal_validator import SignalValidator, signal_validator as _signal_validator_singleton
 
 load_dotenv()
 
@@ -113,6 +114,7 @@ _calendar_filter: EconomicCalendarFilter = _ecf_singleton
 _drawdown_recovery: DrawdownRecoveryManager = _ddr_singleton
 _pos_monitor: PositionMonitor = _position_monitor_singleton
 _candle_tracker: CandleTracker = _candle_tracker_singleton
+_signal_validator: SignalValidator = _signal_validator_singleton
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +639,55 @@ async def send_signal_failure_alert(
         logger.error(f"[{pair}] Failure alert failed: {exc}")
 
 
+async def send_signal_rejection_alert(pair: str, validation_result: dict) -> None:
+    """Send alert when a signal is rejected during validation."""
+    try:
+        bot = get_bot()
+        checks_failed = ", ".join(validation_result.get("checks_failed", [])) or "none"
+        checks_passed = ", ".join(validation_result.get("checks_passed", [])) or "none"
+        msg = (
+            f"⚠️ <b>SIGNAL REJECTED — {pair}</b>\n"
+            f"\n"
+            f"<b>Reason:</b> {_html_escape(validation_result.get('reason', 'Unknown'))}\n"
+            f"<b>Original Signal:</b> {validation_result.get('signal', 'UNKNOWN')}\n"
+            f"<b>Checks Failed:</b> {_html_escape(checks_failed)}\n"
+            f"<b>Checks Passed:</b> {_html_escape(checks_passed)}\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+        )
+        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=msg, parse_mode="HTML")
+        logger.info(f"[{pair}] Signal rejection alert sent to Telegram")
+    except Exception as exc:
+        logger.error(f"[{pair}] Failed to send rejection alert: {exc}")
+
+
+async def log_signal_event(
+    pair: str,
+    event_type: str,  # "generated", "validated", "rejected", "sent"
+    signal: str,
+    confidence: float,
+    reason: str = "",
+    metadata: dict = None,
+) -> None:
+    """Log signal event to MongoDB for audit trail."""
+    if _db is None:
+        return
+
+    try:
+        event = {
+            "timestamp": datetime.now(timezone.utc),
+            "pair": pair,
+            "event_type": event_type,
+            "signal": signal,
+            "confidence": confidence,
+            "reason": reason,
+            "metadata": metadata or {},
+        }
+        await _db.signal_events.insert_one(event)
+        logger.debug(f"[{pair}] Signal event logged: {event_type}")
+    except Exception as exc:
+        logger.warning(f"[{pair}] Failed to log signal event: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Signal Metrics
 # ---------------------------------------------------------------------------
@@ -872,13 +923,44 @@ async def generate_signal(pair: str) -> None:
     confidence  = float(gpt.get("confidence", 0))
     analysis    = str(gpt.get("analysis", ""))
 
-    # 5. Filter
+    # 5. Log generated signal and store event
+    logger.info(
+        f"[{pair}] ✅ SIGNAL GENERATED: {signal_type} "
+        f"(confidence={confidence}%, source=GPT)"
+    )
+    await log_signal_event(
+        pair=pair,
+        event_type="generated",
+        signal=signal_type,
+        confidence=confidence,
+        reason="GPT signal generated",
+        metadata={"hybrid_signal": hybrid_ctx.get("hybrid_signal", "NEUTRAL")},
+    )
+
+    # 5a. Pre-validation filter: NEUTRAL or unknown signal type
     if signal_type == "NEUTRAL" or signal_type not in ("BUY", "SELL"):
-        logger.info(f"[{pair}] {signal_type} signal — no trade")
+        reason = f"GPT returned {signal_type} — no actionable trade direction"
+        logger.info(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=confidence,
+            reason=reason,
+        )
         return
 
+    # 5b. Pre-validation filter: confidence below minimum
     if confidence < MIN_CONFIDENCE:
-        logger.info(f"[{pair}] Confidence {confidence}% < {MIN_CONFIDENCE}% — skipping")
+        reason = f"Confidence {confidence}% below {MIN_CONFIDENCE}% minimum threshold"
+        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=confidence,
+            reason=reason,
+        )
         return
 
     # ── LEVELS & GEOMETRY ────────────────────────────────────────────────────
@@ -891,11 +973,73 @@ async def generate_signal(pair: str) -> None:
     tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
 
     if signal_type == "BUY" and (tps[0] <= entry or sl >= entry):
-        logger.warning(f"[{pair}] BUY geometry invalid — skipping")
+        reason = f"BUY geometry invalid (TP1={tps[0]} <= entry={entry} or SL={sl} >= entry)"
+        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=confidence,
+            reason=reason,
+        )
         return
     if signal_type == "SELL" and (tps[0] >= entry or sl <= entry):
-        logger.warning(f"[{pair}] SELL geometry invalid — skipping")
+        reason = f"SELL geometry invalid (TP1={tps[0]} >= entry={entry} or SL={sl} <= entry)"
+        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=confidence,
+            reason=reason,
+        )
         return
+
+    # ── SIGNAL VALIDATION ────────────────────────────────────────────────────
+
+    # 5c. Full signal validation pipeline
+    signal_data_for_validation = {
+        "pair": pair,
+        "signal": signal_type,
+        "confidence": confidence,
+        "entry": entry,
+        "tp_levels": tps,
+        "sl": sl,
+        "analysis": analysis,
+    }
+    validation_result = await _signal_validator.validate(signal_data_for_validation)
+
+    if not validation_result["valid"]:
+        logger.warning(
+            f"[{pair}] ❌ SIGNAL REJECTED by validator: {validation_result['reason']} "
+            f"(checks_failed={validation_result['checks_failed']})"
+        )
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=confidence,
+            reason=validation_result["reason"],
+            metadata={
+                "checks_failed": validation_result["checks_failed"],
+                "checks_passed": validation_result["checks_passed"],
+            },
+        )
+        await send_signal_rejection_alert(pair, validation_result)
+        return
+
+    logger.info(
+        f"[{pair}] ✅ SIGNAL VALIDATED: {signal_type} ready to send to Telegram "
+        f"(checks_passed={len(validation_result['checks_passed'])})"
+    )
+    await log_signal_event(
+        pair=pair,
+        event_type="validated",
+        signal=signal_type,
+        confidence=confidence,
+        reason=validation_result["reason"],
+        metadata={"checks_passed": validation_result["checks_passed"]},
+    )
 
     # 7. Risk/reward
     risk   = abs(entry - sl)
@@ -989,8 +1133,24 @@ async def generate_signal(pair: str) -> None:
     )
     if tg_sent:
         logger.info(f"[{pair}] ✅ Telegram notification delivered")
+        await log_signal_event(
+            pair=pair,
+            event_type="sent",
+            signal=signal_type,
+            confidence=round(confidence, 1),
+            reason="Signal delivered to Telegram",
+            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+        )
     else:
         logger.error(f"[{pair}] ❌ Telegram notification failed — signal generated but NOT sent")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=round(confidence, 1),
+            reason="Telegram delivery failed after all retries",
+            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+        )
 
     _signal_metrics.successful_signals += 1
     logger.info(
