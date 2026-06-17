@@ -47,16 +47,34 @@ class CandleTracker:
     # Reset helpers
     # ------------------------------------------------------------------
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         """
         Reset all tracked candles (call on startup to clear stale state).
 
-        Clears the in-process cache so every pair is treated as first-seen
-        on the next ``is_new_candle`` call, guaranteeing a signal is
-        generated immediately after a restart.
+        Clears both:
+        - In-process cache (so every pair is treated as first-seen)
+        - MongoDB candle_tracking collection (so no stale timestamps remain)
+
+        Guarantees a signal is generated immediately after a restart.
         """
+        # 1. Clear in-memory cache
         self._cache.clear()
-        logger.info(f"{_LOG_PREFIX} State reset on startup")
+
+        # 2. Clear MongoDB collection
+        if self._db is not None:
+            try:
+                result = await self._db.candle_tracking.delete_many({})
+                logger.info(
+                    f"{_LOG_PREFIX} MongoDB candle_tracking cleared "
+                    f"({result.deleted_count} documents removed)"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"{_LOG_PREFIX} Failed to clear MongoDB candle_tracking: {exc} "
+                    f"(non-fatal, will retry on next signal)"
+                )
+
+        logger.info(f"{_LOG_PREFIX} State reset on startup (cache + MongoDB)")
 
     def reset_pair(self, pair: str) -> None:
         """
