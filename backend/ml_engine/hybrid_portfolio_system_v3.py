@@ -1,39 +1,20 @@
 """
-Hybrid Portfolio System v3.4
-Comprehensive signal generation with weighted engines and market regime adaptation.
+Hybrid Portfolio System v3.3
+Comprehensive signal generation with weighted engines and confirmation filters.
 
 Architecture:
-  Component A — Trend Confirmation  (EMA 50%, MACD 30%, RSI 20%)          [v3.4 weighted]
-  Component B — Support/Resistance  (Scoring system 0-100 points)          [v3.4 scoring]
-  Component C — Multi-Timeframe     (Daily 45%, 4H 35%, 1H 20%)            [v3.4 weighted]
-  Component D — Volume Confirmation (Forex-specific: Tick vol, ATR, Range) [v3.3]
+  Component A — Trend Confirmation  (RSI + MACD + EMA cross)               [v3.3]
+  Component B — Support/Resistance  (Pivot Points + ATR proximity)          [v3.3]
+  Component C — Multi-Timeframe     (Daily + 4H + 1H alignment)             [v3.3]
+  Component D — Volume Confirmation (Forex-specific: Tick vol, ATR, Range)  [v3.3]
 
   Extended engines (v3.2+):
   Component MR — Mean Reversion     (EMA deviation + RSI extremes + Bollinger Bands)
   Component PA — Price Action       (BOS, CHOCH, FVG, Equal H/L, Mitigation Block)
   Component MC — Macro Filter       (Fed bias, 10Y yield, DXY, news)
 
-  NEW (v3.4):
-  Market Regime Detector — Adapts engine weights based on market condition
-    TRENDING  : Trend=60%, MR=10%, S/R=30%
-    RANGING   : Trend=20%, MR=60%, S/R=20%
-    HIGH_VOL  : Trend=50%, MR=20%, S/R=30%
-    LOW_VOL   : Trend=30%, MR=40%, S/R=30%
-
-  Confidence Calculation — 0-100 scale with modifiers
-    Base: Trend(35) + S/R(25) + MTF(20) + Volume(10) + Regime(10) = 100
-    Modifiers: Macro(±20), News(-30), Volatility(±5), Liquidity(+10)
-
-  Signal Filters — 6 comprehensive pass/fail checks
-    1. Confidence ≥ 85%
-    2. Risk:Reward ≥ 1:2
-    3. Spread < maximum allowed
-    4. No high-impact news within 30 minutes
-    5. No duplicate signal on same 4H candle
-    6. Higher timeframe trend agrees
-
 Signal logic: WEIGHTED VOTING based on backtest performance (not equal majority vote).
-  Weights (v3.3): A=40%, B=25%, C=20%, D=15%. Consensus threshold: 90%.
+  Weights (v3.3): A=40%, B=25%, C=20%, D=15%. Consensus threshold: 0.50.
   Confirmation filters: MTF alignment >= 80%, SMC score >= 7/10, no high-impact news.
   Target confidence: 95%+.
 
@@ -65,8 +46,7 @@ from .mean_reversion_core import MeanReversionCore
 from .price_action_core import PriceActionCore
 from .macro_filter import MacroFilter
 from .volume_confirmation import VolumeConfirmationStrategy
-from .market_regime_detector import MarketRegimeDetector  # NEW v3.4
-from .signal_filters import SignalFilters                  # NEW v3.4
+
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +177,7 @@ class HybridPortfolioSystemV3:
 
     def __init__(self, account_balance: float = 10000.0):
         self.account_balance = account_balance
-        self.version = "3.4.0"
+        self.version = "3.3.0"
 
         # Core 4-component engines (v3.3)
         self.mtf_confirmation = MultiTimeframeConfirmation()
@@ -210,10 +190,6 @@ class HybridPortfolioSystemV3:
         self.price_action_engine   = PriceActionCore()
         self.macro_filter_engine   = MacroFilter()
 
-        # NEW v3.4 engines
-        self.market_regime_detector = MarketRegimeDetector()
-        self.signal_filters = SignalFilters()
-
         # Infrastructure (kept for compatibility)
         self.economic_calendar = EconomicCalendar()
         self.position_calculator = PositionCalculator()
@@ -222,7 +198,7 @@ class HybridPortfolioSystemV3:
 
         logger.info(
             f"HybridPortfolioSystemV3 initialized — v{self.version} "
-            f"(4-component + MR/PA/Macro + MarketRegime/SignalFilters | "
+            f"(4-component + MR/PA/Macro | "
             f"weights A={WEIGHT_A} B={WEIGHT_B} "
             f"C={WEIGHT_C} D={WEIGHT_D} threshold={CONSENSUS_THRESHOLD})"
         )
@@ -1193,26 +1169,12 @@ class HybridPortfolioSystemV3:
                 return result
 
             # ==============================================================
-            # ORIGINAL 4-COMPONENT MODE  (v3.4 — 95%+ confidence)
+            # ORIGINAL 4-COMPONENT MODE  (v3.3 — 95%+ confidence)
             # ==============================================================
             if strategy_mode == "original":
-                # ── Market Regime Detection (v3.4) ────────────────────
-                try:
-                    regime_result = await asyncio.wait_for(
-                        self.market_regime_detector.detect(df_4h),
-                        timeout=10.0,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"Market regime detection timed out for {symbol}")
-                    regime_result = {"regime": "LOW_VOL", "weights": {}, "valid": False}
-                result["components"]["market_regime"] = regime_result
-                result["market_regime"] = regime_result.get("regime", "UNKNOWN")
-
-                # ── Component A: Trend Confirmation (v3.4 weighted) ───
-                comp_a_weighted = self._component_a_trend_weighted(df_4h)
-                comp_a = self._component_a_trend(df_4h)  # keep legacy for voting
+                # ── Component A: Trend Confirmation (v3.3) ───────────
+                comp_a = self._component_a_trend(df_4h)
                 result["components"]["trend_confirmation"] = comp_a
-                result["components"]["trend_confirmation_weighted"] = comp_a_weighted
 
                 # ── Component C: Multi-Timeframe Alignment ────────────
                 try:
@@ -1224,53 +1186,25 @@ class HybridPortfolioSystemV3:
                     logger.warning(f"MTF analysis timed out for {symbol}")
                     mtf_raw = {"valid": False, "alignment_score": 0, "dominant_direction": "NEUTRAL"}
                 comp_c = self._component_c_mtf(mtf_raw)
-                comp_c_weighted = self._component_c_mtf_weighted(mtf_raw)  # v3.4
                 result["components"]["mtf_alignment"] = comp_c
-                result["components"]["mtf_alignment_weighted"] = comp_c_weighted
 
-                # ── Component B: Support/Resistance (v3.4 scoring) ────
+                # ── Component B: Support/Resistance (v3.3) ────────────
                 comp_b = self._component_b_sr(df_4h, symbol, df_daily)
-                comp_b_scoring = self._component_b_sr_scoring(df_4h, symbol, df_daily)  # v3.4
                 result["components"]["support_resistance"] = comp_b
-                result["components"]["support_resistance_scoring"] = comp_b_scoring
 
-                # ── Component D: Volume Confirmation (NEW v3.3) ───────
+                # ── Component D: Volume Confirmation (v3.3) ───────────
                 # Pass the preliminary A-vote as the expected direction so
                 # volume confirmation can align with the trend signal.
-                # Use the v3.4 weighted trend vote as the direction hint.
-                trend_hint = comp_a_weighted.get("vote") or comp_a.get("vote", "NEUTRAL")
+                trend_hint = comp_a.get("vote", "NEUTRAL")
                 comp_d = await self.volume_confirmation.analyze(
                     df_4h, trend_hint
                 )
                 result["components"]["volume_confirmation"] = comp_d
 
-                # ── v3.4 Confidence Score Calculation ────────────────
-                # Convert component confidences (0-1) to 0-100 scale for
-                # the new confidence calculator.
-                trend_score_100  = comp_a_weighted.get("confidence", comp_a.get("confidence", 0.0)) * 100
-                sr_score_100     = comp_b_scoring.get("confidence", comp_b.get("confidence", 0.0)) * 100
-                mtf_score_100    = comp_c_weighted.get("confidence", comp_c.get("confidence", 0.0)) * 100
-                volume_score_100 = comp_d.get("confidence", 0.0) * 100
-
-                # Liquidity sweep bonus
-                liq_bonus = 10.0 if self._detect_liquidity_sweep(df_4h) else 0.0
-
-                confidence_calc = self._calculate_confidence_score(
-                    trend_score=trend_score_100,
-                    sr_score=sr_score_100,
-                    mtf_score=mtf_score_100,
-                    volume_score=volume_score_100,
-                    regime_weights=regime_result.get("weights"),
-                    liquidity_bonus=liq_bonus,
-                )
-                result["components"]["confidence_calculation_v34"] = confidence_calc
-
-                # ── 4-Strategy Weighted Voting ────────────────────────
-                # Use v3.4 weighted engines as primary votes where available,
-                # falling back to legacy engines for backward compatibility.
-                signal_a = comp_a_weighted.get("vote") or comp_a["vote"]
-                signal_b = comp_b_scoring.get("vote") or comp_b["vote"]
-                signal_c = comp_c_weighted.get("vote") or comp_c["vote"]
+                # ── 4-Strategy Weighted Voting (v3.3) ─────────────────
+                signal_a = comp_a["vote"]
+                signal_b = comp_b["vote"]
+                signal_c = comp_c["vote"]
                 signal_d = comp_d["signal"]
 
                 votes = {
@@ -1281,7 +1215,7 @@ class HybridPortfolioSystemV3:
                 }
                 result["component_votes"] = votes
 
-                # v3.4 weights (A=40%, B=25%, C=20%, D=15%)
+                # v3.3 weights (A=40%, B=25%, C=20%, D=15%)
                 weights = {
                     "A_trend": WEIGHT_A,  # Trend Confirmation (40%)
                     "B_sr":    WEIGHT_B,  # Support/Resistance (25%)
@@ -1289,26 +1223,20 @@ class HybridPortfolioSystemV3:
                     "D_vol":   WEIGHT_D,  # Volume Confirmation (15%)
                 }
 
-                # Use v3.4 component confidences for weighted scoring
-                conf_a = comp_a_weighted.get("confidence", comp_a.get("confidence", 0))
-                conf_b = comp_b_scoring.get("confidence", comp_b.get("confidence", 0))
-                conf_c = comp_c_weighted.get("confidence", comp_c.get("confidence", 0))
-                conf_d = comp_d.get("confidence", 0)
-
-                # Calculate weighted scores using component confidence values
-                # (not just binary vote presence) for finer granularity
+                # Binary weighted voting — each agreeing component contributes
+                # its full weight to the directional score
                 buy_score = (
-                    (conf_a if signal_a == "BUY" else 0) * WEIGHT_A +
-                    (conf_b if signal_b == "BUY" else 0) * WEIGHT_B +
-                    (conf_c if signal_c == "BUY" else 0) * WEIGHT_C +
-                    (conf_d if signal_d == "BUY" else 0) * WEIGHT_D
+                    (WEIGHT_A if signal_a == "BUY" else 0) +
+                    (WEIGHT_B if signal_b == "BUY" else 0) +
+                    (WEIGHT_C if signal_c == "BUY" else 0) +
+                    (WEIGHT_D if signal_d == "BUY" else 0)
                 )
 
                 sell_score = (
-                    (conf_a if signal_a == "SELL" else 0) * WEIGHT_A +
-                    (conf_b if signal_b == "SELL" else 0) * WEIGHT_B +
-                    (conf_c if signal_c == "SELL" else 0) * WEIGHT_C +
-                    (conf_d if signal_d == "SELL" else 0) * WEIGHT_D
+                    (WEIGHT_A if signal_a == "SELL" else 0) +
+                    (WEIGHT_B if signal_b == "SELL" else 0) +
+                    (WEIGHT_C if signal_c == "SELL" else 0) +
+                    (WEIGHT_D if signal_d == "SELL" else 0)
                 )
 
                 # Determine consensus signal — 50% threshold allows 2-3 strategies to agree
@@ -1331,12 +1259,12 @@ class HybridPortfolioSystemV3:
 
                 if signal == "NEUTRAL":
                     result.update({
-                        "signal":                  "NEUTRAL",
-                        "confidence":              0.0,
-                        "meets_threshold":         False,
-                        "rejection_reason":        f"NO_CONSENSUS: {votes}",
-                        "weighted_scores":         {"buy": buy_score, "sell": sell_score},
-                        "weights":                 weights,
+                        "signal":          "NEUTRAL",
+                        "confidence":      0.0,
+                        "meets_threshold": False,
+                        "rejection_reason": f"NO_CONSENSUS: {votes}",
+                        "weighted_scores": {"buy": buy_score, "sell": sell_score},
+                        "weights":         weights,
                     })
                     logger.info(
                         f"HybridPortfolioV3 [{symbol}]: NEUTRAL — no weighted consensus "
@@ -1388,15 +1316,12 @@ class HybridPortfolioSystemV3:
                     "signal":                   signal if meets_threshold else "NEUTRAL",
                     "confidence":               final_confidence / 100.0,
                     "confidence_pct":           final_confidence,
-                    "confidence_score_v34":     confidence_calc.get("final_score", final_confidence),
                     "signal_quality":           signal_quality,
                     "meets_threshold":          meets_threshold,
                     "min_confidence_threshold": MIN_CONFIDENCE_FOR_SIGNAL,
                     "weighted_scores":          {"buy": buy_score, "sell": sell_score},
                     "weights":                  weights,
                     "confirmation_filters":     filter_result,
-                    "market_regime":            regime_result.get("regime", "UNKNOWN"),
-                    "regime_weights":           regime_result.get("weights", {}),
                 })
 
                 if not meets_threshold:
@@ -1739,30 +1664,25 @@ class HybridPortfolioSystemV3:
         """Get full system status and component health."""
         return {
             "version":     self.version,
-            "system_name": "9-Component Signal System (4-core + MR/PA/Macro + Regime/Filters) v3.4",
+            "system_name": "7-Component Signal System (4-core + MR/PA/Macro) v3.3",
             "architecture": (
                 "4-strategy weighted voting (A=40%, B=25%, C=20%, D=15%) "
                 "with 3-layer confirmation filters | single-engine (MR/PA) | "
-                "macro-filtered | consensus | market-regime-adaptive (v3.4)"
+                "macro-filtered | consensus"
             ),
             "components": {
-                "A_trend_confirmation":   "ACTIVE",
-                "A_trend_weighted_v34":   "ACTIVE",   # NEW v3.4
-                "B_support_resistance":   "ACTIVE",
-                "B_sr_scoring_v34":       "ACTIVE",   # NEW v3.4
-                "C_mtf_alignment":        "ACTIVE",
-                "C_mtf_weighted_v34":     "ACTIVE",   # NEW v3.4
-                "D_volume_confirmation":  "ACTIVE",
-                "MR_mean_reversion":      "ACTIVE",
-                "PA_price_action":        "ACTIVE",
-                "MC_macro_filter":        "ACTIVE",
-                "market_regime_detector": "ACTIVE",   # NEW v3.4
-                "signal_filters":         "ACTIVE",   # NEW v3.4
-                "economic_calendar":      "ACTIVE",
-                "position_calculator":    "ACTIVE",
-                "portfolio_manager":      "ACTIVE",
+                "A_trend_confirmation":  "ACTIVE",
+                "B_support_resistance":  "ACTIVE",
+                "C_mtf_alignment":       "ACTIVE",
+                "D_volume_confirmation": "ACTIVE",
+                "MR_mean_reversion":     "ACTIVE",
+                "PA_price_action":       "ACTIVE",
+                "MC_macro_filter":       "ACTIVE",
+                "economic_calendar":     "ACTIVE",
+                "position_calculator":   "ACTIVE",
+                "portfolio_manager":     "ACTIVE",
             },
-            "total_components": 9,
+            "total_components": 7,
             "strategy_modes": [
                 "original",
                 "mean_reversion",
@@ -1821,7 +1741,7 @@ class HybridPortfolioSystemV3:
           C (Multi-Timeframe):    20%
           D (Volume Confirmation): 15%
 
-        Consensus threshold: 90% weighted score (raised from 35%).
+        Consensus threshold: 50% weighted score (CONSENSUS_THRESHOLD=0.50).
 
         Args:
             signal_a: Vote from Component A ("BUY", "SELL", or "NEUTRAL")
