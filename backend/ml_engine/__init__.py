@@ -32,6 +32,7 @@ from .position_calculator import PositionCalculator, position_calculator
 from .portfolio_manager import PortfolioManager, portfolio_manager
 from .strategy_router import StrategyRouter, strategy_router
 from .hybrid_portfolio_system_v3 import HybridPortfolioSystemV3, hybrid_system_v3
+from .volume_confirmation import VolumeConfirmationStrategy
 from .geometry_rating import GeometryRating, geometry_rater
 from .candle_tracker import CandleTracker, candle_tracker
 from .validation import ValidationEngine
@@ -116,6 +117,8 @@ __all__ = [
     'strategy_router',
     'HybridPortfolioSystemV3',
     'hybrid_system_v3',
+    # v3.3: Volume Confirmation
+    'VolumeConfirmationStrategy',
     # Geometry Rating
     'GeometryRating',
     'geometry_rater',

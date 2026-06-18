@@ -1199,6 +1199,131 @@ async def generate_signal(pair: str) -> None:
         _signal_metrics.failed_cycles += 1
         return
 
+    # ── STAGE 2b: CONFIRMATION FILTERS ───────────────────────────────────────
+    # Apply 3-layer confirmation filters to boost confidence to 95%+.
+    # This is the server-side complement to the hybrid system's internal filters,
+    # using the real smc_score and mtf_alignment values from hybrid_ctx.
+
+    try:
+        from ml_engine.hybrid_portfolio_system_v3 import (
+            MIN_MTF_ALIGNMENT_PCT as _MIN_MTF,
+            MIN_SMC_SCORE as _MIN_SMC,
+            MIN_CONFIDENCE_FOR_SIGNAL as _MIN_CONF,
+        )
+
+        mtf_alignment_val = float(hybrid_ctx.get("mtf_alignment", 0))
+        smc_score_val     = int(hybrid_ctx.get("smc_score", 0))
+
+        cf_filters_passed = 0
+        cf_filters_failed = []
+
+        # Filter 1: MTF Alignment
+        if mtf_alignment_val >= _MIN_MTF:
+            cf_filters_passed += 1
+            logger.info(
+                f"[{pair}] ✅ CF Filter 1 PASSED: MTF alignment "
+                f"{mtf_alignment_val:.1f}% >= {_MIN_MTF}%"
+            )
+        else:
+            cf_filters_failed.append(
+                f"MTF alignment {mtf_alignment_val:.1f}% < {_MIN_MTF}%"
+            )
+            logger.warning(f"[{pair}] ❌ CF Filter 1 FAILED: {cf_filters_failed[-1]}")
+
+        # Filter 2: SMC Score
+        if smc_score_val >= _MIN_SMC:
+            cf_filters_passed += 1
+            logger.info(
+                f"[{pair}] ✅ CF Filter 2 PASSED: SMC score "
+                f"{smc_score_val}/10 >= {_MIN_SMC}/10"
+            )
+        else:
+            cf_filters_failed.append(
+                f"SMC score {smc_score_val}/10 < {_MIN_SMC}/10"
+            )
+            logger.warning(f"[{pair}] ❌ CF Filter 2 FAILED: {cf_filters_failed[-1]}")
+
+        # Filter 3: Economic News (reuse the already-checked calendar filter)
+        try:
+            has_news_cf = await _calendar_filter.is_blackout_period(pair)
+            if not has_news_cf:
+                cf_filters_passed += 1
+                logger.info(
+                    f"[{pair}] ✅ CF Filter 3 PASSED: No high-impact news in next 2 hours"
+                )
+            else:
+                cf_filters_failed.append("High-impact economic news in next 2 hours")
+                logger.warning(f"[{pair}] ❌ CF Filter 3 FAILED: {cf_filters_failed[-1]}")
+        except Exception as exc:
+            # Fail-open: error → treat as no news
+            cf_filters_passed += 1
+            logger.warning(
+                f"[{pair}] ⚠️ CF Filter 3 ERROR ({exc}) — treating as PASSED (fail-open)"
+            )
+
+        # Calculate final confidence
+        cf_final_confidence = confidence
+        if cf_filters_passed >= 2:
+            cf_final_confidence = min(99.0, confidence + (cf_filters_passed * 10.0))
+        if cf_filters_failed:
+            cf_final_confidence = min(cf_final_confidence, 85.0)
+        if cf_filters_passed == 3:
+            cf_final_confidence = min(99.0, max(95.0, cf_final_confidence))
+
+        logger.info(
+            f"[{pair}] ✅ CONFIDENCE BOOSTED: {confidence:.1f}% → {cf_final_confidence:.1f}% "
+            f"(filters: {cf_filters_passed}/3 passed)"
+        )
+
+        # Reject if final confidence below threshold
+        if cf_final_confidence < _MIN_CONF:
+            reason = (
+                f"Final confidence {cf_final_confidence:.1f}% < {_MIN_CONF}% threshold "
+                f"(filters: {cf_filters_passed}/3 passed, failed: {cf_filters_failed})"
+            )
+            logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=cf_final_confidence,
+                reason=reason,
+                metadata={
+                    "cf_filters_passed": cf_filters_passed,
+                    "cf_filters_failed": cf_filters_failed,
+                    "original_confidence": confidence,
+                },
+            )
+            return
+
+        # Downgrade to NEUTRAL if fewer than 2 filters pass
+        if cf_filters_passed < 2:
+            reason = (
+                f"Confirmation filters failed ({cf_filters_passed}/3 passed): "
+                f"{cf_filters_failed}"
+            )
+            logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=cf_final_confidence,
+                reason=reason,
+                metadata={
+                    "cf_filters_passed": cf_filters_passed,
+                    "cf_filters_failed": cf_filters_failed,
+                },
+            )
+            return
+
+        # Use boosted confidence for all downstream stages
+        confidence = cf_final_confidence
+
+    except Exception as exc:
+        logger.warning(
+            f"[{pair}] ⚠️ Confirmation filter error (fail-open, continuing): {exc}"
+        )
+
     # Calculate risk/reward (needed by both Stage 3 and Stage 5)
     risk   = abs(entry - sl)
     reward = abs(tps[0] - entry)
