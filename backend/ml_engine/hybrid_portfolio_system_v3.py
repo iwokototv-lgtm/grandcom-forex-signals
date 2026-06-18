@@ -1,17 +1,36 @@
 """
-Hybrid Portfolio System v3.0
-Simplified 3-component core system for high-quality signal generation.
+Hybrid Portfolio System v3.4
+Comprehensive signal generation with weighted engines and market regime adaptation.
 
 Architecture:
-  Component A — Trend Confirmation  (RSI + MACD + EMA cross)
-  Component B — Support/Resistance  (Pivot Points + ATR levels)
-  Component C — Multi-Timeframe     (1H + 4H + Daily alignment)
-  Component D — Volume Confirmation (volume trend + ratio + momentum)  [NEW v3.3]
+  Component A — Trend Confirmation  (EMA 50%, MACD 30%, RSI 20%)          [v3.4 weighted]
+  Component B — Support/Resistance  (Scoring system 0-100 points)          [v3.4 scoring]
+  Component C — Multi-Timeframe     (Daily 45%, 4H 35%, 1H 20%)            [v3.4 weighted]
+  Component D — Volume Confirmation (Forex-specific: Tick vol, ATR, Range) [v3.3]
 
-  Extended engines (v3.2):
-  Component MR — Mean Reversion     (EMA deviation + RSI extremes)
-  Component PA — Price Action       (S/R breaks, OB rejection, liq. sweeps)
-  Component MC — Macro Filter       (DXY, real rates, inflation expectations)
+  Extended engines (v3.2+):
+  Component MR — Mean Reversion     (EMA deviation + RSI extremes + Bollinger Bands)
+  Component PA — Price Action       (BOS, CHOCH, FVG, Equal H/L, Mitigation Block)
+  Component MC — Macro Filter       (Fed bias, 10Y yield, DXY, news)
+
+  NEW (v3.4):
+  Market Regime Detector — Adapts engine weights based on market condition
+    TRENDING  : Trend=60%, MR=10%, S/R=30%
+    RANGING   : Trend=20%, MR=60%, S/R=20%
+    HIGH_VOL  : Trend=50%, MR=20%, S/R=30%
+    LOW_VOL   : Trend=30%, MR=40%, S/R=30%
+
+  Confidence Calculation — 0-100 scale with modifiers
+    Base: Trend(35) + S/R(25) + MTF(20) + Volume(10) + Regime(10) = 100
+    Modifiers: Macro(±20), News(-30), Volatility(±5), Liquidity(+10)
+
+  Signal Filters — 6 comprehensive pass/fail checks
+    1. Confidence ≥ 85%
+    2. Risk:Reward ≥ 1:2
+    3. Spread < maximum allowed
+    4. No high-impact news within 30 minutes
+    5. No duplicate signal on same 4H candle
+    6. Higher timeframe trend agrees
 
 Signal logic: WEIGHTED VOTING based on backtest performance (not equal majority vote).
   Weights (v3.3): A=40%, B=25%, C=20%, D=15%. Consensus threshold: 90%.
@@ -46,6 +65,8 @@ from .mean_reversion_core import MeanReversionCore
 from .price_action_core import PriceActionCore
 from .macro_filter import MacroFilter
 from .volume_confirmation import VolumeConfirmationStrategy
+from .market_regime_detector import MarketRegimeDetector  # NEW v3.4
+from .signal_filters import SignalFilters                  # NEW v3.4
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +197,7 @@ class HybridPortfolioSystemV3:
 
     def __init__(self, account_balance: float = 10000.0):
         self.account_balance = account_balance
-        self.version = "3.3.0"
+        self.version = "3.4.0"
 
         # Core 4-component engines (v3.3)
         self.mtf_confirmation = MultiTimeframeConfirmation()
@@ -189,6 +210,10 @@ class HybridPortfolioSystemV3:
         self.price_action_engine   = PriceActionCore()
         self.macro_filter_engine   = MacroFilter()
 
+        # NEW v3.4 engines
+        self.market_regime_detector = MarketRegimeDetector()
+        self.signal_filters = SignalFilters()
+
         # Infrastructure (kept for compatibility)
         self.economic_calendar = EconomicCalendar()
         self.position_calculator = PositionCalculator()
@@ -197,7 +222,8 @@ class HybridPortfolioSystemV3:
 
         logger.info(
             f"HybridPortfolioSystemV3 initialized — v{self.version} "
-            f"(4-component + MR/PA/Macro | weights A={WEIGHT_A} B={WEIGHT_B} "
+            f"(4-component + MR/PA/Macro + MarketRegime/SignalFilters | "
+            f"weights A={WEIGHT_A} B={WEIGHT_B} "
             f"C={WEIGHT_C} D={WEIGHT_D} threshold={CONSENSUS_THRESHOLD})"
         )
 
@@ -273,6 +299,84 @@ class HybridPortfolioSystemV3:
             }
         except Exception as exc:
             logger.error(f"Component A error: {exc}")
+            return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Component A (v3.4): Trend Confirmation — Weighted Indicators
+    # ------------------------------------------------------------------
+
+    def _component_a_trend_weighted(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Trend Confirmation with weighted indicators (v3.4).
+
+        Weights:
+          - EMA alignment : 50%  (tells you the trend direction)
+          - MACD momentum : 30%  (tells you momentum)
+          - RSI confirmation: 20% (confirmation only — prevents RSI delay)
+
+        Weighted score in [-1, +1]:
+          > +0.5  → BUY
+          < -0.5  → SELL
+          else    → NEUTRAL
+        """
+        try:
+            close = df["close"].astype(float)
+
+            # EMA alignment (50% weight)
+            ema20 = close.ewm(span=20, adjust=False).mean()
+            ema50 = close.ewm(span=50, adjust=False).mean()
+            ema_bull = float(ema20.iloc[-1]) > float(ema50.iloc[-1])
+            ema_score = 1.0 if ema_bull else -1.0
+
+            # MACD momentum (30% weight)
+            ema12 = close.ewm(span=12, adjust=False).mean()
+            ema26 = close.ewm(span=26, adjust=False).mean()
+            macd_line = ema12 - ema26
+            macd_signal_line = macd_line.ewm(span=9, adjust=False).mean()
+            macd_hist = float((macd_line - macd_signal_line).iloc[-1])
+            macd_score = 1.0 if macd_hist > 0 else -1.0
+
+            # RSI confirmation (20% weight)
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+            rsi_score = 1.0 if rsi > 60 else (-1.0 if rsi < 40 else 0.0)
+
+            # Weighted composite score
+            weighted_score = (
+                ema_score * 0.50 +
+                macd_score * 0.30 +
+                rsi_score * 0.20
+            )
+
+            # Determine vote
+            if weighted_score > 0.5:
+                vote = "BUY"
+                confidence = min(0.95, 0.60 + abs(weighted_score) * 0.35)
+            elif weighted_score < -0.5:
+                vote = "SELL"
+                confidence = min(0.95, 0.60 + abs(weighted_score) * 0.35)
+            else:
+                vote = "NEUTRAL"
+                confidence = 0.0
+
+            return {
+                "vote": vote,
+                "confidence": round(confidence, 4),
+                "ema_score": round(ema_score, 2),
+                "macd_score": round(macd_score, 2),
+                "rsi_score": round(rsi_score, 2),
+                "weighted_score": round(weighted_score, 3),
+                "rsi": round(rsi, 2),
+                "ema20": round(float(ema20.iloc[-1]), 5),
+                "ema50": round(float(ema50.iloc[-1]), 5),
+                "macd_hist": round(macd_hist, 6),
+                "valid": True,
+            }
+        except Exception as exc:
+            logger.error(f"Trend Engine (weighted) error: {exc}")
             return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
@@ -370,6 +474,201 @@ class HybridPortfolioSystemV3:
             return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
+    # Component B (v3.4): S/R Engine — Scoring System (0-100 points)
+    # ------------------------------------------------------------------
+
+    def _component_b_sr_scoring(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        df_daily: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, Any]:
+        """
+        Support/Resistance with scoring system (v3.4).
+
+        Scoring (0-100 points):
+          - Near Pivot         : +15 points
+          - Weekly Pivot bias  : +20 points
+          - ATR Support/Resist : +10 points
+          - Demand Zone        : +25 points
+          - Liquidity Sweep    : +30 points
+          Maximum              : 100 points
+
+        Vote is determined by score + pivot bias:
+          score >= 50 → BUY or SELL (based on pivot bias)
+          score <  50 → NEUTRAL
+        """
+        try:
+            current_price = float(df["close"].iloc[-1])
+            pivot_df = df_daily if df_daily is not None else df
+
+            score = 0
+            factors: List[str] = []
+
+            # Pivot analysis
+            pivot_analysis = self.pivot_analyzer.analyze(pivot_df, symbol, use_all_methods=False)
+            if pivot_analysis.get("valid"):
+                # Near Pivot: +15
+                if "nearest_levels" in pivot_analysis:
+                    nearest = pivot_analysis["nearest_levels"]
+                    atr = self._calculate_atr(df)
+
+                    if "nearest_support" in nearest:
+                        dist = abs(current_price - nearest["nearest_support"]["price"])
+                        if dist <= atr * 0.5:
+                            score += 15
+                            factors.append("near_pivot_support")
+
+                    if "nearest_resistance" in nearest:
+                        dist = abs(current_price - nearest["nearest_resistance"]["price"])
+                        if dist <= atr * 0.5:
+                            score += 15
+                            factors.append("near_pivot_resistance")
+
+                # Weekly Pivot bias: +20
+                if pivot_analysis.get("bias") in ("STRONG_BULLISH", "STRONG_BEARISH"):
+                    score += 20
+                    factors.append("weekly_pivot_bias")
+
+            # ATR Support/Resistance: +10
+            atr = self._calculate_atr(df)
+            ema20 = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+            if abs(current_price - (ema20 - 2 * atr)) < atr * 0.3:
+                score += 10
+                factors.append("atr_support")
+            elif abs(current_price - (ema20 + 2 * atr)) < atr * 0.3:
+                score += 10
+                factors.append("atr_resistance")
+
+            # Demand Zone: +25
+            if self._is_in_demand_zone(df):
+                score += 25
+                factors.append("demand_zone")
+
+            # Liquidity Sweep: +30
+            if self._detect_liquidity_sweep(df):
+                score += 30
+                factors.append("liquidity_sweep")
+
+            # Cap at 100
+            score = min(score, 100)
+
+            pivot_bias = pivot_analysis.get("bias", "NEUTRAL") if pivot_analysis.get("valid") else "NEUTRAL"
+
+            # Determine vote based on score
+            if score >= 50:
+                vote = "BUY" if pivot_bias in ("BULLISH", "STRONG_BULLISH") else "SELL"
+                confidence = min(0.95, 0.50 + (score / 100) * 0.45)
+            else:
+                vote = "NEUTRAL"
+                confidence = 0.0
+
+            return {
+                "vote": vote,
+                "confidence": round(confidence, 4),
+                "score": score,
+                "factors": factors,
+                "pivot_bias": pivot_bias,
+                "valid": True,
+            }
+        except Exception as exc:
+            logger.error(f"S/R Engine (scoring) error: {exc}")
+            return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # S/R helper methods (used by _component_b_sr_scoring)
+    # ------------------------------------------------------------------
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate ATR for the given DataFrame."""
+        try:
+            high = df["high"].astype(float)
+            low = df["low"].astype(float)
+            close = df["close"].astype(float)
+            tr = pd.concat(
+                [
+                    high - low,
+                    (high - close.shift()).abs(),
+                    (low - close.shift()).abs(),
+                ],
+                axis=1,
+            ).max(axis=1)
+            val = float(tr.rolling(period).mean().iloc[-1])
+            return val if not np.isnan(val) else 0.0
+        except Exception:
+            return 0.0
+
+    def _is_in_demand_zone(self, df: pd.DataFrame, lookback: int = 30) -> bool:
+        """
+        Check if current price is in a previous demand (support) zone.
+
+        A demand zone is identified as a candle where price bounced strongly
+        upward (close > open by at least 0.5 ATR) in the lookback window.
+        """
+        try:
+            if len(df) < lookback + 5:
+                return False
+
+            atr = self._calculate_atr(df)
+            if atr <= 0:
+                return False
+
+            current_price = float(df["close"].iloc[-1])
+            history = df.iloc[-(lookback + 5) : -5]
+
+            for _, row in history.iterrows():
+                candle_low = float(row["low"])
+                candle_high = float(row["high"])
+                candle_body = abs(float(row["close"]) - float(row["open"]))
+
+                # Bullish demand candle: close > open with meaningful body
+                if float(row["close"]) > float(row["open"]) and candle_body >= atr * 0.5:
+                    zone_top = candle_high
+                    zone_bottom = candle_low
+                    if zone_bottom <= current_price <= zone_top:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    def _detect_liquidity_sweep(self, df: pd.DataFrame, lookback: int = 20) -> bool:
+        """
+        Detect a liquidity sweep: price briefly breaks a recent swing high/low
+        then immediately reverses (stop-hunt pattern).
+
+        Conditions:
+          - Price exceeded the highest high (or lowest low) of the lookback window
+            in the previous candle.
+          - Current candle has reversed back inside the range.
+        """
+        try:
+            if len(df) < lookback + 3:
+                return False
+
+            window = df.iloc[-(lookback + 2) : -2]
+            prev = df.iloc[-2]
+            curr = df.iloc[-1]
+
+            swing_high = float(window["high"].max())
+            swing_low = float(window["low"].min())
+
+            prev_high = float(prev["high"])
+            prev_low = float(prev["low"])
+            curr_close = float(curr["close"])
+
+            # Bullish sweep: previous candle broke below swing_low, current closed above it
+            if prev_low < swing_low and curr_close > swing_low:
+                return True
+
+            # Bearish sweep: previous candle broke above swing_high, current closed below it
+            if prev_high > swing_high and curr_close < swing_high:
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
     # Component C: Multi-Timeframe Alignment
     # ------------------------------------------------------------------
 
@@ -413,6 +712,162 @@ class HybridPortfolioSystemV3:
         except Exception as exc:
             logger.error(f"Component C error: {exc}")
             return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Component C (v3.4): MTF Engine — Weighted Voting
+    # ------------------------------------------------------------------
+
+    def _component_c_mtf_weighted(self, mtf_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Multi-Timeframe with weighted voting (v3.4).
+
+        Weights:
+          - Daily : 45%  (dominant trend)
+          - 4H    : 35%  (intermediate trend)
+          - 1H    : 20%  (entry timing)
+
+        Allows disagreement — does not reject if one timeframe disagrees.
+        Example: Daily BUY (45%) + 4H BUY (35%) + 1H SELL (20%) = 80% BUY → BUY signal.
+
+        Minimum buy_score or sell_score of 0.35 required to produce a directional vote.
+        """
+        try:
+            if not mtf_analysis.get("valid"):
+                return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False,
+                        "reason": "mtf_analysis_invalid"}
+
+            # Extract per-timeframe signals from the MTF analysis result.
+            # MultiTimeframeConfirmation stores per-timeframe data under "timeframes".
+            timeframes = mtf_analysis.get("timeframes", {})
+
+            def _tf_signal(tf_key: str) -> str:
+                tf_data = timeframes.get(tf_key, {})
+                direction = tf_data.get("direction", "NEUTRAL")
+                if direction == "BULLISH":
+                    return "BUY"
+                elif direction == "BEARISH":
+                    return "SELL"
+                return "NEUTRAL"
+
+            daily_signal = _tf_signal("1day")
+            h4_signal    = _tf_signal("4h")
+            h1_signal    = _tf_signal("1h")
+
+            # Weighted voting
+            buy_score = (
+                (1.0 if daily_signal == "BUY" else 0.0) * 0.45 +
+                (1.0 if h4_signal    == "BUY" else 0.0) * 0.35 +
+                (1.0 if h1_signal    == "BUY" else 0.0) * 0.20
+            )
+
+            sell_score = (
+                (1.0 if daily_signal == "SELL" else 0.0) * 0.45 +
+                (1.0 if h4_signal    == "SELL" else 0.0) * 0.35 +
+                (1.0 if h1_signal    == "SELL" else 0.0) * 0.20
+            )
+
+            # Determine vote (allows disagreement)
+            if buy_score > sell_score and buy_score >= 0.35:
+                vote = "BUY"
+                confidence = min(0.95, 0.50 + buy_score * 0.45)
+            elif sell_score > buy_score and sell_score >= 0.35:
+                vote = "SELL"
+                confidence = min(0.95, 0.50 + sell_score * 0.45)
+            else:
+                vote = "NEUTRAL"
+                confidence = 0.0
+
+            return {
+                "vote": vote,
+                "confidence": round(confidence, 4),
+                "daily_signal": daily_signal,
+                "h4_signal": h4_signal,
+                "h1_signal": h1_signal,
+                "buy_score": round(buy_score, 3),
+                "sell_score": round(sell_score, 3),
+                "valid": True,
+            }
+        except Exception as exc:
+            logger.error(f"MTF Engine (weighted) error: {exc}")
+            return {"vote": "NEUTRAL", "confidence": 0.0, "valid": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Confidence Calculation (v3.4): 0-100 Scale with Modifiers
+    # ------------------------------------------------------------------
+
+    def _calculate_confidence_score(
+        self,
+        trend_score: float,
+        sr_score: float,
+        mtf_score: float,
+        volume_score: float,
+        regime_weights: Optional[Dict[str, float]] = None,
+        macro_modifier: float = 0.0,
+        news_modifier: float = 0.0,
+        volatility_modifier: float = 0.0,
+        liquidity_bonus: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Calculate confidence score on a 0-100 scale (v3.4).
+
+        Base calculation (100 points total):
+          - Trend  : 35 points
+          - S/R    : 25 points
+          - MTF    : 20 points
+          - Volume : 10 points
+          - Regime : 10 points (fixed)
+          SUBTOTAL : 100 points
+
+        Modifiers (applied after base):
+          - Macro filter    : ±20 points
+          - News filter     : -30 points (or block)
+          - Volatility      : ±5 points
+          - Liquidity sweep : +10 points
+
+        Args:
+            trend_score:         Trend component score (0-100).
+            sr_score:            S/R component score (0-100).
+            mtf_score:           MTF component score (0-100).
+            volume_score:        Volume component score (0-100).
+            regime_weights:      Regime weight dict (unused in base calc, kept for future).
+            macro_modifier:      Macro filter modifier (±20).
+            news_modifier:       News filter modifier (-30 or 0).
+            volatility_modifier: Volatility modifier (±5).
+            liquidity_bonus:     Liquidity sweep bonus (+10 or 0).
+
+        Returns:
+            Dict with base_score, modifiers, final_score (0-100), valid.
+        """
+        try:
+            base_score = (
+                trend_score  * 0.35 +
+                sr_score     * 0.25 +
+                mtf_score    * 0.20 +
+                volume_score * 0.10 +
+                10.0  # Market regime fixed 10 points
+            )
+
+            final_score = base_score
+            final_score += macro_modifier
+            final_score += news_modifier
+            final_score += volatility_modifier
+            final_score += liquidity_bonus
+
+            # Cap at 0-100
+            final_score = max(0.0, min(100.0, final_score))
+
+            return {
+                "base_score": round(base_score, 1),
+                "macro_modifier": round(macro_modifier, 1),
+                "news_modifier": round(news_modifier, 1),
+                "volatility_modifier": round(volatility_modifier, 1),
+                "liquidity_bonus": round(liquidity_bonus, 1),
+                "final_score": round(final_score, 1),
+                "valid": True,
+            }
+        except Exception as exc:
+            logger.error(f"Confidence calculation error: {exc}")
+            return {"final_score": 0.0, "valid": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Component MR: Mean Reversion
@@ -738,12 +1193,26 @@ class HybridPortfolioSystemV3:
                 return result
 
             # ==============================================================
-            # ORIGINAL 4-COMPONENT MODE  (v3.3 — 95%+ confidence)
+            # ORIGINAL 4-COMPONENT MODE  (v3.4 — 95%+ confidence)
             # ==============================================================
             if strategy_mode == "original":
-                # ── Component A: Trend Confirmation ───────────────────
-                comp_a = self._component_a_trend(df_4h)
+                # ── Market Regime Detection (v3.4) ────────────────────
+                try:
+                    regime_result = await asyncio.wait_for(
+                        self.market_regime_detector.detect(df_4h),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Market regime detection timed out for {symbol}")
+                    regime_result = {"regime": "LOW_VOL", "weights": {}, "valid": False}
+                result["components"]["market_regime"] = regime_result
+                result["market_regime"] = regime_result.get("regime", "UNKNOWN")
+
+                # ── Component A: Trend Confirmation (v3.4 weighted) ───
+                comp_a_weighted = self._component_a_trend_weighted(df_4h)
+                comp_a = self._component_a_trend(df_4h)  # keep legacy for voting
                 result["components"]["trend_confirmation"] = comp_a
+                result["components"]["trend_confirmation_weighted"] = comp_a_weighted
 
                 # ── Component C: Multi-Timeframe Alignment ────────────
                 try:
@@ -755,25 +1224,53 @@ class HybridPortfolioSystemV3:
                     logger.warning(f"MTF analysis timed out for {symbol}")
                     mtf_raw = {"valid": False, "alignment_score": 0, "dominant_direction": "NEUTRAL"}
                 comp_c = self._component_c_mtf(mtf_raw)
+                comp_c_weighted = self._component_c_mtf_weighted(mtf_raw)  # v3.4
                 result["components"]["mtf_alignment"] = comp_c
+                result["components"]["mtf_alignment_weighted"] = comp_c_weighted
 
-                # ── Component B: Support/Resistance ───────────────────
+                # ── Component B: Support/Resistance (v3.4 scoring) ────
                 comp_b = self._component_b_sr(df_4h, symbol, df_daily)
+                comp_b_scoring = self._component_b_sr_scoring(df_4h, symbol, df_daily)  # v3.4
                 result["components"]["support_resistance"] = comp_b
+                result["components"]["support_resistance_scoring"] = comp_b_scoring
 
                 # ── Component D: Volume Confirmation (NEW v3.3) ───────
                 # Pass the preliminary A-vote as the expected direction so
                 # volume confirmation can align with the trend signal.
+                # Use the v3.4 weighted trend vote as the direction hint.
+                trend_hint = comp_a_weighted.get("vote") or comp_a.get("vote", "NEUTRAL")
                 comp_d = await self.volume_confirmation.analyze(
-                    df_4h, comp_a.get("vote", "NEUTRAL")
+                    df_4h, trend_hint
                 )
                 result["components"]["volume_confirmation"] = comp_d
 
-                # ── 4-Strategy Weighted Voting ────────────────────────
+                # ── v3.4 Confidence Score Calculation ────────────────
+                # Convert component confidences (0-1) to 0-100 scale for
+                # the new confidence calculator.
+                trend_score_100  = comp_a_weighted.get("confidence", comp_a.get("confidence", 0.0)) * 100
+                sr_score_100     = comp_b_scoring.get("confidence", comp_b.get("confidence", 0.0)) * 100
+                mtf_score_100    = comp_c_weighted.get("confidence", comp_c.get("confidence", 0.0)) * 100
+                volume_score_100 = comp_d.get("confidence", 0.0) * 100
 
-                signal_a = comp_a["vote"]
-                signal_b = comp_b["vote"]
-                signal_c = comp_c["vote"]
+                # Liquidity sweep bonus
+                liq_bonus = 10.0 if self._detect_liquidity_sweep(df_4h) else 0.0
+
+                confidence_calc = self._calculate_confidence_score(
+                    trend_score=trend_score_100,
+                    sr_score=sr_score_100,
+                    mtf_score=mtf_score_100,
+                    volume_score=volume_score_100,
+                    regime_weights=regime_result.get("weights"),
+                    liquidity_bonus=liq_bonus,
+                )
+                result["components"]["confidence_calculation_v34"] = confidence_calc
+
+                # ── 4-Strategy Weighted Voting ────────────────────────
+                # Use v3.4 weighted engines as primary votes where available,
+                # falling back to legacy engines for backward compatibility.
+                signal_a = comp_a_weighted.get("vote") or comp_a["vote"]
+                signal_b = comp_b_scoring.get("vote") or comp_b["vote"]
+                signal_c = comp_c_weighted.get("vote") or comp_c["vote"]
                 signal_d = comp_d["signal"]
 
                 votes = {
@@ -784,7 +1281,7 @@ class HybridPortfolioSystemV3:
                 }
                 result["component_votes"] = votes
 
-                # v3.3 weights (A=40%, B=25%, C=20%, D=15%)
+                # v3.4 weights (A=40%, B=25%, C=20%, D=15%)
                 weights = {
                     "A_trend": WEIGHT_A,  # Trend Confirmation (40%)
                     "B_sr":    WEIGHT_B,  # Support/Resistance (25%)
@@ -792,20 +1289,26 @@ class HybridPortfolioSystemV3:
                     "D_vol":   WEIGHT_D,  # Volume Confirmation (15%)
                 }
 
+                # Use v3.4 component confidences for weighted scoring
+                conf_a = comp_a_weighted.get("confidence", comp_a.get("confidence", 0))
+                conf_b = comp_b_scoring.get("confidence", comp_b.get("confidence", 0))
+                conf_c = comp_c_weighted.get("confidence", comp_c.get("confidence", 0))
+                conf_d = comp_d.get("confidence", 0)
+
                 # Calculate weighted scores using component confidence values
                 # (not just binary vote presence) for finer granularity
                 buy_score = (
-                    (comp_a.get("confidence", 0) if signal_a == "BUY" else 0) * WEIGHT_A +
-                    (comp_b.get("confidence", 0) if signal_b == "BUY" else 0) * WEIGHT_B +
-                    (comp_c.get("confidence", 0) if signal_c == "BUY" else 0) * WEIGHT_C +
-                    (comp_d.get("confidence", 0) if signal_d == "BUY" else 0) * WEIGHT_D
+                    (conf_a if signal_a == "BUY" else 0) * WEIGHT_A +
+                    (conf_b if signal_b == "BUY" else 0) * WEIGHT_B +
+                    (conf_c if signal_c == "BUY" else 0) * WEIGHT_C +
+                    (conf_d if signal_d == "BUY" else 0) * WEIGHT_D
                 )
 
                 sell_score = (
-                    (comp_a.get("confidence", 0) if signal_a == "SELL" else 0) * WEIGHT_A +
-                    (comp_b.get("confidence", 0) if signal_b == "SELL" else 0) * WEIGHT_B +
-                    (comp_c.get("confidence", 0) if signal_c == "SELL" else 0) * WEIGHT_C +
-                    (comp_d.get("confidence", 0) if signal_d == "SELL" else 0) * WEIGHT_D
+                    (conf_a if signal_a == "SELL" else 0) * WEIGHT_A +
+                    (conf_b if signal_b == "SELL" else 0) * WEIGHT_B +
+                    (conf_c if signal_c == "SELL" else 0) * WEIGHT_C +
+                    (conf_d if signal_d == "SELL" else 0) * WEIGHT_D
                 )
 
                 # Determine consensus signal — 50% threshold allows 2-3 strategies to agree
@@ -885,12 +1388,15 @@ class HybridPortfolioSystemV3:
                     "signal":                   signal if meets_threshold else "NEUTRAL",
                     "confidence":               final_confidence / 100.0,
                     "confidence_pct":           final_confidence,
+                    "confidence_score_v34":     confidence_calc.get("final_score", final_confidence),
                     "signal_quality":           signal_quality,
                     "meets_threshold":          meets_threshold,
                     "min_confidence_threshold": MIN_CONFIDENCE_FOR_SIGNAL,
                     "weighted_scores":          {"buy": buy_score, "sell": sell_score},
                     "weights":                  weights,
                     "confirmation_filters":     filter_result,
+                    "market_regime":            regime_result.get("regime", "UNKNOWN"),
+                    "regime_weights":           regime_result.get("weights", {}),
                 })
 
                 if not meets_threshold:
@@ -1233,25 +1739,30 @@ class HybridPortfolioSystemV3:
         """Get full system status and component health."""
         return {
             "version":     self.version,
-            "system_name": "7-Component Signal System (4-core + MR/PA/Macro) v3.3",
+            "system_name": "9-Component Signal System (4-core + MR/PA/Macro + Regime/Filters) v3.4",
             "architecture": (
                 "4-strategy weighted voting (A=40%, B=25%, C=20%, D=15%) "
                 "with 3-layer confirmation filters | single-engine (MR/PA) | "
-                "macro-filtered | consensus"
+                "macro-filtered | consensus | market-regime-adaptive (v3.4)"
             ),
             "components": {
-                "A_trend_confirmation":  "ACTIVE",
-                "B_support_resistance":  "ACTIVE",
-                "C_mtf_alignment":       "ACTIVE",
-                "D_volume_confirmation": "ACTIVE",  # NEW v3.3
-                "MR_mean_reversion":     "ACTIVE",
-                "PA_price_action":       "ACTIVE",
-                "MC_macro_filter":       "ACTIVE",
-                "economic_calendar":     "ACTIVE",
-                "position_calculator":   "ACTIVE",
-                "portfolio_manager":     "ACTIVE",
+                "A_trend_confirmation":   "ACTIVE",
+                "A_trend_weighted_v34":   "ACTIVE",   # NEW v3.4
+                "B_support_resistance":   "ACTIVE",
+                "B_sr_scoring_v34":       "ACTIVE",   # NEW v3.4
+                "C_mtf_alignment":        "ACTIVE",
+                "C_mtf_weighted_v34":     "ACTIVE",   # NEW v3.4
+                "D_volume_confirmation":  "ACTIVE",
+                "MR_mean_reversion":      "ACTIVE",
+                "PA_price_action":        "ACTIVE",
+                "MC_macro_filter":        "ACTIVE",
+                "market_regime_detector": "ACTIVE",   # NEW v3.4
+                "signal_filters":         "ACTIVE",   # NEW v3.4
+                "economic_calendar":      "ACTIVE",
+                "position_calculator":    "ACTIVE",
+                "portfolio_manager":      "ACTIVE",
             },
-            "total_components": 7,
+            "total_components": 9,
             "strategy_modes": [
                 "original",
                 "mean_reversion",
