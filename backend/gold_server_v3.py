@@ -785,7 +785,14 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
 # Core Signal Generation
 # ---------------------------------------------------------------------------
 async def generate_signal(pair: str) -> None:
-    """Full v3.0 pipeline: fetch → risk checks → hybrid analysis → GPT → validate → store → send."""
+    """
+    Signal generation pipeline:
+    1. Generate signal from hybrid system
+    2. Validate signal (5 checks)
+    3. Send Telegram notification  ← BEFORE position check
+    4. Attempt position registration
+    5. If blocked, don't execute trade (but signal was already sent)
+    """
     cfg = PAIRS[pair]
     cycle_time = datetime.now(timezone.utc)
     logger.info(f"[{pair}] Starting v3.0 signal generation at {cycle_time.isoformat()}")
@@ -877,17 +884,6 @@ async def generate_signal(pair: str) -> None:
     except Exception as exc:
         logger.warning(f"[{pair}] Reversal detection error (fail-open): {exc}")
 
-    # Guard 4: Position count hard cap
-    try:
-        pos_count = await _position_manager.get_position_count(pair)
-        if pos_count >= 5:
-            logger.info(
-                f"[{pair}] Position cap reached ({pos_count}/5) — skipping new signal"
-            )
-            return
-    except Exception as exc:
-        logger.warning(f"[{pair}] Position count check error: {exc}")
-
     # ── HYBRID ANALYSIS ──────────────────────────────────────────────────────
 
     # 3. Hybrid system analysis
@@ -919,13 +915,16 @@ async def generate_signal(pair: str) -> None:
         except Exception as exc:
             logger.error(f"[{pair}] Hybrid system error: {exc}")
 
-    # ── HYBRID SIGNAL (direct — no GPT override) ─────────────────────────────
+    # ── STAGE 1: GENERATE SIGNAL ─────────────────────────────────────────────
 
-    # 4. Use hybrid signal directly — GPT override removed.
+    # Use hybrid signal directly — GPT override removed.
     # The hybrid system is backtest-proven (45.1% win rate, 2.17 profit factor)
     # and GPT was weakening signals (75% → 40%) instead of confirming them.
     signal_type = str(hybrid_ctx.get("hybrid_signal", "NEUTRAL")).upper()
     confidence  = float(hybrid_ctx.get("hybrid_confidence", 0.0))
+    entry       = float(hybrid_ctx.get("entry", 0) or ind["price"])
+    if entry <= 0:
+        entry = ind["price"]
 
     # Analysis from hybrid system
     analysis = hybrid_ctx.get("analysis", "")
@@ -933,14 +932,8 @@ async def generate_signal(pair: str) -> None:
         analysis = f"Hybrid signal: {signal_type} (confidence={confidence}%)"
 
     logger.info(
-        f"[{pair}] ✅ Using hybrid signal directly (no GPT override): "
-        f"{signal_type} confidence={confidence}%"
-    )
-
-    # 5. Log generated signal and store event
-    logger.info(
-        f"[{pair}] ✅ SIGNAL GENERATED: {signal_type} "
-        f"(confidence={confidence}%, source=Hybrid)"
+        f"[{pair}] ✅ STAGE 1 - SIGNAL GENERATED: {signal_type} "
+        f"(confidence={confidence}%, entry={entry})"
     )
     await log_signal_event(
         pair=pair,
@@ -951,10 +944,12 @@ async def generate_signal(pair: str) -> None:
         metadata={"hybrid_signal": signal_type, "hybrid_confidence": confidence},
     )
 
-    # 5a. Pre-validation filter: NEUTRAL or unknown signal type
+    # ── STAGE 2: VALIDATE SIGNAL ─────────────────────────────────────────────
+
+    # Pre-validation: NEUTRAL or unknown signal type
     if signal_type == "NEUTRAL" or signal_type not in ("BUY", "SELL"):
         reason = f"Hybrid returned {signal_type} — no actionable trade direction"
-        logger.info(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        logger.info(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
         await log_signal_event(
             pair=pair,
             event_type="rejected",
@@ -964,10 +959,10 @@ async def generate_signal(pair: str) -> None:
         )
         return
 
-    # 5b. Pre-validation filter: confidence below minimum
+    # Pre-validation: confidence below minimum
     if confidence < MIN_CONFIDENCE:
         reason = f"Confidence {confidence}% below {MIN_CONFIDENCE}% minimum threshold"
-        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
         await log_signal_event(
             pair=pair,
             event_type="rejected",
@@ -977,20 +972,14 @@ async def generate_signal(pair: str) -> None:
         )
         return
 
-    # ── LEVELS & GEOMETRY ────────────────────────────────────────────────────
-
-    # 6. Levels — entry price from hybrid context or current market price
-    entry = float(hybrid_ctx.get("entry", 0) or ind["price"])
-    if entry <= 0:
-        entry = ind["price"]
-
+    # Calculate levels
     logger.info(f"[{pair}] Entry price: {entry} (from hybrid system)")
-
     tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
 
+    # Geometry validation
     if signal_type == "BUY" and (tps[0] <= entry or sl >= entry):
         reason = f"BUY geometry invalid (TP1={tps[0]} <= entry={entry} or SL={sl} >= entry)"
-        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
         await log_signal_event(
             pair=pair,
             event_type="rejected",
@@ -999,9 +988,10 @@ async def generate_signal(pair: str) -> None:
             reason=reason,
         )
         return
+
     if signal_type == "SELL" and (tps[0] >= entry or sl <= entry):
         reason = f"SELL geometry invalid (TP1={tps[0]} >= entry={entry} or SL={sl} <= entry)"
-        logger.warning(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
+        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
         await log_signal_event(
             pair=pair,
             event_type="rejected",
@@ -1011,9 +1001,7 @@ async def generate_signal(pair: str) -> None:
         )
         return
 
-    # ── SIGNAL VALIDATION ────────────────────────────────────────────────────
-
-    # 5c. Full signal validation pipeline
+    # Full signal validation pipeline
     signal_data_for_validation = {
         "pair": pair,
         "signal": signal_type,
@@ -1027,7 +1015,7 @@ async def generate_signal(pair: str) -> None:
 
     if not validation_result["valid"]:
         logger.warning(
-            f"[{pair}] ❌ SIGNAL REJECTED by validator: {validation_result['reason']} "
+            f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {validation_result['reason']} "
             f"(checks_failed={validation_result['checks_failed']})"
         )
         await log_signal_event(
@@ -1045,8 +1033,8 @@ async def generate_signal(pair: str) -> None:
         return
 
     logger.info(
-        f"[{pair}] ✅ SIGNAL VALIDATED: {signal_type} ready to send to Telegram "
-        f"(checks_passed={len(validation_result['checks_passed'])})"
+        f"[{pair}] ✅ STAGE 2 - VALIDATION PASSED: {signal_type} signal "
+        f"(confidence={confidence}%, entry={entry}, checks={len(validation_result['checks_passed'])})"
     )
     await log_signal_event(
         pair=pair,
@@ -1057,13 +1045,60 @@ async def generate_signal(pair: str) -> None:
         metadata={"checks_passed": validation_result["checks_passed"]},
     )
 
-    # 7. Risk/reward
+    # ── STAGE 3: SEND TELEGRAM NOTIFICATION ──────────────────────────────────
+
+    # Calculate risk/reward
     risk   = abs(entry - sl)
     reward = abs(tps[0] - entry)
-    rr     = round(reward / risk, 1) if risk > 0 else 2.0
+    rr     = round(reward / risk, 2) if risk > 0 else 0.0
 
-    # ── DRAWDOWN RECOVERY SIZE MULTIPLIER ────────────────────────────────────
+    # Gather risk/position context for the notification
+    pos_summary = await _position_manager.get_positions_summary()
+    risk_status = _risk_manager.get_risk_status()
 
+    logger.info(
+        f"[{pair}] ✅ STAGE 3 - SENDING TELEGRAM NOTIFICATION: "
+        f"{signal_type} confidence={confidence}%"
+    )
+
+    tg_sent = await send_to_telegram(
+        pair, signal_type, entry, tps, sl,
+        round(confidence, 1), rr, analysis,
+        regime=hybrid_ctx.get("regime", "UNKNOWN"),
+        smc_score=hybrid_ctx.get("smc_score", 0),
+        mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
+        position_count=pos_summary.get("total_open", 0),
+        exposure_pct=pos_summary.get("exposure_pct", 0.0),
+        risk_status=risk_status,
+    )
+
+    if tg_sent:
+        logger.info(f"[{pair}] ✅ STAGE 3 - TELEGRAM NOTIFICATION DELIVERED")
+        await log_signal_event(
+            pair=pair,
+            event_type="sent",
+            signal=signal_type,
+            confidence=round(confidence, 1),
+            reason="Signal delivered to Telegram",
+            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+        )
+    else:
+        logger.error(f"[{pair}] ❌ STAGE 3 - TELEGRAM NOTIFICATION FAILED")
+        await log_signal_event(
+            pair=pair,
+            event_type="rejected",
+            signal=signal_type,
+            confidence=round(confidence, 1),
+            reason="Telegram delivery failed after all retries",
+            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+        )
+        # Signal was generated and validated, but Telegram failed.
+        # Don't attempt position registration if notification failed.
+        return
+
+    # ── STAGE 4: ATTEMPT POSITION REGISTRATION ───────────────────────────────
+
+    # Drawdown recovery size multiplier
     size_multiplier = 1.0
     try:
         dd_assessment = _drawdown_recovery.assess(
@@ -1078,10 +1113,13 @@ async def generate_signal(pair: str) -> None:
     except Exception as exc:
         logger.warning(f"[{pair}] Drawdown recovery check error: {exc}")
 
-    # ── POSITION MANAGEMENT ──────────────────────────────────────────────────
-
-    # 8. Register position with position manager
     position_size = round(1.0 * size_multiplier, 4)  # base 1 unit × recovery multiplier
+
+    logger.info(
+        f"[{pair}] ✅ STAGE 4 - ATTEMPTING POSITION REGISTRATION: "
+        f"{signal_type} {entry} (size={position_size})"
+    )
+
     pos_result = await _position_manager.add_position(
         pair=pair,
         entry=entry,
@@ -1092,88 +1130,82 @@ async def generate_signal(pair: str) -> None:
         signal_type=signal_type,
         analysis=analysis,
     )
-    if not pos_result.get("allowed", True):
-        logger.warning(f"[{pair}] Position rejected: {pos_result.get('reason')}")
-        return
 
-    # ── STORE IN MONGODB ─────────────────────────────────────────────────────
+    # ── STAGE 5: HANDLE POSITION REGISTRATION RESULT ─────────────────────────
 
-    # 9. Store signal in MongoDB
-    db = get_db()
-    if db is not None:
-        try:
-            doc = {
-                "pair":             pair,
-                "type":             signal_type,
-                "entry_price":      entry,
-                "current_price":    ind["price"],
-                "tp_levels":        tps,
-                "sl_price":         sl,
-                "confidence":       round(confidence, 1),
-                "analysis":         analysis,
-                "risk_reward":      rr,
-                "timeframe":        "4H",
-                "status":           "ACTIVE",
-                "indicators":       ind,
-                "regime":           hybrid_ctx.get("regime", "UNKNOWN"),
-                "smc_score":        hybrid_ctx.get("smc_score", 0),
-                "mtf_alignment":    hybrid_ctx.get("mtf_alignment", 0),
-                "pivot_zone":       hybrid_ctx.get("pivot_zone", "UNKNOWN"),
-                "position_id":      pos_result.get("position_id"),
-                "position_size":    position_size,
-                "size_multiplier":  size_multiplier,
-                "system_version":   "3.0.0",
-                "created_at":       datetime.now(timezone.utc),
-            }
-            result = await db.gold_signals.insert_one(doc)
-            logger.info(f"[{pair}] Signal stored — id={result.inserted_id}")
-        except Exception as exc:
-            logger.error(f"[{pair}] MongoDB insert failed: {exc}")
-
-    # ── TELEGRAM ─────────────────────────────────────────────────────────────
-
-    # 10. Gather risk context for alert
-    pos_summary = await _position_manager.get_positions_summary()
-    risk_status = _risk_manager.get_risk_status()
-
-    # 11. Send to Telegram
-    tg_sent = await send_to_telegram(
-        pair, signal_type, entry, tps, sl,
-        round(confidence, 1), rr, analysis,
-        regime=hybrid_ctx.get("regime", "UNKNOWN"),
-        smc_score=hybrid_ctx.get("smc_score", 0),
-        mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
-        position_count=pos_summary.get("total_open", 0),
-        exposure_pct=pos_summary.get("exposure_pct", 0.0),
-        risk_status=risk_status,
-    )
-    if tg_sent:
-        logger.info(f"[{pair}] ✅ Telegram notification delivered")
+    if pos_result.get("allowed", True):
+        logger.info(
+            f"[{pair}] ✅ STAGE 5 - POSITION REGISTERED: "
+            f"position_id={pos_result.get('position_id')}"
+        )
         await log_signal_event(
             pair=pair,
-            event_type="sent",
+            event_type="position_registered",
             signal=signal_type,
             confidence=round(confidence, 1),
-            reason="Signal delivered to Telegram",
-            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+            reason="Position registered successfully",
+            metadata={
+                "position_id": pos_result.get("position_id"),
+                "entry": entry,
+                "size": position_size,
+            },
         )
+
+        # Store signal in MongoDB only when position is successfully registered
+        db = get_db()
+        if db is not None:
+            try:
+                doc = {
+                    "pair":             pair,
+                    "type":             signal_type,
+                    "entry_price":      entry,
+                    "current_price":    ind["price"],
+                    "tp_levels":        tps,
+                    "sl_price":         sl,
+                    "confidence":       round(confidence, 1),
+                    "analysis":         analysis,
+                    "risk_reward":      rr,
+                    "timeframe":        "4H",
+                    "status":           "ACTIVE",
+                    "indicators":       ind,
+                    "regime":           hybrid_ctx.get("regime", "UNKNOWN"),
+                    "smc_score":        hybrid_ctx.get("smc_score", 0),
+                    "mtf_alignment":    hybrid_ctx.get("mtf_alignment", 0),
+                    "pivot_zone":       hybrid_ctx.get("pivot_zone", "UNKNOWN"),
+                    "position_id":      pos_result.get("position_id"),
+                    "position_size":    position_size,
+                    "size_multiplier":  size_multiplier,
+                    "system_version":   "3.0.0",
+                    "created_at":       datetime.now(timezone.utc),
+                }
+                result = await db.gold_signals.insert_one(doc)
+                logger.info(f"[{pair}] Signal stored — id={result.inserted_id}")
+            except Exception as exc:
+                logger.error(f"[{pair}] MongoDB insert failed: {exc}")
+
     else:
-        logger.error(f"[{pair}] ❌ Telegram notification failed — signal generated but NOT sent")
+        # Position was blocked, but signal was already sent to Telegram!
+        block_reason = pos_result.get("reason", "Unknown reason")
+        logger.warning(
+            f"[{pair}] ⚠️ STAGE 5 - POSITION BLOCKED: {block_reason} "
+            f"(but signal was already sent to Telegram)"
+        )
         await log_signal_event(
             pair=pair,
-            event_type="rejected",
+            event_type="position_blocked",
             signal=signal_type,
             confidence=round(confidence, 1),
-            reason="Telegram delivery failed after all retries",
-            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+            reason=f"Position registration blocked: {block_reason}",
+            metadata={"entry": entry, "size": position_size},
         )
+        # Signal was sent, position was blocked — this is OK!
+        # User knows about the signal, just can't trade it right now.
+        return
 
     _signal_metrics.successful_signals += 1
     logger.info(
-        f"[{pair}] ✅ {signal_type} @ {entry} | "
-        f"TP: {tps} | SL: {sl} | R:R 1:{rr} | Conf: {confidence}% | "
-        f"Positions: {pos_summary.get('total_open', 0)}/5 | "
-        f"Risk: {risk_status.get('risk_level', 'GREEN')}"
+        f"[{pair}] ✅ SIGNAL COMPLETE: {signal_type} "
+        f"(generated → validated → sent → registered)"
     )
 
 
