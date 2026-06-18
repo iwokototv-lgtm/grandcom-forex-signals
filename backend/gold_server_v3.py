@@ -71,6 +71,29 @@ ACCOUNT_BALANCE = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
 # Smart 4H candle detection — skip signal if same candle as last processed
 CANDLE_TRACKING_ENABLED = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lower() == "true"
 
+# ── EXTENDED CONFIGURATION (from environment) ─────────────────────────────
+
+# Position / exposure limits
+MAX_ACCOUNT_EXPOSURE_PCT = float(os.environ.get("MAX_ACCOUNT_EXPOSURE_PCT", "0.10"))
+MAX_POSITIONS_PER_PAIR = int(os.environ.get("MAX_POSITIONS_PER_PAIR", "5"))
+
+# MongoDB retry configuration
+MONGODB_RETRY_MAX_ATTEMPTS = int(os.environ.get("MONGODB_RETRY_MAX_ATTEMPTS", "3"))
+MONGODB_RETRY_BACKOFF_FACTOR = float(os.environ.get("MONGODB_RETRY_BACKOFF_FACTOR", "2.0"))
+
+# Telegram retry configuration
+TELEGRAM_RETRY_MAX_ATTEMPTS = int(os.environ.get("TELEGRAM_RETRY_MAX_ATTEMPTS", "3"))
+TELEGRAM_RETRY_BACKOFF_FACTOR = float(os.environ.get("TELEGRAM_RETRY_BACKOFF_FACTOR", "2.0"))
+
+# API retry configuration
+API_RETRY_MAX_ATTEMPTS = int(os.environ.get("API_RETRY_MAX_ATTEMPTS", "3"))
+API_RETRY_BACKOFF_FACTOR = float(os.environ.get("API_RETRY_BACKOFF_FACTOR", "2.0"))
+
+# Timeout configuration (seconds)
+MONGODB_TIMEOUT_SECONDS = int(os.environ.get("MONGODB_TIMEOUT_SECONDS", "10"))
+TELEGRAM_TIMEOUT_SECONDS = int(os.environ.get("TELEGRAM_TIMEOUT_SECONDS", "10"))
+API_TIMEOUT_SECONDS = int(os.environ.get("API_TIMEOUT_SECONDS", "30"))
+
 # ---------------------------------------------------------------------------
 # Trading Pairs
 # ---------------------------------------------------------------------------
@@ -299,6 +322,102 @@ async def fetch_ohlcv_with_retry(
 
     logger.error(f"[{pair}] All {max_retries} fetch attempts failed: {last_error}")
     return None
+
+
+# ---------------------------------------------------------------------------
+# MongoDB Retry Wrapper
+# ---------------------------------------------------------------------------
+async def mongodb_with_retry(operation_name: str, operation_func, *args, **kwargs):
+    """
+    Execute a MongoDB operation with exponential backoff retry.
+
+    If all retries fail, logs the error but does NOT raise — the pipeline
+    continues so that a database hiccup never silences Telegram or blocks
+    position registration.
+    """
+    last_error = None
+
+    for attempt in range(MONGODB_RETRY_MAX_ATTEMPTS):
+        try:
+            logger.debug(
+                f"[MongoDB] {operation_name} "
+                f"(attempt {attempt + 1}/{MONGODB_RETRY_MAX_ATTEMPTS})"
+            )
+            result = await operation_func(*args, **kwargs)
+            if attempt > 0:
+                logger.info(
+                    f"[MongoDB] {operation_name} succeeded after {attempt} "
+                    f"{'retry' if attempt == 1 else 'retries'}"
+                )
+            return result
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                f"[MongoDB] {operation_name} failed "
+                f"(attempt {attempt + 1}/{MONGODB_RETRY_MAX_ATTEMPTS}): {exc}"
+            )
+
+            if attempt < MONGODB_RETRY_MAX_ATTEMPTS - 1:
+                wait_time = MONGODB_RETRY_BACKOFF_FACTOR ** attempt
+                logger.info(f"[MongoDB] Retrying in {wait_time:.1f}s...")
+                await asyncio.sleep(wait_time)
+
+    logger.error(
+        f"[MongoDB] {operation_name} failed after {MONGODB_RETRY_MAX_ATTEMPTS} "
+        f"attempts: {last_error}"
+    )
+    return None  # Return None instead of raising so the pipeline continues
+
+
+# ---------------------------------------------------------------------------
+# API Retry Wrapper
+# ---------------------------------------------------------------------------
+async def api_with_retry(operation_name: str, operation_func, *args, **kwargs):
+    """
+    Execute an API call with exponential backoff retry.
+
+    If all retries fail, logs the error but does NOT raise — the pipeline
+    continues so that a transient API failure never silences Telegram or
+    blocks position registration.
+    """
+    last_error = None
+
+    for attempt in range(API_RETRY_MAX_ATTEMPTS):
+        try:
+            logger.debug(
+                f"[API] {operation_name} "
+                f"(attempt {attempt + 1}/{API_RETRY_MAX_ATTEMPTS})"
+            )
+            result = await operation_func(*args, **kwargs)
+            if attempt > 0:
+                logger.info(
+                    f"[API] {operation_name} succeeded after {attempt} "
+                    f"{'retry' if attempt == 1 else 'retries'}"
+                )
+            return result
+        except asyncio.TimeoutError:
+            last_error = "Timeout"
+            logger.warning(
+                f"[API] {operation_name} timeout "
+                f"(attempt {attempt + 1}/{API_RETRY_MAX_ATTEMPTS})"
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning(
+                f"[API] {operation_name} failed "
+                f"(attempt {attempt + 1}/{API_RETRY_MAX_ATTEMPTS}): {exc}"
+            )
+
+        if attempt < API_RETRY_MAX_ATTEMPTS - 1:
+            wait_time = API_RETRY_BACKOFF_FACTOR ** attempt
+            logger.info(f"[API] Retrying in {wait_time:.1f}s...")
+            await asyncio.sleep(wait_time)
+
+    logger.error(
+        f"[API] {operation_name} failed after {API_RETRY_MAX_ATTEMPTS} "
+        f"attempts: {last_error}"
+    )
+    return None  # Return None instead of raising so the pipeline continues
 
 
 # ---------------------------------------------------------------------------
@@ -668,11 +787,11 @@ async def log_signal_event(
     reason: str = "",
     metadata: dict = None,
 ) -> None:
-    """Log signal event to MongoDB for audit trail."""
+    """Log signal event to MongoDB for audit trail (with retry)."""
     if _db is None:
         return
 
-    try:
+    async def insert_event():
         event = {
             "timestamp": datetime.now(timezone.utc),
             "pair": pair,
@@ -682,10 +801,13 @@ async def log_signal_event(
             "reason": reason,
             "metadata": metadata or {},
         }
-        await _db.signal_events.insert_one(event)
+        return await _db.signal_events.insert_one(event)
+
+    result = await mongodb_with_retry(f"log_signal_event[{event_type}]", insert_event)
+    if result:
         logger.debug(f"[{pair}] Signal event logged: {event_type}")
-    except Exception as exc:
-        logger.warning(f"[{pair}] Failed to log signal event: {exc}")
+    else:
+        logger.warning(f"[{pair}] Failed to log signal event: {event_type}")
 
 
 # ---------------------------------------------------------------------------
@@ -786,12 +908,17 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
 # ---------------------------------------------------------------------------
 async def generate_signal(pair: str) -> None:
     """
-    Signal generation pipeline:
-    1. Generate signal from hybrid system
-    2. Validate signal (5 checks)
-    3. Send Telegram notification  ← BEFORE position check
-    4. Attempt position registration
-    5. If blocked, don't execute trade (but signal was already sent)
+    Signal generation pipeline with full error isolation.
+
+    Each subsystem (DB, Telegram, position) fails independently — one
+    failure never cascades to silence another stage.
+
+    Stages:
+    1. GENERATE  — hybrid system produces signal
+    2. VALIDATE  — geometry + confidence + 5-check validator
+    3. SAVE      — persist to MongoDB (non-blocking, with retry)
+    4. TELEGRAM  — notify channel (non-blocking, with retry)
+    5. POSITION  — register position (non-blocking, with retry)
     """
     cfg = PAIRS[pair]
     cycle_time = datetime.now(timezone.utc)
@@ -920,241 +1047,154 @@ async def generate_signal(pair: str) -> None:
     # Use hybrid signal directly — GPT override removed.
     # The hybrid system is backtest-proven (45.1% win rate, 2.17 profit factor)
     # and GPT was weakening signals (75% → 40%) instead of confirming them.
-    signal_type = str(hybrid_ctx.get("hybrid_signal", "NEUTRAL")).upper()
-    confidence  = float(hybrid_ctx.get("hybrid_confidence", 0.0))
-    entry       = float(hybrid_ctx.get("entry", 0) or ind["price"])
-    if entry <= 0:
-        entry = ind["price"]
+    try:
+        signal_type = str(hybrid_ctx.get("hybrid_signal", "NEUTRAL")).upper()
+        confidence  = float(hybrid_ctx.get("hybrid_confidence", 0.0))
+        entry       = float(hybrid_ctx.get("entry", 0) or ind["price"])
+        if entry <= 0:
+            entry = ind["price"]
 
-    # Analysis from hybrid system
-    analysis = hybrid_ctx.get("analysis", "")
-    if not analysis:
-        analysis = f"Hybrid signal: {signal_type} (confidence={confidence}%)"
+        # Analysis from hybrid system
+        analysis = hybrid_ctx.get("analysis", "")
+        if not analysis:
+            analysis = f"Hybrid signal: {signal_type} (confidence={confidence}%)"
 
-    logger.info(
-        f"[{pair}] ✅ STAGE 1 - SIGNAL GENERATED: {signal_type} "
-        f"(confidence={confidence}%, entry={entry})"
-    )
-    await log_signal_event(
-        pair=pair,
-        event_type="generated",
-        signal=signal_type,
-        confidence=confidence,
-        reason="Hybrid signal generated",
-        metadata={"hybrid_signal": signal_type, "hybrid_confidence": confidence},
-    )
+        logger.info(
+            f"[{pair}] ✅ STAGE 1 - SIGNAL GENERATED: {signal_type} "
+            f"(confidence={confidence}%, entry={entry})"
+        )
+        await log_signal_event(
+            pair=pair,
+            event_type="generated",
+            signal=signal_type,
+            confidence=confidence,
+            reason="Hybrid signal generated",
+            metadata={"hybrid_signal": signal_type, "hybrid_confidence": confidence},
+        )
+    except Exception as exc:
+        logger.error(f"[{pair}] ❌ STAGE 1 - SIGNAL GENERATION FAILED: {exc}")
+        _signal_metrics.failed_cycles += 1
+        return
 
     # ── STAGE 2: VALIDATE SIGNAL ─────────────────────────────────────────────
 
-    # Pre-validation: NEUTRAL or unknown signal type
-    if signal_type == "NEUTRAL" or signal_type not in ("BUY", "SELL"):
-        reason = f"Hybrid returned {signal_type} — no actionable trade direction"
-        logger.info(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
+    try:
+        # Pre-validation: NEUTRAL or unknown signal type
+        if signal_type == "NEUTRAL" or signal_type not in ("BUY", "SELL"):
+            reason = f"Hybrid returned {signal_type} — no actionable trade direction"
+            logger.info(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=confidence,
+                reason=reason,
+            )
+            return
+
+        # Pre-validation: confidence below minimum
+        if confidence < MIN_CONFIDENCE:
+            reason = f"Confidence {confidence}% below {MIN_CONFIDENCE}% minimum threshold"
+            logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=confidence,
+                reason=reason,
+            )
+            return
+
+        # Calculate levels
+        logger.info(f"[{pair}] Entry price: {entry} (from hybrid system)")
+        tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
+
+        # Geometry validation
+        if signal_type == "BUY" and (tps[0] <= entry or sl >= entry):
+            reason = f"BUY geometry invalid (TP1={tps[0]} <= entry={entry} or SL={sl} >= entry)"
+            logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=confidence,
+                reason=reason,
+            )
+            return
+
+        if signal_type == "SELL" and (tps[0] >= entry or sl <= entry):
+            reason = f"SELL geometry invalid (TP1={tps[0]} >= entry={entry} or SL={sl} <= entry)"
+            logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=confidence,
+                reason=reason,
+            )
+            return
+
+        # Full signal validation pipeline
+        signal_data_for_validation = {
+            "pair": pair,
+            "signal": signal_type,
+            "confidence": confidence,
+            "entry": entry,
+            "tp_levels": tps,
+            "sl": sl,
+            "analysis": analysis,
+        }
+        validation_result = await _signal_validator.validate(signal_data_for_validation)
+
+        if not validation_result["valid"]:
+            logger.warning(
+                f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {validation_result['reason']} "
+                f"(checks_failed={validation_result['checks_failed']})"
+            )
+            await log_signal_event(
+                pair=pair,
+                event_type="rejected",
+                signal=signal_type,
+                confidence=confidence,
+                reason=validation_result["reason"],
+                metadata={
+                    "checks_failed": validation_result["checks_failed"],
+                    "checks_passed": validation_result["checks_passed"],
+                },
+            )
+            await send_signal_rejection_alert(pair, validation_result)
+            return
+
+        logger.info(
+            f"[{pair}] ✅ STAGE 2 - VALIDATION PASSED: {signal_type} signal "
+            f"(confidence={confidence}%, entry={entry}, checks={len(validation_result['checks_passed'])})"
+        )
         await log_signal_event(
             pair=pair,
-            event_type="rejected",
-            signal=signal_type,
-            confidence=confidence,
-            reason=reason,
-        )
-        return
-
-    # Pre-validation: confidence below minimum
-    if confidence < MIN_CONFIDENCE:
-        reason = f"Confidence {confidence}% below {MIN_CONFIDENCE}% minimum threshold"
-        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
-        await log_signal_event(
-            pair=pair,
-            event_type="rejected",
-            signal=signal_type,
-            confidence=confidence,
-            reason=reason,
-        )
-        return
-
-    # Calculate levels
-    logger.info(f"[{pair}] Entry price: {entry} (from hybrid system)")
-    tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
-
-    # Geometry validation
-    if signal_type == "BUY" and (tps[0] <= entry or sl >= entry):
-        reason = f"BUY geometry invalid (TP1={tps[0]} <= entry={entry} or SL={sl} >= entry)"
-        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
-        await log_signal_event(
-            pair=pair,
-            event_type="rejected",
-            signal=signal_type,
-            confidence=confidence,
-            reason=reason,
-        )
-        return
-
-    if signal_type == "SELL" and (tps[0] >= entry or sl <= entry):
-        reason = f"SELL geometry invalid (TP1={tps[0]} >= entry={entry} or SL={sl} <= entry)"
-        logger.warning(f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {reason}")
-        await log_signal_event(
-            pair=pair,
-            event_type="rejected",
-            signal=signal_type,
-            confidence=confidence,
-            reason=reason,
-        )
-        return
-
-    # Full signal validation pipeline
-    signal_data_for_validation = {
-        "pair": pair,
-        "signal": signal_type,
-        "confidence": confidence,
-        "entry": entry,
-        "tp_levels": tps,
-        "sl": sl,
-        "analysis": analysis,
-    }
-    validation_result = await _signal_validator.validate(signal_data_for_validation)
-
-    if not validation_result["valid"]:
-        logger.warning(
-            f"[{pair}] ❌ STAGE 2 - VALIDATION FAILED: {validation_result['reason']} "
-            f"(checks_failed={validation_result['checks_failed']})"
-        )
-        await log_signal_event(
-            pair=pair,
-            event_type="rejected",
+            event_type="validated",
             signal=signal_type,
             confidence=confidence,
             reason=validation_result["reason"],
-            metadata={
-                "checks_failed": validation_result["checks_failed"],
-                "checks_passed": validation_result["checks_passed"],
-            },
+            metadata={"checks_passed": validation_result["checks_passed"]},
         )
-        await send_signal_rejection_alert(pair, validation_result)
+    except Exception as exc:
+        logger.error(f"[{pair}] ❌ STAGE 2 - VALIDATION ERROR: {exc}")
+        _signal_metrics.failed_cycles += 1
         return
 
-    logger.info(
-        f"[{pair}] ✅ STAGE 2 - VALIDATION PASSED: {signal_type} signal "
-        f"(confidence={confidence}%, entry={entry}, checks={len(validation_result['checks_passed'])})"
-    )
-    await log_signal_event(
-        pair=pair,
-        event_type="validated",
-        signal=signal_type,
-        confidence=confidence,
-        reason=validation_result["reason"],
-        metadata={"checks_passed": validation_result["checks_passed"]},
-    )
-
-    # ── STAGE 3: SEND TELEGRAM NOTIFICATION ──────────────────────────────────
-
-    # Calculate risk/reward
+    # Calculate risk/reward (needed by both Stage 3 and Stage 5)
     risk   = abs(entry - sl)
     reward = abs(tps[0] - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0.0
 
-    # Gather risk/position context for the notification
-    pos_summary = await _position_manager.get_positions_summary()
-    risk_status = _risk_manager.get_risk_status()
+    # ── STAGE 3: SAVE TO DATABASE ────────────────────────────────────────────
 
-    logger.info(
-        f"[{pair}] ✅ STAGE 3 - SENDING TELEGRAM NOTIFICATION: "
-        f"{signal_type} confidence={confidence}%"
-    )
-
-    tg_sent = await send_to_telegram(
-        pair, signal_type, entry, tps, sl,
-        round(confidence, 1), rr, analysis,
-        regime=hybrid_ctx.get("regime", "UNKNOWN"),
-        smc_score=hybrid_ctx.get("smc_score", 0),
-        mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
-        position_count=pos_summary.get("total_open", 0),
-        exposure_pct=pos_summary.get("exposure_pct", 0.0),
-        risk_status=risk_status,
-    )
-
-    if tg_sent:
-        logger.info(f"[{pair}] ✅ STAGE 3 - TELEGRAM NOTIFICATION DELIVERED")
-        await log_signal_event(
-            pair=pair,
-            event_type="sent",
-            signal=signal_type,
-            confidence=round(confidence, 1),
-            reason="Signal delivered to Telegram",
-            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
-        )
-    else:
-        logger.error(f"[{pair}] ❌ STAGE 3 - TELEGRAM NOTIFICATION FAILED")
-        await log_signal_event(
-            pair=pair,
-            event_type="rejected",
-            signal=signal_type,
-            confidence=round(confidence, 1),
-            reason="Telegram delivery failed after all retries",
-            metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
-        )
-        # Signal was generated and validated, but Telegram failed.
-        # Don't attempt position registration if notification failed.
-        return
-
-    # ── STAGE 4: ATTEMPT POSITION REGISTRATION ───────────────────────────────
-
-    # Drawdown recovery size multiplier
-    size_multiplier = 1.0
+    signal_saved = False
+    signal_id = None
     try:
-        dd_assessment = _drawdown_recovery.assess(
-            current_balance=_risk_manager.current_equity
-        )
-        if dd_assessment.get("trading_halted"):
-            halt_reason = dd_assessment.get("halt_reason", "DRAWDOWN_HALT")
-            logger.warning(f"[{pair}] DrawdownRecovery halt: {halt_reason}")
-            await close_all_positions(reason=halt_reason)
-            return
-        size_multiplier = dd_assessment.get("size_multiplier", 1.0)
-    except Exception as exc:
-        logger.warning(f"[{pair}] Drawdown recovery check error: {exc}")
-
-    position_size = round(1.0 * size_multiplier, 4)  # base 1 unit × recovery multiplier
-
-    logger.info(
-        f"[{pair}] ✅ STAGE 4 - ATTEMPTING POSITION REGISTRATION: "
-        f"{signal_type} {entry} (size={position_size})"
-    )
-
-    pos_result = await _position_manager.add_position(
-        pair=pair,
-        entry=entry,
-        tp_levels=tps,
-        sl=sl,
-        size=position_size,
-        confidence=confidence,
-        signal_type=signal_type,
-        analysis=analysis,
-    )
-
-    # ── STAGE 5: HANDLE POSITION REGISTRATION RESULT ─────────────────────────
-
-    if pos_result.get("allowed", True):
-        logger.info(
-            f"[{pair}] ✅ STAGE 5 - POSITION REGISTERED: "
-            f"position_id={pos_result.get('position_id')}"
-        )
-        await log_signal_event(
-            pair=pair,
-            event_type="position_registered",
-            signal=signal_type,
-            confidence=round(confidence, 1),
-            reason="Position registered successfully",
-            metadata={
-                "position_id": pos_result.get("position_id"),
-                "entry": entry,
-                "size": position_size,
-            },
-        )
-
-        # Store signal in MongoDB only when position is successfully registered
         db = get_db()
         if db is not None:
-            try:
+            async def _save_signal():
                 doc = {
                     "pair":             pair,
                     "type":             signal_type,
@@ -1172,40 +1212,188 @@ async def generate_signal(pair: str) -> None:
                     "smc_score":        hybrid_ctx.get("smc_score", 0),
                     "mtf_alignment":    hybrid_ctx.get("mtf_alignment", 0),
                     "pivot_zone":       hybrid_ctx.get("pivot_zone", "UNKNOWN"),
-                    "position_id":      pos_result.get("position_id"),
-                    "position_size":    position_size,
-                    "size_multiplier":  size_multiplier,
+                    "position_size":    1.0,
                     "system_version":   "3.0.0",
                     "created_at":       datetime.now(timezone.utc),
                 }
                 result = await db.gold_signals.insert_one(doc)
-                logger.info(f"[{pair}] Signal stored — id={result.inserted_id}")
-            except Exception as exc:
-                logger.error(f"[{pair}] MongoDB insert failed: {exc}")
+                return result.inserted_id
 
-    else:
-        # Position was blocked, but signal was already sent to Telegram!
-        block_reason = pos_result.get("reason", "Unknown reason")
-        logger.warning(
-            f"[{pair}] ⚠️ STAGE 5 - POSITION BLOCKED: {block_reason} "
-            f"(but signal was already sent to Telegram)"
+            signal_id = await mongodb_with_retry("save_signal", _save_signal)
+            if signal_id:
+                signal_saved = True
+                logger.info(f"[{pair}] ✅ STAGE 3 - SIGNAL SAVED: id={signal_id}")
+            else:
+                logger.warning(f"[{pair}] ⚠️ STAGE 3 - SIGNAL SAVE FAILED (continuing pipeline)")
+        else:
+            logger.warning(f"[{pair}] ⚠️ STAGE 3 - SIGNAL SAVE SKIPPED (MongoDB not connected)")
+    except Exception as exc:
+        logger.error(f"[{pair}] ❌ STAGE 3 - SIGNAL SAVE ERROR: {exc}")
+        # Continue — database failure must not silence Telegram
+
+    # ── STAGE 4: SEND TELEGRAM NOTIFICATION ──────────────────────────────────
+
+    telegram_sent = False
+    try:
+        # Gather risk/position context for the notification
+        pos_summary = await _position_manager.get_positions_summary()
+        risk_status = _risk_manager.get_risk_status()
+
+        logger.info(
+            f"[{pair}] ✅ STAGE 4 - TELEGRAM SEND START: "
+            f"{signal_type} confidence={confidence}%"
         )
-        await log_signal_event(
+
+        tg_sent = await send_to_telegram(
+            pair, signal_type, entry, tps, sl,
+            round(confidence, 1), rr, analysis,
+            regime=hybrid_ctx.get("regime", "UNKNOWN"),
+            smc_score=hybrid_ctx.get("smc_score", 0),
+            mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
+            position_count=pos_summary.get("total_open", 0),
+            exposure_pct=pos_summary.get("exposure_pct", 0.0),
+            risk_status=risk_status,
+        )
+
+        if tg_sent:
+            telegram_sent = True
+            logger.info(f"[{pair}] ✅ STAGE 4 - TELEGRAM SUCCESS")
+            await log_signal_event(
+                pair=pair,
+                event_type="sent",
+                signal=signal_type,
+                confidence=round(confidence, 1),
+                reason="Signal delivered to Telegram",
+                metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+            )
+        else:
+            logger.error(f"[{pair}] ❌ STAGE 4 - TELEGRAM NOTIFICATION FAILED")
+            await log_signal_event(
+                pair=pair,
+                event_type="telegram_failed",
+                signal=signal_type,
+                confidence=round(confidence, 1),
+                reason="Telegram delivery failed after all retries",
+                metadata={"entry": entry, "tps": tps, "sl": sl, "rr": rr},
+            )
+            # Telegram failed — continue to position registration anyway
+    except Exception as exc:
+        logger.error(f"[{pair}] ❌ STAGE 4 - TELEGRAM ERROR: {exc}")
+        # Continue — Telegram failure must not block position registration
+
+    # ── STAGE 5: ATTEMPT POSITION REGISTRATION ───────────────────────────────
+
+    position_registered = False
+    size_multiplier = 1.0
+    position_size = 1.0
+
+    try:
+        # Drawdown recovery size multiplier
+        try:
+            dd_assessment = _drawdown_recovery.assess(
+                current_balance=_risk_manager.current_equity
+            )
+            if dd_assessment.get("trading_halted"):
+                halt_reason = dd_assessment.get("halt_reason", "DRAWDOWN_HALT")
+                logger.warning(f"[{pair}] DrawdownRecovery halt: {halt_reason}")
+                await close_all_positions(reason=halt_reason)
+                logger.info(
+                    f"[{pair}] ✅ SIGNAL PIPELINE COMPLETE: "
+                    f"saved={signal_saved}, telegram={telegram_sent}, position=HALTED"
+                )
+                return
+            size_multiplier = dd_assessment.get("size_multiplier", 1.0)
+        except Exception as exc:
+            logger.warning(f"[{pair}] Drawdown recovery check error: {exc}")
+
+        position_size = round(1.0 * size_multiplier, 4)  # base 1 unit × recovery multiplier
+
+        logger.info(
+            f"[{pair}] ✅ STAGE 5 - POSITION REGISTERED: "
+            f"attempting {signal_type} {entry} (size={position_size})"
+        )
+
+        pos_result = await _position_manager.add_position(
             pair=pair,
-            event_type="position_blocked",
-            signal=signal_type,
-            confidence=round(confidence, 1),
-            reason=f"Position registration blocked: {block_reason}",
-            metadata={"entry": entry, "size": position_size},
+            entry=entry,
+            tp_levels=tps,
+            sl=sl,
+            size=position_size,
+            confidence=confidence,
+            signal_type=signal_type,
+            analysis=analysis,
         )
-        # Signal was sent, position was blocked — this is OK!
-        # User knows about the signal, just can't trade it right now.
-        return
 
-    _signal_metrics.successful_signals += 1
+        if pos_result.get("allowed", True):
+            position_registered = True
+            logger.info(
+                f"[{pair}] ✅ STAGE 5 - POSITION REGISTERED: "
+                f"id={pos_result.get('position_id')}"
+            )
+            logger.info(
+                f"[{pair}] ✅ STAGE 5 - TRADE EXECUTED: "
+                f"{signal_type} entry={entry} sl={sl} tp1={tps[0]} "
+                f"size={position_size} rr=1:{rr}"
+            )
+            await log_signal_event(
+                pair=pair,
+                event_type="position_registered",
+                signal=signal_type,
+                confidence=round(confidence, 1),
+                reason="Position registered successfully",
+                metadata={
+                    "position_id": pos_result.get("position_id"),
+                    "entry": entry,
+                    "size": position_size,
+                },
+            )
+
+            # Update saved signal document with position_id and size_multiplier
+            if signal_saved and signal_id is not None:
+                try:
+                    db = get_db()
+                    if db is not None:
+                        async def _update_signal():
+                            return await db.gold_signals.update_one(
+                                {"_id": signal_id},
+                                {"$set": {
+                                    "position_id": pos_result.get("position_id"),
+                                    "position_size": position_size,
+                                    "size_multiplier": size_multiplier,
+                                }},
+                            )
+                        await mongodb_with_retry("update_signal_position_id", _update_signal)
+                except Exception as exc:
+                    logger.warning(f"[{pair}] Failed to update signal with position_id: {exc}")
+
+        else:
+            block_reason = pos_result.get("reason", "Unknown reason")
+            logger.warning(
+                f"[{pair}] ⚠️ STAGE 5 - POSITION BLOCKED: {block_reason} "
+                f"(signal already sent to Telegram)"
+            )
+            await log_signal_event(
+                pair=pair,
+                event_type="position_blocked",
+                signal=signal_type,
+                confidence=round(confidence, 1),
+                reason=f"Position registration blocked: {block_reason}",
+                metadata={"entry": entry, "size": position_size},
+            )
+
+    except Exception as exc:
+        logger.error(f"[{pair}] ❌ STAGE 5 - POSITION REGISTRATION ERROR: {exc}")
+        # Position registration failed, but signal was already sent
+
+    # ── FINAL STATUS ──────────────────────────────────────────────────────────
+
+    if position_registered:
+        _signal_metrics.successful_signals += 1
+
     logger.info(
-        f"[{pair}] ✅ SIGNAL COMPLETE: {signal_type} "
-        f"(generated → validated → sent → registered)"
+        f"[{pair}] ✅ SIGNAL PIPELINE COMPLETE: "
+        f"generated=True, saved={signal_saved}, "
+        f"telegram={telegram_sent}, position={position_registered}"
     )
 
 
