@@ -902,44 +902,58 @@ async def generate_signal(pair: str) -> None:
                 "mtf_alignment": hybrid_result.get("mtf_alignment", 0),
                 "pivot_zone": hybrid_result.get("pivot_zone", "UNKNOWN"),
                 "hybrid_signal": hybrid_result.get("signal", "NEUTRAL"),
-                "hybrid_confidence": hybrid_result.get("confidence", 0),
+                # Prefer confidence_pct (0–100 scale); fall back to confidence * 100
+                "hybrid_confidence": (
+                    hybrid_result.get("confidence_pct")
+                    or round(float(hybrid_result.get("confidence", 0)) * 100, 1)
+                ),
+                "entry": hybrid_result.get("entry_price", 0),
+                "analysis": hybrid_result.get("analysis", ""),
             }
             logger.info(
                 f"[{pair}] Hybrid: signal={hybrid_ctx['hybrid_signal']} "
+                f"confidence={hybrid_ctx['hybrid_confidence']:.1f}% "
                 f"regime={hybrid_ctx['regime']} smc={hybrid_ctx['smc_score']}/10 "
                 f"mtf={hybrid_ctx['mtf_alignment']:.0f}%"
             )
         except Exception as exc:
             logger.error(f"[{pair}] Hybrid system error: {exc}")
 
-    # ── GPT SIGNAL ───────────────────────────────────────────────────────────
+    # ── HYBRID SIGNAL (direct — no GPT override) ─────────────────────────────
 
-    # 4. GPT analysis
-    gpt = await gpt_signal(pair, ind, cfg, hybrid_ctx)
-    if gpt is None:
-        return
+    # 4. Use hybrid signal directly — GPT override removed.
+    # The hybrid system is backtest-proven (45.1% win rate, 2.17 profit factor)
+    # and GPT was weakening signals (75% → 40%) instead of confirming them.
+    signal_type = str(hybrid_ctx.get("hybrid_signal", "NEUTRAL")).upper()
+    confidence  = float(hybrid_ctx.get("hybrid_confidence", 0.0))
 
-    signal_type = str(gpt.get("signal", "NEUTRAL")).upper()
-    confidence  = float(gpt.get("confidence", 0))
-    analysis    = str(gpt.get("analysis", ""))
+    # Analysis from hybrid system
+    analysis = hybrid_ctx.get("analysis", "")
+    if not analysis:
+        analysis = f"Hybrid signal: {signal_type} (confidence={confidence}%)"
+
+    logger.info(
+        f"[{pair}] ✅ Using hybrid signal directly (no GPT override): "
+        f"{signal_type} confidence={confidence}%"
+    )
 
     # 5. Log generated signal and store event
     logger.info(
         f"[{pair}] ✅ SIGNAL GENERATED: {signal_type} "
-        f"(confidence={confidence}%, source=GPT)"
+        f"(confidence={confidence}%, source=Hybrid)"
     )
     await log_signal_event(
         pair=pair,
         event_type="generated",
         signal=signal_type,
         confidence=confidence,
-        reason="GPT signal generated",
-        metadata={"hybrid_signal": hybrid_ctx.get("hybrid_signal", "NEUTRAL")},
+        reason="Hybrid signal generated",
+        metadata={"hybrid_signal": signal_type, "hybrid_confidence": confidence},
     )
 
     # 5a. Pre-validation filter: NEUTRAL or unknown signal type
     if signal_type == "NEUTRAL" or signal_type not in ("BUY", "SELL"):
-        reason = f"GPT returned {signal_type} — no actionable trade direction"
+        reason = f"Hybrid returned {signal_type} — no actionable trade direction"
         logger.info(f"[{pair}] ❌ SIGNAL REJECTED: {reason}")
         await log_signal_event(
             pair=pair,
@@ -965,10 +979,12 @@ async def generate_signal(pair: str) -> None:
 
     # ── LEVELS & GEOMETRY ────────────────────────────────────────────────────
 
-    # 6. Levels
-    entry = float(gpt.get("entry_price") or ind["price"])
+    # 6. Levels — entry price from hybrid context or current market price
+    entry = float(hybrid_ctx.get("entry", 0) or ind["price"])
     if entry <= 0:
         entry = ind["price"]
+
+    logger.info(f"[{pair}] Entry price: {entry} (from hybrid system)")
 
     tps, sl = build_levels(signal_type, entry, ind["atr"], cfg)
 
