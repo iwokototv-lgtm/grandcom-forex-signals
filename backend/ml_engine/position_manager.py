@@ -3,9 +3,11 @@ Position Manager
 Tracks all open positions in MongoDB with hard cap enforcement.
 
 Hard limits:
-- MAX 5 concurrent positions per pair
-- Total account exposure cap at 10%
+- Total account exposure cap at 10% (MAX_ACCOUNT_EXPOSURE_PCT)
 - Full audit trail in open_positions / closed_positions collections
+
+Note: Per-pair position count limit (MAX_POSITIONS_PER_PAIR) has been removed.
+Only the exposure cap controls whether a new position is allowed.
 """
 
 import logging
@@ -14,8 +16,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_POSITIONS_PER_PAIR: int = 5
-MAX_ACCOUNT_EXPOSURE_PCT: float = 0.10  # 10 % of account balance
+MAX_ACCOUNT_EXPOSURE_PCT: float = 0.10  # 10 % of account balance (overridden by env var)
 
 
 class PositionManager:
@@ -90,16 +91,6 @@ class PositionManager:
         Returns a dict with ``allowed`` bool and ``reason`` string.
         On success also returns ``position_id``.
         """
-        # --- guard: position count ---
-        count = await self.get_position_count(pair)
-        if count >= MAX_POSITIONS_PER_PAIR:
-            msg = (
-                f"[{pair}] Position limit reached ({count}/{MAX_POSITIONS_PER_PAIR}) — "
-                "new trade BLOCKED"
-            )
-            logger.warning(msg)
-            return {"allowed": False, "reason": msg}
-
         # --- guard: exposure ---
         exposure_pct = await self.get_total_exposure_pct()
         new_exposure = (size * entry) / self.account_balance if self.account_balance > 0 else 0
@@ -297,7 +288,6 @@ class PositionManager:
 
         return {
             "total_open": total_count,
-            "max_per_pair": MAX_POSITIONS_PER_PAIR,
             "exposure_pct": round(exposure_pct * 100, 2),
             "exposure_cap_pct": MAX_ACCOUNT_EXPOSURE_PCT * 100,
             "by_pair": by_pair,
