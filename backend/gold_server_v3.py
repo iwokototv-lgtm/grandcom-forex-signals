@@ -32,6 +32,14 @@ from ml_engine.position_monitor import PositionMonitor, position_monitor as _pos
 from ml_engine.candle_tracker import CandleTracker, candle_tracker as _candle_tracker_singleton
 from ml_engine.signal_validator import SignalValidator, signal_validator as _signal_validator_singleton
 
+# Modular services
+from services.signal_engine import SignalEngine
+from services.telegram_service import TelegramService
+from services.position_service import PositionService
+from services.notification_service import NotificationService
+from utils.config import config
+from utils.retry import retry_with_backoff
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -172,6 +180,15 @@ def get_hybrid_system():
             logger.error(f"❌ Failed to load HybridPortfolioSystemV3: {exc}")
             _hybrid_system = None
     return _hybrid_system
+
+
+# ---------------------------------------------------------------------------
+# Service Singletons (initialised in lifespan)
+# ---------------------------------------------------------------------------
+_signal_engine: SignalEngine | None = None
+_telegram_service: TelegramService | None = None
+_position_service: PositionService | None = None
+_notification_service: NotificationService | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1682,6 +1699,47 @@ async def lifespan(app: FastAPI):
         pairs=PAIRS,
     )
     logger.info("✅ Position monitor configured")
+
+    # ── Initialise modular services ───────────────────────────────────────────
+    global _signal_engine, _telegram_service, _position_service, _notification_service
+
+    _signal_engine = SignalEngine(
+        hybrid_system=get_hybrid_system(),
+        validator=_signal_validator,
+    )
+
+    def _make_telegram_retry(name, func):
+        return retry_with_backoff(
+            name, func,
+            config.retry.telegram_max_attempts,
+            config.retry.telegram_backoff_factor,
+        )
+
+    _telegram_service = TelegramService(
+        bot=get_bot() if TELEGRAM_BOT_TOKEN else None,
+        channel_id=TELEGRAM_CHANNEL_ID,
+        retry_func=_make_telegram_retry,
+    )
+
+    _position_service = PositionService(
+        position_manager=_position_manager,
+        risk_manager=_risk_manager,
+        drawdown_recovery=_drawdown_recovery,
+    )
+
+    def _make_mongodb_retry(name, func):
+        return retry_with_backoff(
+            name, func,
+            config.retry.mongodb_max_attempts,
+            config.retry.mongodb_backoff_factor,
+        )
+
+    _notification_service = NotificationService(
+        db=_db,
+        retry_func=_make_mongodb_retry,
+    )
+
+    logger.info("✅ Modular services initialised (SignalEngine, TelegramService, PositionService, NotificationService)")
 
     # ── Scheduler: cron-based jobs aligned to 4H candle closes ───────────────
     # Job 1 — Signal generation: cron at exact 4H candle close times (UTC)
