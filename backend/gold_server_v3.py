@@ -83,7 +83,7 @@ CANDLE_TRACKING_ENABLED = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lowe
 
 # Position / exposure limits
 MAX_ACCOUNT_EXPOSURE_PCT = float(os.environ.get("MAX_ACCOUNT_EXPOSURE_PCT", "0.10"))
-MAX_POSITIONS_PER_PAIR = int(os.environ.get("MAX_POSITIONS_PER_PAIR", "5"))
+# MAX_POSITIONS_PER_PAIR removed — only exposure cap applies (see position_manager.py)
 
 # MongoDB retry configuration
 MONGODB_RETRY_MAX_ATTEMPTS = int(os.environ.get("MONGODB_RETRY_MAX_ATTEMPTS", "3"))

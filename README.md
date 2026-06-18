@@ -98,6 +98,37 @@ See `.env.example` for the complete list of 50+ configuration variables.
 - `TWELVE_DATA_API_KEY` — TwelveData API key
 - `OPENAI_API_KEY` — OpenAI API key (for GPT-4o-mini)
 
+## Signal Generation Configuration
+
+### Interval (minutes)
+
+Set `SIGNAL_GENERATION_INTERVAL_MINUTES` to control how often the scheduler scans for new signals. The scheduler uses a cron expression aligned to 4H candle closes; this variable is available for interval-based overrides.
+
+| Value | Use Case | API Calls/Day |
+|-------|----------|---------------|
+| 5 | Scalping, very active trading | 288 |
+| 15 | Active trading | 96 |
+| 30 | Standard (default) | 48 |
+| 60 | Conservative, low API usage | 24 |
+
+### Position Limits
+
+- `MAX_ACCOUNT_EXPOSURE_PCT` — Maximum total account exposure across all open positions (default: `0.10` = 10%). A new position is blocked only when adding it would push total exposure above this threshold.
+- `MAX_POSITIONS_PER_PAIR` — **Removed.** There is no longer a hard cap on the number of concurrent positions per pair. Only the exposure cap applies.
+
+### Example Environment Variables
+
+```bash
+# Scan every 15 minutes
+SIGNAL_GENERATION_INTERVAL_MINUTES=15
+
+# Allow up to 20% account exposure
+MAX_ACCOUNT_EXPOSURE_PCT=0.20
+
+# Position monitoring every 2 minutes
+POSITION_MONITORING_INTERVAL_MINUTES=2
+```
+
 ## Key Statistics
 
 - **Total Modules:** 16
