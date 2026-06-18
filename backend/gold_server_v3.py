@@ -1037,7 +1037,8 @@ async def generate_signal(pair: str) -> None:
         try:
             hybrid_result = await hybrid.generate_signal(symbol=pair, df_4h=df)
             hybrid_ctx = {
-                "regime": hybrid_result.get("regime", "UNKNOWN"),
+                # Legacy fields (kept for backward compatibility)
+                "regime": hybrid_result.get("market_regime", hybrid_result.get("regime", "UNKNOWN")),
                 "smc_score": hybrid_result.get("smc_score", 0),
                 "mtf_alignment": hybrid_result.get("mtf_alignment", 0),
                 "pivot_zone": hybrid_result.get("pivot_zone", "UNKNOWN"),
@@ -1049,11 +1050,18 @@ async def generate_signal(pair: str) -> None:
                 ),
                 "entry": hybrid_result.get("entry_price", 0),
                 "analysis": hybrid_result.get("analysis", ""),
+                # NEW v3.4 fields
+                "market_regime": hybrid_result.get("market_regime", "UNKNOWN"),
+                "regime_weights": hybrid_result.get("regime_weights", {}),
+                "confidence_score_v34": hybrid_result.get("confidence_score_v34", 0.0),
+                "component_votes": hybrid_result.get("component_votes", {}),
             }
             logger.info(
-                f"[{pair}] Hybrid: signal={hybrid_ctx['hybrid_signal']} "
+                f"[{pair}] Hybrid v3.4: signal={hybrid_ctx['hybrid_signal']} "
                 f"confidence={hybrid_ctx['hybrid_confidence']:.1f}% "
-                f"regime={hybrid_ctx['regime']} smc={hybrid_ctx['smc_score']}/10 "
+                f"regime={hybrid_ctx['market_regime']} "
+                f"confidence_v34={hybrid_ctx['confidence_score_v34']:.1f} "
+                f"smc={hybrid_ctx['smc_score']}/10 "
                 f"mtf={hybrid_ctx['mtf_alignment']:.0f}%"
             )
         except Exception as exc:
@@ -1338,25 +1346,30 @@ async def generate_signal(pair: str) -> None:
         if db is not None:
             async def _save_signal():
                 doc = {
-                    "pair":             pair,
-                    "type":             signal_type,
-                    "entry_price":      entry,
-                    "current_price":    ind["price"],
-                    "tp_levels":        tps,
-                    "sl_price":         sl,
-                    "confidence":       round(confidence, 1),
-                    "analysis":         analysis,
-                    "risk_reward":      rr,
-                    "timeframe":        "4H",
-                    "status":           "ACTIVE",
-                    "indicators":       ind,
-                    "regime":           hybrid_ctx.get("regime", "UNKNOWN"),
-                    "smc_score":        hybrid_ctx.get("smc_score", 0),
-                    "mtf_alignment":    hybrid_ctx.get("mtf_alignment", 0),
-                    "pivot_zone":       hybrid_ctx.get("pivot_zone", "UNKNOWN"),
-                    "position_size":    1.0,
-                    "system_version":   "3.0.0",
-                    "created_at":       datetime.now(timezone.utc),
+                    "pair":                  pair,
+                    "type":                  signal_type,
+                    "entry_price":           entry,
+                    "current_price":         ind["price"],
+                    "tp_levels":             tps,
+                    "sl_price":              sl,
+                    "confidence":            round(confidence, 1),
+                    "analysis":              analysis,
+                    "risk_reward":           rr,
+                    "timeframe":             "4H",
+                    "status":                "ACTIVE",
+                    "indicators":            ind,
+                    "regime":                hybrid_ctx.get("regime", "UNKNOWN"),
+                    "smc_score":             hybrid_ctx.get("smc_score", 0),
+                    "mtf_alignment":         hybrid_ctx.get("mtf_alignment", 0),
+                    "pivot_zone":            hybrid_ctx.get("pivot_zone", "UNKNOWN"),
+                    "position_size":         1.0,
+                    "system_version":        "3.4.0",
+                    # NEW v3.4 fields
+                    "market_regime":         hybrid_ctx.get("market_regime", "UNKNOWN"),
+                    "regime_weights":        hybrid_ctx.get("regime_weights", {}),
+                    "confidence_score_v34":  hybrid_ctx.get("confidence_score_v34", 0.0),
+                    "component_votes":       hybrid_ctx.get("component_votes", {}),
+                    "created_at":            datetime.now(timezone.utc),
                 }
                 result = await db.gold_signals.insert_one(doc)
                 return result.inserted_id
@@ -1389,7 +1402,7 @@ async def generate_signal(pair: str) -> None:
         tg_sent = await send_to_telegram(
             pair, signal_type, entry, tps, sl,
             round(confidence, 1), rr, analysis,
-            regime=hybrid_ctx.get("regime", "UNKNOWN"),
+            regime=hybrid_ctx.get("market_regime", hybrid_ctx.get("regime", "UNKNOWN")),
             smc_score=hybrid_ctx.get("smc_score", 0),
             mtf_alignment=hybrid_ctx.get("mtf_alignment", 0),
             position_count=pos_summary.get("total_open", 0),
@@ -1953,9 +1966,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Grandcom Gold Signals v3.0",
-    description="Institutional Multi-Strategy Hybrid Portfolio System",
-    version="3.0.0",
+    title="Grandcom Gold Signals v3.4",
+    description="Institutional Multi-Strategy Hybrid Portfolio System with Market Regime Adaptation",
+    version="3.4.0",
     lifespan=lifespan,
 )
 
@@ -1998,7 +2011,7 @@ async def health():
     return {
         "status":            "ok",
         "service":           "gold_signals_v3",
-        "version":           "3.0.0",
+        "version":           "3.4.0",
         "pairs":             list(PAIRS.keys()),
         "telegram_channel":  TELEGRAM_CHANNEL_ID,
         "scheduler_running": scheduler.running,
@@ -2052,7 +2065,7 @@ async def system_status():
     """Get full hybrid system status."""
     hybrid = get_hybrid_system()
     if hybrid is None:
-        return {"error": "Hybrid system not available", "version": "3.0.0"}
+        return {"error": "Hybrid system not available", "version": "3.4.0"}
     return hybrid.get_system_status()
 
 

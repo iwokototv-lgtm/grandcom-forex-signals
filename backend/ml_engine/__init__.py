@@ -1,6 +1,6 @@
 """
 ML Engine for Grandcom Gold Signals
-Institutional Multi-Strategy Hybrid Portfolio System v3.0
+Institutional Multi-Strategy Hybrid Portfolio System v3.4
 """
 
 # ── Legacy modules (v2.0, preserved) ──────────────────────────────────────
@@ -36,6 +36,9 @@ from .volume_confirmation import VolumeConfirmationStrategy
 from .geometry_rating import GeometryRating, geometry_rater
 from .candle_tracker import CandleTracker, candle_tracker
 from .validation import ValidationEngine
+# ── v3.4 modules ──────────────────────────────────────────────────────────
+from .market_regime_detector import MarketRegimeDetector, market_regime_detector
+from .signal_filters import SignalFilters, signal_filters
 
 # ── Phase 2: Signal Quality V2 ────────────────────────────────────────────
 # Imported with graceful degradation so that a broken Phase 2 module never
@@ -127,6 +130,12 @@ __all__ = [
     'candle_tracker',
     # Validation Engine
     'ValidationEngine',
+    # v3.4: Market Regime Detector
+    'MarketRegimeDetector',
+    'market_regime_detector',
+    # v3.4: Signal Filters
+    'SignalFilters',
+    'signal_filters',
     # Phase 2: Signal Quality V2
     'SignalQualityV2',
     'signal_quality_v2',
