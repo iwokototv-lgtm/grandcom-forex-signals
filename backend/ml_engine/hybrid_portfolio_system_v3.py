@@ -64,9 +64,10 @@ WEIGHT_C = float(os.environ.get("WEIGHT_C", "0.20"))  # Multi-Timeframe    (20%)
 WEIGHT_D = float(os.environ.get("WEIGHT_D", "0.15"))  # Volume Confirmation (15%)
 
 # Consensus threshold — minimum weighted score to produce a directional signal
-# 0.50 (50%) allows 2-3 strategies to agree; 95%+ confidence is enforced by
-# Layer 3 confirmation filters (MTF, SMC, news) and MIN_CONFIDENCE_FOR_SIGNAL.
-CONSENSUS_THRESHOLD = float(os.environ.get("CONSENSUS_THRESHOLD", "0.50"))
+# 0.30 (30%) allows any 2 strategies to agree (smallest pair C+D = 0.35);
+# 95%+ confidence is enforced by Layer 3 confirmation filters (MTF, SMC, news)
+# and MIN_CONFIDENCE_FOR_SIGNAL.
+CONSENSUS_THRESHOLD = float(os.environ.get("CONSENSUS_THRESHOLD", "0.30"))
 
 # Confirmation filter thresholds
 MIN_MTF_ALIGNMENT_PCT = float(os.environ.get("MIN_MTF_ALIGNMENT_PCT", "80.0"))
@@ -1741,7 +1742,7 @@ class HybridPortfolioSystemV3:
           C (Multi-Timeframe):    20%
           D (Volume Confirmation): 15%
 
-        Consensus threshold: 50% weighted score (CONSENSUS_THRESHOLD=0.50).
+        Consensus threshold: 30% weighted score (CONSENSUS_THRESHOLD=0.30).
 
         Args:
             signal_a: Vote from Component A ("BUY", "SELL", or "NEUTRAL")
