@@ -70,8 +70,8 @@ WEIGHT_D = float(os.environ.get("WEIGHT_D", "0.15"))  # Volume Confirmation (15%
 CONSENSUS_THRESHOLD = float(os.environ.get("CONSENSUS_THRESHOLD", "0.30"))
 
 # Confirmation filter thresholds
-MIN_MTF_ALIGNMENT_PCT = float(os.environ.get("MIN_MTF_ALIGNMENT_PCT", "80.0"))
-MIN_SMC_SCORE         = int(os.environ.get("MIN_SMC_SCORE", "7"))
+MIN_MTF_ALIGNMENT_PCT = float(os.environ.get("MIN_MTF_ALIGNMENT_PCT", "0.0"))
+MIN_SMC_SCORE         = int(os.environ.get("MIN_SMC_SCORE", "0"))
 
 # Minimum final confidence required to send a signal (after filters)
 MIN_CONFIDENCE_FOR_SIGNAL = float(os.environ.get("MIN_CONFIDENCE_FOR_SIGNAL", "90.0"))
