@@ -1314,7 +1314,7 @@ class HybridPortfolioSystemV3:
                 )
 
                 result.update({
-                    "signal":                   signal if meets_threshold else "NEUTRAL",
+                    "signal":                   signal if (meets_threshold or final_confidence >= 50.0) else "NEUTRAL",
                     "confidence":               final_confidence / 100.0,
                     "confidence_pct":           final_confidence,
                     "signal_quality":           signal_quality,
