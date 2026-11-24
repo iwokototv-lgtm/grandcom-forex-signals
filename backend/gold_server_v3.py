@@ -167,6 +167,7 @@ def get_bot() -> Bot:
 # Hybrid System (lazy import to avoid circular deps at module load)
 # ---------------------------------------------------------------------------
 _hybrid_system = None
+_regime_detector = None
 
 
 def get_hybrid_system():
@@ -2089,7 +2090,13 @@ async def get_regime_analysis(pair: str):
 
     try:
         features = hybrid.feature_engineer.extract_features(df)
-        regime = hybrid.regime_detector.detect_regime(features)
+        if features is None:
+            raise HTTPException(status_code=503, detail="Feature extraction failed")
+        from ml_engine.regime_detector import RegimeDetector
+        global _regime_detector
+        if _regime_detector is None:
+            _regime_detector = RegimeDetector()
+        regime = _regime_detector.detect_regime(features)
         return {"pair": pair, "regime": regime, "timestamp": datetime.utcnow().isoformat()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -2113,7 +2120,11 @@ async def get_smc_analysis(pair: str):
     if hybrid is None:
         raise HTTPException(status_code=503, detail="Hybrid system not available")
 
-    return hybrid.smc_ict.analyze(df, pair, timeframe="4h")
+    try:
+        from ml_engine.smc_ict_strategy import smc_ict_strategy
+        return smc_ict_strategy.analyze(df, pair, timeframe="4h")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -2223,7 +2234,8 @@ async def get_performance(lookback_days: int = Query(default=30, ge=1, le=365)):
         if hybrid is None:
             return {"error": "Hybrid system not available"}
 
-        return hybrid.performance.analyze(trades, ACCOUNT_BALANCE, lookback_days)
+        from ml_engine.performance_attribution import performance_attribution
+        return performance_attribution.analyze(trades, ACCOUNT_BALANCE, lookback_days)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
