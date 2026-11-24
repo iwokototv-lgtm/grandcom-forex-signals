@@ -1973,6 +1973,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from backtest_api import router as backtest_router
+app.include_router(backtest_router)
+
 
 # ---------------------------------------------------------------------------
 # Endpoint 1: Health Check
