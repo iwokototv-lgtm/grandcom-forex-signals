@@ -1821,6 +1821,8 @@ async def _main_async() -> None:
         run_modes = ["consensus"]
     elif STRATEGY_MODE == "original":
         run_modes = ["original"]
+    elif STRATEGY_MODE == "trend_breakout":
+        run_modes = ["trend_breakout"]
     else:
         # Should never reach here because the module-level guard already
         # defaulted unrecognised values to "mean_reversion", but be explicit.
