@@ -73,6 +73,13 @@ CONSENSUS_THRESHOLD = float(os.environ.get("CONSENSUS_THRESHOLD", "0.30"))
 MIN_MTF_ALIGNMENT_PCT = float(os.environ.get("MIN_MTF_ALIGNMENT_PCT", "0.0"))
 MIN_SMC_SCORE         = int(os.environ.get("MIN_SMC_SCORE", "0"))
 
+# HONEST_CONFIDENCE=true: confirmation filters no longer add points or force
+# confidence up to 95%+. The final confidence is the weighted consensus score
+# (0-100) and the filters only veto (a failed filter caps it at 85%, and fewer
+# than 2 passed filters still downgrade the signal to NEUTRAL). Default off, so
+# behaviour is unchanged until it is set.
+HONEST_CONFIDENCE = os.environ.get("HONEST_CONFIDENCE", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # Minimum final confidence required to send a signal (after filters)
 MIN_CONFIDENCE_FOR_SIGNAL = float(os.environ.get("MIN_CONFIDENCE_FOR_SIGNAL", "90.0"))
 
@@ -1074,17 +1081,22 @@ class HybridPortfolioSystemV3:
         # ── Calculate final confidence ────────────────────────────────
         final_confidence = confidence
 
-        if filters_passed >= 2:
-            # +10% per filter passed (max +20% for 2 filters, +30% for 3)
-            final_confidence = min(99.0, confidence + (filters_passed * 10.0))
+        if HONEST_CONFIDENCE:
+            # Filters only veto: no bonus points, no guaranteed 95%.
+            if filters_failed:
+                final_confidence = min(final_confidence, 85.0)
+        else:
+            if filters_passed >= 2:
+                # +10% per filter passed (max +20% for 2 filters, +30% for 3)
+                final_confidence = min(99.0, confidence + (filters_passed * 10.0))
 
-        if filters_failed:
-            # Cap at 85% if any filter fails
-            final_confidence = min(final_confidence, 85.0)
+            if filters_failed:
+                # Cap at 85% if any filter fails
+                final_confidence = min(final_confidence, 85.0)
 
-        if filters_passed == 3:
-            # All filters passed → guarantee 95%+ confidence
-            final_confidence = min(99.0, max(95.0, final_confidence))
+            if filters_passed == 3:
+                # All filters passed → guarantee 95%+ confidence
+                final_confidence = min(99.0, max(95.0, final_confidence))
 
         # Downgrade to NEUTRAL if fewer than 2 filters pass
         final_signal = signal if filters_passed >= 2 else "NEUTRAL"

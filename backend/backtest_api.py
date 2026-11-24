@@ -14,6 +14,7 @@ production database.
 import asyncio
 import hmac
 import os
+import re
 import sys
 import time
 import uuid
@@ -32,7 +33,15 @@ _SCRIPTS = {
 }
 _STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "all"}
 _TIMEOUT_SECONDS = 20 * 60          # default; longer runs get more, see _timeout_for()
-_MAX_CANDLES = 6000                 # about 4 years of 4H candles
+_MAX_CANDLES = 6000
+# Experiment knobs a caller may set for the "production" backtest. Values must
+# be plain numbers or true/false, so nothing else can reach the subprocess.
+_ALLOWED_PARAMS = {
+    "BT_ATR_SL", "BT_ATR_TP1", "BT_ATR_TP2", "BT_ATR_TP3", "BT_BE_R",
+    "BT_ONE_AT_A_TIME", "BT_CONF_THRESHOLD", "HONEST_CONFIDENCE",
+    "MIN_MTF_ALIGNMENT_PCT", "MIN_SMC_SCORE", "CONSENSUS_THRESHOLD",
+}
+_PARAM_VALUE = re.compile(r"^(true|false|\d{1,4}(\.\d{1,4})?)$")                 # about 4 years of 4H candles
 _MAX_OUTPUT = 100_000
 _MAX_JOBS = 20
 
@@ -48,6 +57,8 @@ class RunRequest(BaseModel):
     # about 8 months; max 6000) and how many equal time windows to report.
     candles: Optional[int] = None
     folds: Optional[int] = None
+    # Optional, "production" only: experiment knobs, see _ALLOWED_PARAMS.
+    params: Optional[Dict[str, str]] = None
 
 
 def _timeout_for(candles: Optional[int]) -> int:
@@ -126,6 +137,15 @@ async def run_backtest(req: RunRequest, x_backtest_token: Optional[str] = Header
             if not 0 <= req.folds <= 12:
                 raise HTTPException(status_code=400, detail="folds must be between 0 and 12")
             extra_env["BACKTEST_FOLDS"] = str(req.folds)
+    if req.params:
+        if req.type != "production":
+            raise HTTPException(status_code=400, detail="params apply to type 'production' only")
+        for k, v in req.params.items():
+            if k not in _ALLOWED_PARAMS:
+                raise HTTPException(status_code=400, detail=f"Unknown param {k}. Allowed: {', '.join(sorted(_ALLOWED_PARAMS))}")
+            if not _PARAM_VALUE.match(str(v).strip().lower()):
+                raise HTTPException(status_code=400, detail=f"Param {k} must be a number or true/false")
+            extra_env[k] = str(v).strip().lower()
     if _running is not None:
         raise HTTPException(status_code=409, detail=f"A backtest is already running (job {_running})")
 
@@ -134,7 +154,7 @@ async def run_backtest(req: RunRequest, x_backtest_token: Optional[str] = Header
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {
-        "job_id": job_id, "type": req.type, "strategy_mode": mode, "candles": req.candles, "folds": req.folds,
+        "job_id": job_id, "type": req.type, "strategy_mode": mode, "candles": req.candles, "folds": req.folds, "params": req.params,
         "status": "running",
         "started_at": time.time(), "output": "",
     }
