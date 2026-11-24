@@ -1726,6 +1726,19 @@ async def run_signal_generation() -> None:
         logger.warning("[SIGNAL_GEN] SIGNALS_PAUSED is set — skipping market scan (no signals sent)")
         return
 
+    if LIVE_STRATEGY == "trend_breakout":
+        # trend_breakout keeps its own per-candle de-duplication (candle_time in the
+        # database), so it bypasses the legacy candle tracker.
+        logger.info("[SIGNAL_GEN] Starting trend_breakout scan")
+        for pair in PAIRS:
+            try:
+                await generate_trend_breakout_signal(pair)
+            except Exception as exc:
+                logger.error(f"[SIGNAL_GEN] [{pair}] trend_breakout error: {exc}", exc_info=True)
+            await asyncio.sleep(2)
+        logger.info("[SIGNAL_GEN] trend_breakout scan complete")
+        return
+
     logger.info("[SIGNAL_GEN] Starting cron-triggered market scan")
 
     for pair in PAIRS:
@@ -2040,12 +2053,16 @@ async def lifespan(app: FastAPI):
 
     # ── Scheduler: cron-based jobs aligned to 4H candle closes ───────────────
     # Job 1 — Signal generation: cron at exact 4H candle close times (UTC)
+    # trend_breakout works on the live feed's 4H grid, which closes at 00,04,08,12,16,20
+    # UTC. It scans at +1, +6 and +11 minutes in case the candle is published late; the
+    # per-candle de-duplication stops repeats. The legacy pipeline keeps its old times.
+    _tb_live = LIVE_STRATEGY == "trend_breakout"
     scheduler.add_job(
         run_signal_generation,
         "cron",
-        hour="3,7,11,15,19,23",  # Exact 4H candle close times
-        minute=0,
-        second=5,  # 5 seconds after candle closes
+        hour="0,4,8,12,16,20" if _tb_live else "3,7,11,15,19,23",
+        minute="1,6,11" if _tb_live else 0,
+        second=0 if _tb_live else 5,
         id="signal_generation_cron",
         max_instances=1,
         coalesce=True,
