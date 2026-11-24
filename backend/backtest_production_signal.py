@@ -192,6 +192,7 @@ _VALID_STRATEGY_MODES: frozenset = frozenset({
     "price_action",
     "macro_filtered",
     "consensus",
+    "trend_breakout",
     "all",
 })
 
@@ -218,6 +219,7 @@ _MODE_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
     "price_action":   65.0,
     "macro_filtered": 60.0,
     "consensus":      62.0,
+    "trend_breakout": 50.0,
 }
 
 
@@ -1019,6 +1021,14 @@ async def _run_walkforward(
           f"(split at candle {split_idx}) …", flush=True)
 
     _first_signal_printed = False   # diagnostic flag
+    tb_signals = None
+    if strategy_mode == "trend_breakout":
+        from ml_engine.trend_breakout import trend_breakout_series
+        tb_signals = trend_breakout_series(
+            df_4h_full,
+            lookback=int(_env_float("BT_BREAKOUT_N") or 20),
+            ema_period=int(_env_float("BT_EMA") or 100),
+        )
     last_exit_idx = -1                      # BT_ONE_AT_A_TIME gating
     dt_index = pd.Index(df_4h_full["datetime"])
 
@@ -1088,43 +1098,52 @@ async def _run_walkforward(
         _price_data_arg = price_data if len(price_data) >= 2 else None
 
         # ── Call production signal ───────────────────────────────────────────
-        try:
-            # Patch MTF confirmation to use pre-fetched data (no live API calls)
-            mtf_result = system.mtf_confirmation.analyze_sync(
-                dfs={tf: df for tf, df in mtf_dfs.items() if df is not None},
-                symbol=pair,
-            )
-            # Temporarily override the async analyze() to return the sync result
-            # by monkey-patching for this one call
-            _orig_analyze = system.mtf_confirmation.analyze
-
-            async def _patched_analyze(symbol_arg: str) -> Dict:
-                return mtf_result
-
-            system.mtf_confirmation.analyze = _patched_analyze  # type: ignore[method-assign]
-
-            signal_result = await asyncio.wait_for(
-                system.generate_signal(
-                    symbol=pair,
-                    df_4h=df_4h_window,
-                    df_daily=df_daily_window,
-                    price_data=_price_data_arg,
-                    strategy_mode=strategy_mode,
-                    corr_dfs=corr_dfs,
-                ),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            signal_result = {"signal": "NEUTRAL", "confidence": 0.0, "meets_threshold": False}
-        except Exception as exc:
-            logger.debug(f"Signal error at idx={idx}: {exc}")
-            signal_result = {"signal": "NEUTRAL", "confidence": 0.0, "meets_threshold": False}
-        finally:
-            # Restore original async analyze
+        if strategy_mode == "trend_breakout":
+            # Research candidate: precomputed, no lookahead (see ml_engine/trend_breakout.py)
+            _tb = tb_signals.iloc[idx]
+            signal_result = {
+                "signal": _tb,
+                "confidence_pct": 100.0 if _tb in ("BUY", "SELL") else 0.0,
+                "component_votes": {"breakout": _tb},
+            }
+        else:
             try:
-                system.mtf_confirmation.analyze = _orig_analyze  # type: ignore[method-assign]
-            except Exception:
-                pass
+                # Patch MTF confirmation to use pre-fetched data (no live API calls)
+                mtf_result = system.mtf_confirmation.analyze_sync(
+                    dfs={tf: df for tf, df in mtf_dfs.items() if df is not None},
+                    symbol=pair,
+                )
+                # Temporarily override the async analyze() to return the sync result
+                # by monkey-patching for this one call
+                _orig_analyze = system.mtf_confirmation.analyze
+
+                async def _patched_analyze(symbol_arg: str) -> Dict:
+                    return mtf_result
+
+                system.mtf_confirmation.analyze = _patched_analyze  # type: ignore[method-assign]
+
+                signal_result = await asyncio.wait_for(
+                    system.generate_signal(
+                        symbol=pair,
+                        df_4h=df_4h_window,
+                        df_daily=df_daily_window,
+                        price_data=_price_data_arg,
+                        strategy_mode=strategy_mode,
+                        corr_dfs=corr_dfs,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                signal_result = {"signal": "NEUTRAL", "confidence": 0.0, "meets_threshold": False}
+            except Exception as exc:
+                logger.debug(f"Signal error at idx={idx}: {exc}")
+                signal_result = {"signal": "NEUTRAL", "confidence": 0.0, "meets_threshold": False}
+            finally:
+                # Restore original async analyze
+                try:
+                    system.mtf_confirmation.analyze = _orig_analyze  # type: ignore[method-assign]
+                except Exception:
+                    pass
 
         result.signals_raw += 1
         signal     = signal_result.get("signal", "NEUTRAL")
