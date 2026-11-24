@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -89,6 +89,15 @@ CANDLE_TRACKING_ENABLED = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lowe
 # effect on the next one after the variable is changed and the service restarts.
 def _signals_paused() -> bool:
     return os.environ.get("SIGNALS_PAUSED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+# Live strategy. "trend_breakout" (default) is the 55-candle breakout that passed
+# the walk-forward backtest; set LIVE_STRATEGY=legacy to run the old hybrid logic.
+LIVE_STRATEGY = os.environ.get("LIVE_STRATEGY", "trend_breakout").strip().lower()
+TB_BREAKOUT_N = int(os.environ.get("TB_BREAKOUT_N", "55"))
+TB_EMA = int(os.environ.get("TB_EMA", "100"))
+TB_MAX_SIGNAL_AGE_MIN = int(os.environ.get("TB_MAX_SIGNAL_AGE_MIN", "30"))
+# Exits in ATR multiples (stop 2, targets 2/4/6), as backtested.
+TB_LEVELS = {"atr_sl": 2.0, "atr_tp1": 2.0, "atr_tp2": 4.0, "atr_tp3": 6.0}
 
 # ── EXTENDED CONFIGURATION (from environment) ─────────────────────────────
 
@@ -657,6 +666,7 @@ async def send_to_telegram(
     exposure_pct: float = 0.0,
     risk_status: Optional[dict] = None,
     max_retries: int = 3,
+    strategy_label: Optional[str] = None,
 ) -> bool:
     """Send signal to Telegram with v3.0 context + risk/position data.
 
@@ -687,21 +697,30 @@ async def send_to_telegram(
     risk_level = rs.get("risk_level", "GREEN")
     risk_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(risk_level, "⚪")
 
-    info_msg = (
-        f"<b>📊 R:R:</b> 1:{rr}  "
-        f"<b>⚡ Confidence:</b> {confidence}%\n"
-        f"<b>🎯 Regime:</b> {regime}  "
-        f"<b>📐 SMC:</b> {smc_score}/10  "
-        f"<b>🔗 MTF:</b> {mtf_alignment:.0f}%\n"
-        f"<b>📈 Positions:</b> {position_count}/5  "
-        f"<b>💰 Exposure:</b> {exposure_pct:.1f}%\n"
-        f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
-        f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
-        f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
-        f"<b>📝</b> {_html_escape(analysis)}\n"
-        f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"| Grandcom Gold Engine v3.0</i>"
-    )
+    if strategy_label:
+        info_msg = (
+            f"<b>📊 R:R:</b> 1:{rr}\n"
+            f"<b>🧭 Strategy:</b> {_html_escape(strategy_label)}\n"
+            f"<b>📝</b> {_html_escape(analysis)}\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+            f"| Grandcom Gold Engine</i>"
+        )
+    else:
+        info_msg = (
+            f"<b>📊 R:R:</b> 1:{rr}  "
+            f"<b>⚡ Confidence:</b> {confidence}%\n"
+            f"<b>🎯 Regime:</b> {regime}  "
+            f"<b>📐 SMC:</b> {smc_score}/10  "
+            f"<b>🔗 MTF:</b> {mtf_alignment:.0f}%\n"
+            f"<b>📈 Positions:</b> {position_count}/5  "
+            f"<b>💰 Exposure:</b> {exposure_pct:.1f}%\n"
+            f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
+            f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
+            f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
+            f"<b>📝</b> {_html_escape(analysis)}\n"
+            f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
+            f"| Grandcom Gold Engine v3.0</i>"
+        )
 
     for attempt in range(max_retries):
         try:
@@ -935,6 +954,113 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
 # ---------------------------------------------------------------------------
 # Core Signal Generation
 # ---------------------------------------------------------------------------
+async def generate_trend_breakout_signal(pair: str) -> None:
+    """
+    Live trend_breakout cycle (the strategy validated by the walk-forward backtest).
+
+    BUY when the last closed 4H candle closes above the highest high of the previous
+    TB_BREAKOUT_N candles and above the EMA(TB_EMA); SELL on the mirror. Stop 2 ATR,
+    targets 2/4/6 ATR. One trade per pair at a time, and one signal per candle.
+    """
+    from ml_engine.live_trend_breakout import closed_candles, latest_signal, trade_still_open
+
+    cfg = PAIRS[pair]
+    logger.info(f"[{pair}] trend_breakout scan (N={TB_BREAKOUT_N}, EMA={TB_EMA})")
+
+    try:
+        if await _calendar_filter.is_blackout_period(pair):
+            logger.info(f"[{pair}] NEWS BLACKOUT — skipping trend_breakout signal")
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Calendar check error (fail-open): {exc}")
+
+    try:
+        risk_check = await _risk_manager.enforce_risk_limits()
+        if not risk_check.get("trading_allowed", True):
+            logger.warning(f"[{pair}] Trading halted by risk manager: {risk_check.get('reason')}")
+            return
+    except Exception as exc:
+        logger.warning(f"[{pair}] Risk manager check error (fail-open): {exc}")
+
+    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=300)
+    if df is None or len(df) < max(TB_BREAKOUT_N, TB_EMA) + 5:
+        logger.error(f"[{pair}] trend_breakout: insufficient candles or API failure")
+        _signal_metrics.failed_cycles += 1
+        return
+
+    df = closed_candles(df)
+    signal_type = latest_signal(df, TB_BREAKOUT_N, TB_EMA)
+    candle_time = str(df["datetime"].iloc[-1])
+    logger.info(f"[{pair}] trend_breakout: last closed candle {candle_time} -> {signal_type}")
+    if signal_type not in ("BUY", "SELL"):
+        return
+
+    # Freshness: the order is placed at market by the copier, so a signal for a
+    # candle that closed long ago (e.g. after a late restart) is skipped.
+    from ml_engine.live_trend_breakout import _to_utc, CANDLE_HOURS
+    age_min = (datetime.now(timezone.utc) - _to_utc(candle_time) - timedelta(hours=CANDLE_HOURS)).total_seconds() / 60
+    if age_min > TB_MAX_SIGNAL_AGE_MIN:
+        logger.info(f"[{pair}] trend_breakout: candle closed {age_min:.0f} min ago (> {TB_MAX_SIGNAL_AGE_MIN}) — stale, skipping")
+        return
+
+    db = get_db()
+    if db is not None:
+        try:
+            if await db.gold_signals.find_one(
+                {"pair": pair, "strategy": "trend_breakout", "candle_time": candle_time}
+            ):
+                logger.info(f"[{pair}] trend_breakout: candle {candle_time} already signalled — skipping")
+                return
+            last = await db.gold_signals.find_one(
+                {"pair": pair, "strategy": "trend_breakout"}, sort=[("created_at", -1)]
+            )
+            if last and trade_still_open(
+                last["type"], float(last["entry_price"]), float(last["sl_price"]),
+                float(last["tp_levels"][2]), last["candle_time"], df,
+            ):
+                logger.info(f"[{pair}] trend_breakout: previous trade still open — skipping new signal")
+                return
+        except Exception as exc:
+            logger.error(f"[{pair}] trend_breakout state check failed ({exc}) — not signalling")
+            return
+    else:
+        logger.error(f"[{pair}] trend_breakout: MongoDB not connected — cannot check open trades, not signalling")
+        return
+
+    ind = compute_indicators(df, cfg["decimals"])
+    if ind is None:
+        return
+    entry = float(df["close"].iloc[-1])
+    levels_cfg = {**cfg, **TB_LEVELS}
+    tps, sl = build_levels(signal_type, entry, ind["atr"], levels_cfg)
+    risk = abs(entry - sl)
+    rr = round(abs(tps[0] - entry) / risk, 2) if risk > 0 else 0.0
+    analysis = (
+        f"Closed above the {TB_BREAKOUT_N}-candle high with price above the EMA{TB_EMA}"
+        if signal_type == "BUY"
+        else f"Closed below the {TB_BREAKOUT_N}-candle low with price below the EMA{TB_EMA}"
+    ) + ". Wide targets, low hit rate: expect losing streaks. Move SL to entry once TP1 is reached."
+
+    try:
+        await db.gold_signals.insert_one({
+            "pair": pair, "type": signal_type, "entry_price": entry,
+            "current_price": ind["price"], "tp_levels": tps, "sl_price": sl,
+            "confidence": None, "analysis": analysis, "risk_reward": rr,
+            "timeframe": "4H", "status": "ACTIVE", "indicators": ind,
+            "strategy": "trend_breakout", "candle_time": candle_time,
+            "system_version": "3.5.0", "created_at": datetime.now(timezone.utc),
+        })
+    except Exception as exc:
+        logger.error(f"[{pair}] trend_breakout: save failed ({exc}) — not sending to Telegram")
+        return
+
+    sent = await send_to_telegram(
+        pair, signal_type, entry, tps, sl, 0.0, rr, analysis,
+        strategy_label=f"Trend breakout {TB_BREAKOUT_N} (4H)",
+    )
+    logger.info(f"[{pair}] trend_breakout: {signal_type} entry={entry} sl={sl} tps={tps} telegram={sent}")
+
+
 async def generate_signal(pair: str) -> None:
     """
     Signal generation pipeline with full error isolation.
@@ -951,6 +1077,10 @@ async def generate_signal(pair: str) -> None:
     """
     if _signals_paused():
         logger.warning(f"[{pair}] SIGNALS_PAUSED is set — skipping signal generation")
+        return
+
+    if LIVE_STRATEGY == "trend_breakout":
+        await generate_trend_breakout_signal(pair)
         return
 
     cfg = PAIRS[pair]
