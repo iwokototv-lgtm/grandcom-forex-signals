@@ -31,7 +31,7 @@ _SCRIPTS = {
     "twelvedata": "backtest_twelvedata.py",
     "production": "backtest_production_signal.py",
 }
-_STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "all"}
+_STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "trend_breakout", "all"}
 _TIMEOUT_SECONDS = 20 * 60          # default; longer runs get more, see _timeout_for()
 _MAX_CANDLES = 6000
 # Experiment knobs a caller may set for the "production" backtest. Values must
@@ -39,7 +39,7 @@ _MAX_CANDLES = 6000
 _ALLOWED_PARAMS = {
     "BT_ATR_SL", "BT_ATR_TP1", "BT_ATR_TP2", "BT_ATR_TP3", "BT_BE_R",
     "BT_ONE_AT_A_TIME", "BT_CONF_THRESHOLD", "HONEST_CONFIDENCE",
-    "MIN_MTF_ALIGNMENT_PCT", "MIN_SMC_SCORE", "CONSENSUS_THRESHOLD",
+    "BT_BREAKOUT_N", "BT_EMA", "MIN_MTF_ALIGNMENT_PCT", "MIN_SMC_SCORE", "CONSENSUS_THRESHOLD",
 }
 _PARAM_VALUE = re.compile(r"^(true|false|\d{1,4}(\.\d{1,4})?)$")                 # about 4 years of 4H candles
 _MAX_OUTPUT = 100_000
