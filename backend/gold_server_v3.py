@@ -250,6 +250,7 @@ async def fetch_ohlcv_with_retry(
     outputsize: int = 100,
     max_retries: int = 3,
     backoff_factor: float = 2.0,
+    tz: Optional[str] = None,
 ) -> pd.DataFrame | None:
     """
     Fetch OHLCV from TwelveData with exponential backoff retry.
@@ -267,6 +268,7 @@ async def fetch_ohlcv_with_retry(
         f"https://api.twelvedata.com/time_series"
         f"?symbol={cfg['symbol']}&interval={interval}&outputsize={outputsize}"
         f"&apikey={TWELVE_DATA_API_KEY}"
+        + (f"&timezone={tz}" if tz else "")
     )
 
     last_error = None
@@ -982,7 +984,7 @@ async def generate_trend_breakout_signal(pair: str) -> None:
     except Exception as exc:
         logger.warning(f"[{pair}] Risk manager check error (fail-open): {exc}")
 
-    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=300)
+    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=300, tz="UTC")
     if df is None or len(df) < max(TB_BREAKOUT_N, TB_EMA) + 5:
         logger.error(f"[{pair}] trend_breakout: insufficient candles or API failure")
         _signal_metrics.failed_cycles += 1
@@ -999,6 +1001,13 @@ async def generate_trend_breakout_signal(pair: str) -> None:
     # candle that closed long ago (e.g. after a late restart) is skipped.
     from ml_engine.live_trend_breakout import _to_utc, CANDLE_HOURS
     age_min = (datetime.now(timezone.utc) - _to_utc(candle_time) - timedelta(hours=CANDLE_HOURS)).total_seconds() / 60
+    if age_min < -5:
+        # The candle would close in the future, so the feed's clock is not UTC.
+        logger.error(
+            f"[{pair}] trend_breakout: candle {candle_time} closes {-age_min:.0f} min in the future — "
+            f"feed timestamps are not UTC; not signalling"
+        )
+        return
     if age_min > TB_MAX_SIGNAL_AGE_MIN:
         logger.info(f"[{pair}] trend_breakout: candle closed {age_min:.0f} min ago (> {TB_MAX_SIGNAL_AGE_MIN}) — stale, skipping")
         return

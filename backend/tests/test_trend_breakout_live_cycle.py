@@ -70,3 +70,10 @@ def test_same_candle_not_repeated(monkeypatch):
 def test_stale_candle_skipped(monkeypatch):
     db, sent = _run(monkeypatch, _frame(closed_minutes_ago=120))
     assert sent == [] and db.gold_signals.docs == []
+
+
+def test_future_timestamps_not_signalled(monkeypatch):
+    # feed labels 12h ahead of UTC (what the live feed returned without timezone=UTC)
+    frame = _frame(closed_minutes_ago=-600)
+    db, sent = _run(monkeypatch, frame)
+    assert sent == [] and db.gold_signals.docs == []
