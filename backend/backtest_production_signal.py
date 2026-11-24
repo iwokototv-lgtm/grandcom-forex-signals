@@ -1016,7 +1016,12 @@ async def _run_walkforward(
 
         result.signals_raw += 1
         signal     = signal_result.get("signal", "NEUTRAL")
-        confidence = float(signal_result.get("confidence", 0.0))
+        # "original" mode returns confidence as a 0-1 fraction and also provides
+        # confidence_pct (0-100); the other modes return a percentage in
+        # "confidence". Thresholds are percentages, so prefer confidence_pct
+        # (this is also what the live server does in gold_server_v3.py).
+        _conf_pct  = signal_result.get("confidence_pct")
+        confidence = float(_conf_pct if _conf_pct is not None else signal_result.get("confidence", 0.0))
 
         # ── Diagnostic: log every signal evaluation with component votes ─────
         _votes           = signal_result.get("component_votes", {})
