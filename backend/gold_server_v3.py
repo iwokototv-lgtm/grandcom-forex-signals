@@ -51,6 +51,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("gold_server_v3")
 
+# httpx logs every request URL at INFO, and Telegram's URL contains the bot
+# token (https://api.telegram.org/bot<TOKEN>/sendMessage). Keep it out of logs.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -78,6 +83,12 @@ MIN_CONFIDENCE = int(os.environ.get("MIN_CONFIDENCE", "60"))
 ACCOUNT_BALANCE = float(os.environ.get("DEFAULT_ACCOUNT_BALANCE", "10000.0"))
 # Smart 4H candle detection — skip signal if same candle as last processed
 CANDLE_TRACKING_ENABLED = os.environ.get("CANDLE_TRACKING_ENABLED", "true").lower() == "true"
+
+# Kill switch: set SIGNALS_PAUSED=true to stop all scans (no signals are
+# generated, saved or sent to Telegram). Read on every scan, so it takes
+# effect on the next one after the variable is changed and the service restarts.
+def _signals_paused() -> bool:
+    return os.environ.get("SIGNALS_PAUSED", "false").strip().lower() in ("1", "true", "yes", "on")
 
 # ── EXTENDED CONFIGURATION (from environment) ─────────────────────────────
 
@@ -938,6 +949,10 @@ async def generate_signal(pair: str) -> None:
     4. TELEGRAM  — notify channel (non-blocking, with retry)
     5. POSITION  — register position (non-blocking, with retry)
     """
+    if _signals_paused():
+        logger.warning(f"[{pair}] SIGNALS_PAUSED is set — skipping signal generation")
+        return
+
     cfg = PAIRS[pair]
     cycle_time = datetime.now(timezone.utc)
     logger.info(f"[{pair}] Starting v3.0 signal generation at {cycle_time.isoformat()}")
@@ -1568,6 +1583,10 @@ async def run_signal_generation() -> None:
     Set ``CANDLE_TRACKING_ENABLED=false`` to revert to the legacy behaviour
     (signal on every cron tick regardless of candle state).
     """
+    if _signals_paused():
+        logger.warning("[SIGNAL_GEN] SIGNALS_PAUSED is set — skipping market scan (no signals sent)")
+        return
+
     logger.info("[SIGNAL_GEN] Starting cron-triggered market scan")
 
     for pair in PAIRS:
