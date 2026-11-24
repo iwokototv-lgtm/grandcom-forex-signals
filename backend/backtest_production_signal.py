@@ -146,6 +146,33 @@ PARTIAL_SIZES: Dict[str, float] = {
 }
 
 # ---------------------------------------------------------------------------
+# Experiment overrides (all optional; defaults reproduce the production setup)
+#   BT_ATR_SL / BT_ATR_TP1 / BT_ATR_TP2 / BT_ATR_TP3 : exit distances in ATR
+#   BT_BE_R            : breakeven trigger in ATR (default 0.5)
+#   BT_ONE_AT_A_TIME   : "1" = skip a new entry while the previous trade of
+#                        that pair is still open (default: enter on every signal)
+#   BT_CONF_THRESHOLD  : minimum confidence in percent, overrides the per-mode value
+# ---------------------------------------------------------------------------
+def _env_float(name: str) -> Optional[float]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+for _cfg in PAIRS.values():
+    for _key, _env in (("atr_sl", "BT_ATR_SL"), ("atr_tp1", "BT_ATR_TP1"),
+                       ("atr_tp2", "BT_ATR_TP2"), ("atr_tp3", "BT_ATR_TP3")):
+        _v = _env_float(_env)
+        if _v is not None and _v > 0:
+            _cfg[_key] = _v
+
+ONE_AT_A_TIME = os.environ.get("BT_ONE_AT_A_TIME", "").strip().lower() in ("1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
 # Strategy mode selection
 # ---------------------------------------------------------------------------
 # Set STRATEGY_MODE env var to choose which approach to backtest.
@@ -196,6 +223,12 @@ _MODE_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
 
 def _confidence_threshold_for_mode(mode: str) -> float:
     """Return the minimum confidence threshold for a given strategy mode."""
+    override = os.environ.get("BT_CONF_THRESHOLD", "").strip()
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
     return _MODE_CONFIDENCE_THRESHOLDS.get(mode, 60.0)
 
 
@@ -209,7 +242,7 @@ WARMUP_CANDLES        = 100     # Candles skipped at start for indicator warmup
 ROLLING_WINDOW_4H     = 100     # Rolling 4H window fed to generate_signal()
 ROLLING_WINDOW_DAILY  = 100     # Rolling daily window fed to generate_signal()
 TIMEOUT_CANDLES       = 60      # Max candles before trade timeout
-BE_ACTIVATION_R       = 0.5     # Breakeven trigger (multiples of ATR)
+BE_ACTIVATION_R       = _env_float("BT_BE_R") or 0.5   # Breakeven trigger (multiples of ATR)
 ACCOUNT_BALANCE       = 10_000.0
 RISK_PER_TRADE_PCT    = 1.0     # % of account risked per trade
 IN_SAMPLE_RATIO       = 0.60    # First 60 % = in-sample
@@ -986,6 +1019,8 @@ async def _run_walkforward(
           f"(split at candle {split_idx}) …", flush=True)
 
     _first_signal_printed = False   # diagnostic flag
+    last_exit_idx = -1                      # BT_ONE_AT_A_TIME gating
+    dt_index = pd.Index(df_4h_full["datetime"])
 
     for idx in range(WARMUP_CANDLES, n_4h - TIMEOUT_CANDLES):
         current_dt       = df_4h_full["datetime"].iloc[idx]
@@ -1169,6 +1204,9 @@ async def _run_walkforward(
         if abs(entry - sl_price) < cfg["pip_value"]:
             continue
 
+        if ONE_AT_A_TIME and idx <= last_exit_idx:
+            continue                         # previous trade still open
+
         # ── Strategy trade ───────────────────────────────────────────────────
         strat_trade = Trade(
             pair=pair, direction=signal,
@@ -1180,6 +1218,11 @@ async def _run_walkforward(
             signal_source="strategy",
         )
         strat_trade = _simulate_trade(strat_trade, df_4h_full, idx, atr_series)
+        if ONE_AT_A_TIME:
+            try:
+                last_exit_idx = int(dt_index.get_loc(strat_trade.exit_time))
+            except Exception:
+                last_exit_idx = idx + TIMEOUT_CANDLES
 
         # ── Random baseline trade (same entry, same TP/SL, random direction) ─
         rand_dir = "BUY" if rng.random() < 0.5 else "SELL"
@@ -1779,6 +1822,12 @@ async def _main_async() -> None:
           + (f"  (running: {', '.join(run_modes)})" if run_all else f"  (running: {run_modes[0]})"))
     print(f"  Confidence   : ≥{active_threshold:.0f}%  |  Warmup: {WARMUP_CANDLES} candles")
     print(f"  Fetch size   : {FETCH_OUTPUTSIZE} candles/TF  |  Timeout: {TIMEOUT_CANDLES} candles")
+    _c = PAIRS["XAUUSD"]
+    print(f"  Exits (ATR)  : SL {_c['atr_sl']}  TP {_c['atr_tp1']}/{_c['atr_tp2']}/{_c['atr_tp3']}  "
+          f"BE {BE_ACTIVATION_R}  |  one trade at a time: {ONE_AT_A_TIME}")
+    print(f"  Overrides    : " + (", ".join(f"{k}={os.environ[k]}" for k in sorted(os.environ)
+          if k.startswith("BT_") or k in ("HONEST_CONFIDENCE", "MIN_MTF_ALIGNMENT_PCT", "MIN_SMC_SCORE",
+                                          "CONSENSUS_THRESHOLD")) or "none"))
     print(f"  Split        : {IN_SAMPLE_RATIO*100:.0f}% in-sample / "
           f"{(1-IN_SAMPLE_RATIO)*100:.0f}% out-of-sample")
     print(f"  Account      : ${ACCOUNT_BALANCE:,.0f}  |  Risk/trade: {RISK_PER_TRADE_PCT}%")
