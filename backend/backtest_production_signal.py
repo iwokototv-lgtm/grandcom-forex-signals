@@ -50,6 +50,7 @@ Environment variables
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import logging
 import math
@@ -212,7 +213,22 @@ BE_ACTIVATION_R       = 0.5     # Breakeven trigger (multiples of ATR)
 ACCOUNT_BALANCE       = 10_000.0
 RISK_PER_TRADE_PCT    = 1.0     # % of account risked per trade
 IN_SAMPLE_RATIO       = 0.60    # First 60 % = in-sample
-FETCH_OUTPUTSIZE      = 1000    # Candles to fetch per timeframe
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# BACKTEST_CANDLES: number of 4H candles to test (default 1000 = about 8 months).
+#   Above 1000 the other timeframes are fetched in proportion, in pages.
+# BACKTEST_FOLDS: when >= 2, the trades are also split into that many equal
+#   time windows and reported per window (robustness check). Default 0 = off.
+FETCH_OUTPUTSIZE      = _env_int("BACKTEST_CANDLES", 1000, 300, 15000)
+ROLLING_FOLDS         = _env_int("BACKTEST_FOLDS", 0, 0, 12)
+_TD_PAGE_SIZE         = 5000    # TwelveData maximum outputsize per request
 TWELVEDATA_BASE_URL   = "https://api.twelvedata.com/time_series"
 
 
@@ -325,6 +341,7 @@ class PairResult:
     signals_used:         int   = 0     # Signals after confidence filter
     strategy_mode:        str   = ""    # Mode used for this result (e.g. "mean_reversion")
     confidence_threshold: float = 0.0  # Confidence threshold applied for this mode
+    folds:                List[Dict[str, Any]] = field(default_factory=list)  # rolling windows
 
 
 # ---------------------------------------------------------------------------
@@ -336,17 +353,22 @@ def _fetch_raw(
     interval: str,
     outputsize: int,
     api_key: str,
+    end_date: Optional[str] = None,
+    _retry: int = 0,
 ) -> Optional[List[Dict]]:
     """Fetch raw OHLCV values from TwelveData REST API (stdlib only)."""
     if not api_key:
         return None
-    params = urllib.parse.urlencode({
+    query = {
         "symbol":     symbol,
         "interval":   interval,
         "outputsize": outputsize,
         "apikey":     api_key,
         "format":     "JSON",
-    })
+    }
+    if end_date:
+        query["end_date"] = end_date
+    params = urllib.parse.urlencode(query)
     url = f"{TWELVEDATA_BASE_URL}?{params}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "GoldBacktest/2.0"})
@@ -355,6 +377,10 @@ def _fetch_raw(
         if "values" not in data:
             msg = data.get("message", data.get("status", "unknown"))
             print(f"    ✗ TwelveData [{symbol}/{interval}]: {msg}", flush=True)
+            if _retry < 2 and "credits" in str(msg).lower():
+                print("      (per-minute credit limit — waiting 62s and retrying)", flush=True)
+                time.sleep(62)
+                return _fetch_raw(symbol, interval, outputsize, api_key, end_date, _retry + 1)
             return None
         return data["values"]
     except urllib.error.HTTPError as exc:
@@ -397,6 +423,48 @@ def _raw_to_df(raw_values: List[Dict]) -> pd.DataFrame:
     return df
 
 
+def _fetch_paged(
+    symbol: str,
+    interval: str,
+    total: int,
+    api_key: str,
+    sleep_s: float = 1.2,
+) -> Optional[List[Dict]]:
+    """Fetch up to *total* candles, newest first, paging backwards with end_date."""
+    out: List[Dict] = []
+    seen = set()
+    end_date: Optional[str] = None
+    while len(out) < total:
+        size = min(_TD_PAGE_SIZE, total - len(out))
+        raw = _fetch_raw(symbol, interval, size, api_key, end_date=end_date)
+        if not raw:
+            break
+        new = [v for v in raw if v.get("datetime") not in seen]
+        if not new:
+            break
+        for v in new:
+            seen.add(v.get("datetime"))
+        out.extend(new)
+        if len(raw) < size:
+            break                      # reached the start of the history
+        end_date = raw[-1]["datetime"]  # oldest candle of this page
+        time.sleep(sleep_s)
+    return out or None
+
+
+def _tf_size(tf: str, n_4h: int) -> int:
+    """Candles to request for one timeframe so it covers the 4H span."""
+    if n_4h <= 1000:                   # default run: unchanged behaviour
+        return min(n_4h, 200) if tf == TF_WEEKLY else n_4h
+    if tf == TF_4H:
+        return n_4h
+    if tf == TF_1H:
+        return n_4h * 4
+    if tf == TF_DAILY:
+        return max(1000, n_4h // 5 + 100)
+    return 200
+
+
 def fetch_all_timeframes(
     symbol_td: str,
     api_key: str,
@@ -410,10 +478,9 @@ def fetch_all_timeframes(
     """
     result: Dict[str, Optional[pd.DataFrame]] = {}
     for tf in [TF_4H, TF_1H, TF_DAILY, TF_WEEKLY]:
-        # Weekly needs fewer candles
-        size = min(outputsize, 200) if tf == TF_WEEKLY else outputsize
+        size = _tf_size(tf, outputsize)
         print(f"    → Fetching {size} {tf} candles for {symbol_td} …", flush=True)
-        raw = _fetch_raw(symbol_td, tf, size, api_key)
+        raw = _fetch_paged(symbol_td, tf, size, api_key, rate_limit_sleep)
         if raw:
             df = _raw_to_df(raw)
             if len(df) > 0:
@@ -451,7 +518,7 @@ def fetch_correlation_assets(
     for short_name in CORRELATION_ASSETS:
         td_symbol = _CORR_SYMBOL_MAP[short_name]
         print(f"    → Fetching {outputsize} {TF_4H} candles for {td_symbol} …", flush=True)
-        raw = _fetch_raw(td_symbol, TF_4H, outputsize, api_key)
+        raw = _fetch_paged(td_symbol, TF_4H, outputsize, api_key, rate_limit_sleep)
         if raw:
             df = _raw_to_df(raw)
             if len(df) > 0:
@@ -798,6 +865,9 @@ def _get_bar_close_time(bar_open: datetime, timeframe: str) -> datetime:
     return bar_open + timedelta(minutes=duration_min)
 
 
+_CLOSE_TIME_CACHE: Dict[Tuple[int, str], Tuple[Any, List[datetime]]] = {}
+
+
 def _slice_mtf_df(
     df: Optional[pd.DataFrame],
     timeframe: str,
@@ -825,10 +895,17 @@ def _slice_mtf_df(
     """
     if df is None or df.empty:
         return None
-    mask = df["datetime"].apply(
-        lambda dt: _get_bar_close_time(dt, timeframe)
-    ) <= current_4h_close
-    sub = df[mask].tail(window)
+    # Close times are computed once per DataFrame (bars are sorted by open time,
+    # so close times are ascending) and located with a binary search. This is
+    # the same selection as filtering on close_time <= current_4h_close, but
+    # fast enough for multi-year runs.
+    cached = _CLOSE_TIME_CACHE.get((id(df), timeframe))
+    if cached is None or cached[0] is not df:
+        closes = [_get_bar_close_time(dt, timeframe) for dt in df["datetime"]]
+        cached = (df, closes)
+        _CLOSE_TIME_CACHE[(id(df), timeframe)] = cached
+    n = bisect.bisect_right(cached[1], current_4h_close)
+    sub = df.iloc[max(0, n - window):n]
     return sub if len(sub) >= 30 else None
 
 
@@ -1142,6 +1219,26 @@ async def _run_walkforward(
     result.random_is  = _compute_split_stats(random_trades_is,    ACCOUNT_BALANCE, "random-in-sample")
     result.random_oos = _compute_split_stats(random_trades_oos,   ACCOUNT_BALANCE, "random-out-of-sample")
 
+    if ROLLING_FOLDS >= 2:
+        all_s = strategy_trades_is + strategy_trades_oos
+        all_r = random_trades_is + random_trades_oos
+        lo, hi = WARMUP_CANDLES, n_4h - TIMEOUT_CANDLES
+        span = (hi - lo) / ROLLING_FOLDS
+        for k in range(ROLLING_FOLDS):
+            a = lo + int(k * span)
+            b = hi + 1 if k == ROLLING_FOLDS - 1 else lo + int((k + 1) * span)
+            ss = _compute_split_stats([t for t in all_s if a <= t.candle_idx < b], ACCOUNT_BALANCE, f"fold{k+1}")
+            rs = _compute_split_stats([t for t in all_r if a <= t.candle_idx < b], ACCOUNT_BALANCE, f"rand-fold{k+1}")
+            result.folds.append({
+                "fold":     k + 1,
+                "start":    df_4h_full["datetime"].iloc[a].strftime("%Y-%m-%d"),
+                "end":      df_4h_full["datetime"].iloc[min(b, n_4h) - 1].strftime("%Y-%m-%d"),
+                "trades":   ss.total_trades,
+                "ret":      ss.return_pct,
+                "pf":       ss.profit_factor,
+                "rand_ret": rs.return_pct,
+            })
+
     return result
 
 
@@ -1347,6 +1444,43 @@ def print_combined_summary(results: List[PairResult]) -> None:
     else:
         verdict = "❌ NO EDGE — PRODUCTION SIGNAL DOES NOT BEAT RANDOM BASELINE"
     print(f"  VERDICT: {verdict}")
+    print(f"{_SEP2}\n")
+
+
+_MIN_FOLD_TRADES = 10
+
+
+def print_rolling_folds(results: List[PairResult], mode: str) -> None:
+    """Per-window results and a robustness verdict (only when BACKTEST_FOLDS >= 2)."""
+    if not any(r.folds for r in results):
+        return
+    print(f"\n{_SEP2}")
+    print(f"  ROLLING WINDOWS — mode={mode}  ({ROLLING_FOLDS} equal time windows per pair)")
+    print(f"{_SEP2}")
+    valid = profitable = beat = 0
+    for r in results:
+        print(f"\n  {r.pair}")
+        print(f"  {'#':>2} {'period':<23} {'trades':>6} {'return':>8} {'PF':>6}  {'random':>8}")
+        for f in r.folds:
+            ok = f["trades"] >= _MIN_FOLD_TRADES
+            mark = "" if ok else "  (too few trades)"
+            print(f"  {f['fold']:>2} {f['start']} → {f['end']} {f['trades']:>6} "
+                  f"{f['ret']:>+7.2f}% {_pf_str(f['pf']):>6}  {f['rand_ret']:>+7.2f}%{mark}")
+            if ok:
+                valid += 1
+                profitable += f["ret"] > 0
+                beat += f["ret"] > f["rand_ret"]
+    print(f"\n  {'─'*72}")
+    print(f"  Windows with >= {_MIN_FOLD_TRADES} trades: {valid}")
+    if valid:
+        print(f"  Profitable windows: {profitable}/{valid}   |   Beat random: {beat}/{valid}")
+    if valid < 6:
+        verdict = "⚠️  TOO FEW TRADES TO JUDGE — NOT ENOUGH EVIDENCE EITHER WAY"
+    elif profitable / valid >= 0.6 and beat / valid >= 0.7:
+        verdict = "✅ ROBUST — PROFITABLE AND AHEAD OF RANDOM IN MOST WINDOWS"
+    else:
+        verdict = "❌ NOT ROBUST — DOES NOT HOLD UP ACROSS TIME WINDOWS"
+    print(f"  ROBUSTNESS VERDICT: {verdict}")
     print(f"{_SEP2}\n")
 
 
@@ -1727,6 +1861,7 @@ async def _main_async() -> None:
 
         if len(results) >= 2:
             print_combined_summary(results)
+        print_rolling_folds(results, mode)
 
     if not any(mode_results.values()):
         print("\n❌ No pairs completed successfully.", flush=True)

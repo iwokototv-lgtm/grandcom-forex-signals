@@ -31,7 +31,8 @@ _SCRIPTS = {
     "production": "backtest_production_signal.py",
 }
 _STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "all"}
-_TIMEOUT_SECONDS = 20 * 60
+_TIMEOUT_SECONDS = 20 * 60          # default; longer runs get more, see _timeout_for()
+_MAX_CANDLES = 6000                 # about 4 years of 4H candles
 _MAX_OUTPUT = 100_000
 _MAX_JOBS = 20
 
@@ -43,6 +44,16 @@ class RunRequest(BaseModel):
     type: str
     # Only used by the "production" backtest (sets STRATEGY_MODE for the script).
     strategy_mode: Optional[str] = None
+    # Optional, "production" only: how many 4H candles to test (default 1000 =
+    # about 8 months; max 6000) and how many equal time windows to report.
+    candles: Optional[int] = None
+    folds: Optional[int] = None
+
+
+def _timeout_for(candles: Optional[int]) -> int:
+    if not candles or candles <= 1000:
+        return _TIMEOUT_SECONDS
+    return _TIMEOUT_SECONDS + int(candles / 1000 * 10 * 60)
 
 
 def _check_token(token: Optional[str]) -> None:
@@ -53,7 +64,8 @@ def _check_token(token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _run_job(job_id: str, script: str, strategy_mode: Optional[str]) -> None:
+async def _run_job(job_id: str, script: str, strategy_mode: Optional[str],
+                   extra_env: Dict[str, str], timeout: int) -> None:
     global _running
     job = _jobs[job_id]
     env = {k: v for k, v in os.environ.items() if k not in ("MONGO_URL", "BACKTEST_TOKEN")}
@@ -63,6 +75,7 @@ async def _run_job(job_id: str, script: str, strategy_mode: Optional[str]) -> No
     env["PYTHONUNBUFFERED"] = "1"
     if strategy_mode:
         env["STRATEGY_MODE"] = strategy_mode
+    env.update(extra_env)
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, script,
@@ -70,7 +83,7 @@ async def _run_job(job_id: str, script: str, strategy_mode: Optional[str]) -> No
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_SECONDS)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             job["output"] = out.decode("utf-8", "replace")[-_MAX_OUTPUT:]
             job["exit_code"] = proc.returncode
             job["status"] = "done" if proc.returncode == 0 else "failed"
@@ -79,7 +92,7 @@ async def _run_job(job_id: str, script: str, strategy_mode: Optional[str]) -> No
         except asyncio.TimeoutError:
             proc.kill()
             job["status"] = "failed"
-            job["error"] = f"Timed out after {_TIMEOUT_SECONDS // 60} minutes"
+            job["error"] = f"Timed out after {timeout // 60} minutes"
     except Exception as exc:  # noqa: BLE001
         job["status"] = "failed"
         job["error"] = str(exc)
@@ -101,6 +114,18 @@ async def run_backtest(req: RunRequest, x_backtest_token: Optional[str] = Header
             status_code=400,
             detail=f"strategy_mode applies to type 'production' only; one of: {', '.join(sorted(_STRATEGY_MODES))}",
         )
+    extra_env: Dict[str, str] = {}
+    if req.candles is not None or req.folds is not None:
+        if req.type != "production":
+            raise HTTPException(status_code=400, detail="candles/folds apply to type 'production' only")
+        if req.candles is not None:
+            if not 300 <= req.candles <= _MAX_CANDLES:
+                raise HTTPException(status_code=400, detail=f"candles must be between 300 and {_MAX_CANDLES}")
+            extra_env["BACKTEST_CANDLES"] = str(req.candles)
+        if req.folds is not None:
+            if not 0 <= req.folds <= 12:
+                raise HTTPException(status_code=400, detail="folds must be between 0 and 12")
+            extra_env["BACKTEST_FOLDS"] = str(req.folds)
     if _running is not None:
         raise HTTPException(status_code=409, detail=f"A backtest is already running (job {_running})")
 
@@ -109,11 +134,12 @@ async def run_backtest(req: RunRequest, x_backtest_token: Optional[str] = Header
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {
-        "job_id": job_id, "type": req.type, "strategy_mode": mode, "status": "running",
+        "job_id": job_id, "type": req.type, "strategy_mode": mode, "candles": req.candles, "folds": req.folds,
+        "status": "running",
         "started_at": time.time(), "output": "",
     }
     _running = job_id
-    asyncio.create_task(_run_job(job_id, script, mode))
+    asyncio.create_task(_run_job(job_id, script, mode, extra_env, _timeout_for(req.candles)))
     return {"job_id": job_id, "status": "running"}
 
 
