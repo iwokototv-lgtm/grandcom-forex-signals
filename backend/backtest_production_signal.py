@@ -244,6 +244,7 @@ WARMUP_CANDLES        = 100     # Candles skipped at start for indicator warmup
 ROLLING_WINDOW_4H     = 100     # Rolling 4H window fed to generate_signal()
 ROLLING_WINDOW_DAILY  = 100     # Rolling daily window fed to generate_signal()
 TIMEOUT_CANDLES       = 60      # Max candles before trade timeout
+TRAIL_ATR_MULT        = _env_float("BT_TRAIL_ATR") or 1.0   # Trailing-stop distance (multiples of ATR)
 BE_ACTIVATION_R       = _env_float("BT_BE_R") or 0.5   # Breakeven trigger (multiples of ATR)
 ACCOUNT_BALANCE       = 10_000.0
 RISK_PER_TRADE_PCT    = 1.0     # % of account risked per trade
@@ -707,14 +708,14 @@ def _simulate_trade(
                     trade.current_sl   = trade.entry_price
                     trade.ts_active    = True
 
-        # 4. Trailing stop update (1 ATR trail)
+        # 4. Trailing stop update (BT_TRAIL_ATR x ATR trail, default 1)
         if trade.ts_active and atr > 0:
             if trade.direction == "BUY":
-                new_sl = round(close - atr, 2)
+                new_sl = round(close - atr * TRAIL_ATR_MULT, 2)
                 if new_sl > trade.current_sl:
                     trade.current_sl = new_sl
             else:
-                new_sl = round(close + atr, 2)
+                new_sl = round(close + atr * TRAIL_ATR_MULT, 2)
                 if new_sl < trade.current_sl:
                     trade.current_sl = new_sl
 
@@ -1035,6 +1036,10 @@ async def _run_walkforward(
         df_4h_full["close"].astype(float).ewm(span=_trend_ema_n, adjust=False).mean()
         if _trend_ema_n > 0 else None
     )
+    # Optional volatility filter: skip signals when ATR is below BT_VOL_MIN x its
+    # rolling 100-candle mean (quiet markets).
+    _vol_min = _env_float("BT_VOL_MIN") or 0.0
+    atr_mean100 = atr_series.rolling(100, min_periods=50).mean() if _vol_min > 0 else None
     last_exit_idx = -1                      # BT_ONE_AT_A_TIME gating
     dt_index = pd.Index(df_4h_full["datetime"])
 
@@ -1212,6 +1217,13 @@ async def _run_walkforward(
             _c = float(df_4h_full["close"].iloc[idx])
             _e = float(trend_ema.iloc[idx])
             if (signal == "BUY" and _c <= _e) or (signal == "SELL" and _c >= _e):
+                signal = "NEUTRAL"
+
+        # ── Volatility filter (optional) ─────────────────────────────────────
+        if atr_mean100 is not None and signal in ("BUY", "SELL"):
+            _m = atr_mean100.iloc[idx]
+            _a = atr_series.iloc[idx]
+            if pd.notna(_m) and pd.notna(_a) and _m > 0 and (_a / _m) < _vol_min:
                 signal = "NEUTRAL"
 
         # ── Confidence filter ────────────────────────────────────────────────
