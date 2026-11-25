@@ -193,6 +193,8 @@ _VALID_STRATEGY_MODES: frozenset = frozenset({
     "macro_filtered",
     "consensus",
     "trend_breakout",
+    "ma_adx",
+    "pullback",
     "all",
 })
 
@@ -220,6 +222,8 @@ _MODE_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
     "macro_filtered": 60.0,
     "consensus":      62.0,
     "trend_breakout": 50.0,
+    "ma_adx":         50.0,
+    "pullback":       50.0,
 }
 
 
@@ -1030,6 +1034,12 @@ async def _run_walkforward(
             lookback=int(_env_float("BT_BREAKOUT_N") or 20),
             ema_period=int(_env_float("BT_EMA") or 100),
         )
+    elif strategy_mode == "ma_adx":
+        from ml_engine.research_strategies import ma_adx_series
+        tb_signals = ma_adx_series(df_4h_full)
+    elif strategy_mode == "pullback":
+        from ml_engine.research_strategies import pullback_series
+        tb_signals = pullback_series(df_4h_full)
     # Optional trend filter: only trade in the direction of the EMA (BT_TREND_EMA = period)
     _trend_ema_n = int(_env_float("BT_TREND_EMA") or 0)
     trend_ema = (
@@ -1109,7 +1119,7 @@ async def _run_walkforward(
         _price_data_arg = price_data if len(price_data) >= 2 else None
 
         # ── Call production signal ───────────────────────────────────────────
-        if strategy_mode == "trend_breakout":
+        if strategy_mode in ("trend_breakout", "ma_adx", "pullback"):
             # Research candidate: precomputed, no lookahead (see ml_engine/trend_breakout.py)
             _tb = tb_signals.iloc[idx]
             signal_result = {
@@ -1846,8 +1856,8 @@ async def _main_async() -> None:
         run_modes = ["consensus"]
     elif STRATEGY_MODE == "original":
         run_modes = ["original"]
-    elif STRATEGY_MODE == "trend_breakout":
-        run_modes = ["trend_breakout"]
+    elif STRATEGY_MODE in ("trend_breakout", "ma_adx", "pullback"):
+        run_modes = [STRATEGY_MODE]
     else:
         # Should never reach here because the module-level guard already
         # defaulted unrecognised values to "mean_reversion", but be explicit.
