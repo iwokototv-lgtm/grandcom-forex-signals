@@ -20,8 +20,8 @@ class FakeDB:
     def __init__(self): self.gold_signals = FakeColl()
 
 
-def _frame(closed_minutes_ago=2):
-    n = 300
+def _frame(closed_minutes_ago=2, n=300):
+    n = n
     last_open = datetime.now(timezone.utc) - timedelta(hours=4, minutes=closed_minutes_ago)
     t = [last_open - timedelta(hours=4 * (n - 1 - i)) for i in range(n)]
     c = np.concatenate([np.linspace(2000, 2300, n - 1), [2400.0]])
@@ -33,7 +33,7 @@ def _frame(closed_minutes_ago=2):
     return pd.concat([df, forming], ignore_index=True)
 
 
-def _run(monkeypatch, frame):
+def _run(monkeypatch, frame, strategies=("trend_breakout",)):
     db = FakeDB(); sent = []
     async def fetch(*a, **k): return frame.copy()
     async def send(*a, **k): sent.append((a, k)); return True
@@ -44,7 +44,9 @@ def _run(monkeypatch, frame):
     monkeypatch.setattr(gs, "get_db", lambda: db)
     monkeypatch.setattr(gs._calendar_filter, "is_blackout_period", no_blackout)
     monkeypatch.setattr(gs._risk_manager, "enforce_risk_limits", risk_ok)
-    asyncio.run(gs.generate_trend_breakout_signal("XAUUSD"))
+    monkeypatch.setattr(gs, "TB_ACTIVE", list(strategies))
+    for name in strategies:
+        asyncio.run(gs.generate_trend_breakout_signal("XAUUSD", name))
     return db, sent
 
 
@@ -77,3 +79,21 @@ def test_future_timestamps_not_signalled(monkeypatch):
     frame = _frame(closed_minutes_ago=-600)
     db, sent = _run(monkeypatch, frame)
     assert sent == [] and db.gold_signals.docs == []
+
+
+def test_slow_variant_signals_with_its_own_label(monkeypatch):
+    db, sent = _run(monkeypatch, _frame(n=450), strategies=("trend_breakout_slow",))
+    assert len(sent) == 1
+    assert db.gold_signals.docs[0]["strategy"] == "trend_breakout_slow"
+    assert sent[0][1]["strategy_label"] == "Trend breakout 120 (4H)"
+
+
+def test_two_variants_never_open_two_trades_on_one_pair(monkeypatch):
+    db, sent = _run(monkeypatch, _frame(n=450), strategies=("trend_breakout", "trend_breakout_slow"))
+    assert len(sent) == 1 and len(db.gold_signals.docs) == 1
+    assert db.gold_signals.docs[0]["strategy"] == "trend_breakout"
+
+
+def test_live_strategy_list_parsing():
+    assert gs.TB_VARIANTS["trend_breakout_slow"] == (120, 300)
+    assert gs.TB_ACTIVE == ["trend_breakout"] or gs.TB_ACTIVE == []

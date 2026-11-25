@@ -95,6 +95,17 @@ def _signals_paused() -> bool:
 LIVE_STRATEGY = os.environ.get("LIVE_STRATEGY", "trend_breakout").strip().lower()
 TB_BREAKOUT_N = int(os.environ.get("TB_BREAKOUT_N", "55"))
 TB_EMA = int(os.environ.get("TB_EMA", "100"))
+# Second, slower breakout (walk-forward robust: 11/12 windows profitable). Enable it with
+# LIVE_STRATEGY="trend_breakout,trend_breakout_slow".
+TB2_BREAKOUT_N = int(os.environ.get("TB2_BREAKOUT_N", "120"))
+TB2_EMA = int(os.environ.get("TB2_EMA", "300"))
+TB_VARIANTS = {
+    "trend_breakout": (TB_BREAKOUT_N, TB_EMA),
+    "trend_breakout_slow": (TB2_BREAKOUT_N, TB2_EMA),
+}
+# LIVE_STRATEGY is a comma list; trend breakout variants run in the order listed.
+TB_ACTIVE = [x.strip() for x in LIVE_STRATEGY.split(",") if x.strip() in TB_VARIANTS]
+TB_LIVE = bool(TB_ACTIVE)
 TB_MAX_SIGNAL_AGE_MIN = int(os.environ.get("TB_MAX_SIGNAL_AGE_MIN", "30"))
 # Exits in ATR multiples (stop 2, targets 2/4/6), as backtested.
 TB_LEVELS = {"atr_sl": 2.0, "atr_tp1": 2.0, "atr_tp2": 4.0, "atr_tp3": 6.0}
@@ -956,7 +967,7 @@ async def close_all_positions(reason: str = "SYSTEM") -> dict:
 # ---------------------------------------------------------------------------
 # Core Signal Generation
 # ---------------------------------------------------------------------------
-async def generate_trend_breakout_signal(pair: str) -> None:
+async def generate_trend_breakout_signal(pair: str, strategy: str = "trend_breakout") -> None:
     """
     Live trend_breakout cycle (the strategy validated by the walk-forward backtest).
 
@@ -967,7 +978,8 @@ async def generate_trend_breakout_signal(pair: str) -> None:
     from ml_engine.live_trend_breakout import closed_candles, latest_signal, trade_still_open
 
     cfg = PAIRS[pair]
-    logger.info(f"[{pair}] trend_breakout scan (N={TB_BREAKOUT_N}, EMA={TB_EMA})")
+    TB_BREAKOUT_N, TB_EMA = TB_VARIANTS[strategy]
+    logger.info(f"[{pair}] {strategy} scan (N={TB_BREAKOUT_N}, EMA={TB_EMA})")
 
     try:
         if await _calendar_filter.is_blackout_period(pair):
@@ -984,16 +996,16 @@ async def generate_trend_breakout_signal(pair: str) -> None:
     except Exception as exc:
         logger.warning(f"[{pair}] Risk manager check error (fail-open): {exc}")
 
-    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=300, tz="UTC")
+    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=1000, tz="UTC")
     if df is None or len(df) < max(TB_BREAKOUT_N, TB_EMA) + 5:
-        logger.error(f"[{pair}] trend_breakout: insufficient candles or API failure")
+        logger.error(f"[{pair}] {strategy}: insufficient candles or API failure")
         _signal_metrics.failed_cycles += 1
         return
 
     df = closed_candles(df)
     signal_type = latest_signal(df, TB_BREAKOUT_N, TB_EMA)
     candle_time = str(df["datetime"].iloc[-1])
-    logger.info(f"[{pair}] trend_breakout: last closed candle {candle_time} -> {signal_type}")
+    logger.info(f"[{pair}] {strategy}: last closed candle {candle_time} -> {signal_type}")
     if signal_type not in ("BUY", "SELL"):
         return
 
@@ -1004,36 +1016,38 @@ async def generate_trend_breakout_signal(pair: str) -> None:
     if age_min < -5:
         # The candle would close in the future, so the feed's clock is not UTC.
         logger.error(
-            f"[{pair}] trend_breakout: candle {candle_time} closes {-age_min:.0f} min in the future — "
+            f"[{pair}] {strategy}: candle {candle_time} closes {-age_min:.0f} min in the future — "
             f"feed timestamps are not UTC; not signalling"
         )
         return
     if age_min > TB_MAX_SIGNAL_AGE_MIN:
-        logger.info(f"[{pair}] trend_breakout: candle closed {age_min:.0f} min ago (> {TB_MAX_SIGNAL_AGE_MIN}) — stale, skipping")
+        logger.info(f"[{pair}] {strategy}: candle closed {age_min:.0f} min ago (> {TB_MAX_SIGNAL_AGE_MIN}) — stale, skipping")
         return
 
     db = get_db()
     if db is not None:
         try:
             if await db.gold_signals.find_one(
-                {"pair": pair, "strategy": "trend_breakout", "candle_time": candle_time}
+                {"pair": pair, "strategy": strategy, "candle_time": candle_time}
             ):
-                logger.info(f"[{pair}] trend_breakout: candle {candle_time} already signalled — skipping")
+                logger.info(f"[{pair}] {strategy}: candle {candle_time} already signalled — skipping")
                 return
-            last = await db.gold_signals.find_one(
-                {"pair": pair, "strategy": "trend_breakout"}, sort=[("created_at", -1)]
-            )
-            if last and trade_still_open(
-                last["type"], float(last["entry_price"]), float(last["sl_price"]),
-                float(last["tp_levels"][2]), last["candle_time"], df,
-            ):
-                logger.info(f"[{pair}] trend_breakout: previous trade still open — skipping new signal")
-                return
+            # One trade per pair across every active breakout variant.
+            for name in TB_ACTIVE or [strategy]:
+                last = await db.gold_signals.find_one(
+                    {"pair": pair, "strategy": name}, sort=[("created_at", -1)]
+                )
+                if last and trade_still_open(
+                    last["type"], float(last["entry_price"]), float(last["sl_price"]),
+                    float(last["tp_levels"][2]), last["candle_time"], df,
+                ):
+                    logger.info(f"[{pair}] {strategy}: a {name} trade is still open — skipping new signal")
+                    return
         except Exception as exc:
-            logger.error(f"[{pair}] trend_breakout state check failed ({exc}) — not signalling")
+            logger.error(f"[{pair}] {strategy} state check failed ({exc}) — not signalling")
             return
     else:
-        logger.error(f"[{pair}] trend_breakout: MongoDB not connected — cannot check open trades, not signalling")
+        logger.error(f"[{pair}] {strategy}: MongoDB not connected — cannot check open trades, not signalling")
         return
 
     ind = compute_indicators(df, cfg["decimals"])
@@ -1056,18 +1070,18 @@ async def generate_trend_breakout_signal(pair: str) -> None:
             "current_price": ind["price"], "tp_levels": tps, "sl_price": sl,
             "confidence": None, "analysis": analysis, "risk_reward": rr,
             "timeframe": "4H", "status": "ACTIVE", "indicators": ind,
-            "strategy": "trend_breakout", "candle_time": candle_time,
+            "strategy": strategy, "candle_time": candle_time,
             "system_version": "3.5.0", "created_at": datetime.now(timezone.utc),
         })
     except Exception as exc:
-        logger.error(f"[{pair}] trend_breakout: save failed ({exc}) — not sending to Telegram")
+        logger.error(f"[{pair}] {strategy}: save failed ({exc}) — not sending to Telegram")
         return
 
     sent = await send_to_telegram(
         pair, signal_type, entry, tps, sl, 0.0, rr, analysis,
         strategy_label=f"Trend breakout {TB_BREAKOUT_N} (4H)",
     )
-    logger.info(f"[{pair}] trend_breakout: {signal_type} entry={entry} sl={sl} tps={tps} telegram={sent}")
+    logger.info(f"[{pair}] {strategy}: {signal_type} entry={entry} sl={sl} tps={tps} telegram={sent}")
 
 
 async def generate_signal(pair: str) -> None:
@@ -1088,8 +1102,9 @@ async def generate_signal(pair: str) -> None:
         logger.warning(f"[{pair}] SIGNALS_PAUSED is set — skipping signal generation")
         return
 
-    if LIVE_STRATEGY == "trend_breakout":
-        await generate_trend_breakout_signal(pair)
+    if TB_LIVE:
+        for _name in TB_ACTIVE:
+            await generate_trend_breakout_signal(pair, _name)
         return
 
     cfg = PAIRS[pair]
@@ -1726,13 +1741,14 @@ async def run_signal_generation() -> None:
         logger.warning("[SIGNAL_GEN] SIGNALS_PAUSED is set — skipping market scan (no signals sent)")
         return
 
-    if LIVE_STRATEGY == "trend_breakout":
+    if TB_LIVE:
         # trend_breakout keeps its own per-candle de-duplication (candle_time in the
         # database), so it bypasses the legacy candle tracker.
         logger.info("[SIGNAL_GEN] Starting trend_breakout scan")
         for pair in PAIRS:
             try:
-                await generate_trend_breakout_signal(pair)
+                for _name in TB_ACTIVE:
+                    await generate_trend_breakout_signal(pair, _name)
             except Exception as exc:
                 logger.error(f"[SIGNAL_GEN] [{pair}] trend_breakout error: {exc}", exc_info=True)
             await asyncio.sleep(2)
@@ -2056,7 +2072,7 @@ async def lifespan(app: FastAPI):
     # trend_breakout works on the live feed's 4H grid, which closes at 00,04,08,12,16,20
     # UTC. It scans at +1, +6 and +11 minutes in case the candle is published late; the
     # per-candle de-duplication stops repeats. The legacy pipeline keeps its old times.
-    _tb_live = LIVE_STRATEGY == "trend_breakout"
+    _tb_live = TB_LIVE
     scheduler.add_job(
         run_signal_generation,
         "cron",
