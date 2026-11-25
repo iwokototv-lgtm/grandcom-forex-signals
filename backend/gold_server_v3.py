@@ -93,12 +93,12 @@ def _signals_paused() -> bool:
 # Live strategy. "trend_breakout" (default) is the 55-candle breakout that passed
 # the walk-forward backtest; set LIVE_STRATEGY=legacy to run the old hybrid logic.
 LIVE_STRATEGY = os.environ.get("LIVE_STRATEGY", "trend_breakout").strip().lower()
-TB_BREAKOUT_N = int(os.environ.get("TB_BREAKOUT_N", "55"))
-TB_EMA = int(os.environ.get("TB_EMA", "100"))
+TB_BREAKOUT_N = int(os.environ.get("TB_BREAKOUT_N", "220"))
+TB_EMA = int(os.environ.get("TB_EMA", "400"))
 # Second, slower breakout (walk-forward robust: 11/12 windows profitable). Enable it with
 # LIVE_STRATEGY="trend_breakout,trend_breakout_slow".
-TB2_BREAKOUT_N = int(os.environ.get("TB2_BREAKOUT_N", "120"))
-TB2_EMA = int(os.environ.get("TB2_EMA", "300"))
+TB2_BREAKOUT_N = int(os.environ.get("TB2_BREAKOUT_N", "480"))
+TB2_EMA = int(os.environ.get("TB2_EMA", "1200"))
 TB_VARIANTS = {
     "trend_breakout": (TB_BREAKOUT_N, TB_EMA),
     "trend_breakout_slow": (TB2_BREAKOUT_N, TB2_EMA),
@@ -996,7 +996,8 @@ async def generate_trend_breakout_signal(pair: str, strategy: str = "trend_break
     except Exception as exc:
         logger.warning(f"[{pair}] Risk manager check error (fail-open): {exc}")
 
-    df = await fetch_ohlcv_with_retry(pair, interval="4h", outputsize=1000, tz="UTC")
+    # 1H bars: 5000 bars (~7 months) so the 1200-bar EMA has converged, as in the backtest.
+    df = await fetch_ohlcv_with_retry(pair, interval="1h", outputsize=5000, tz="UTC")
     if df is None or len(df) < max(TB_BREAKOUT_N, TB_EMA) + 5:
         logger.error(f"[{pair}] {strategy}: insufficient candles or API failure")
         _signal_metrics.failed_cycles += 1
@@ -1079,7 +1080,7 @@ async def generate_trend_breakout_signal(pair: str, strategy: str = "trend_break
 
     sent = await send_to_telegram(
         pair, signal_type, entry, tps, sl, 0.0, rr, analysis,
-        strategy_label=f"Trend breakout {TB_BREAKOUT_N} (4H)",
+        strategy_label=f"Trend breakout {TB_BREAKOUT_N} (1H)",
     )
     logger.info(f"[{pair}] {strategy}: {signal_type} entry={entry} sl={sl} tps={tps} telegram={sent}")
 
@@ -2069,14 +2070,14 @@ async def lifespan(app: FastAPI):
 
     # ── Scheduler: cron-based jobs aligned to 4H candle closes ───────────────
     # Job 1 — Signal generation: cron at exact 4H candle close times (UTC)
-    # trend_breakout works on the live feed's 4H grid, which closes at 00,04,08,12,16,20
-    # UTC. It scans at +1, +6 and +11 minutes in case the candle is published late; the
+    # trend_breakout works on the live feed's 1H grid: a candle closes every hour UTC.
+    # It scans at +1, +6 and +11 minutes in case the candle is published late; the
     # per-candle de-duplication stops repeats. The legacy pipeline keeps its old times.
     _tb_live = TB_LIVE
     scheduler.add_job(
         run_signal_generation,
         "cron",
-        hour="0,4,8,12,16,20" if _tb_live else "3,7,11,15,19,23",
+        hour="*" if _tb_live else "3,7,11,15,19,23",
         minute="1,6,11" if _tb_live else 0,
         second=0 if _tb_live else 5,
         id="signal_generation_cron",

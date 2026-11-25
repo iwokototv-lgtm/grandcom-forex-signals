@@ -12,9 +12,9 @@ import pandas as pd
 
 from ml_engine.trend_breakout import trend_breakout_series
 
-CANDLE_HOURS = 4
+CANDLE_HOURS = 1
 # Matches the backtest: a trade that has not hit a target or stop after this
-# many 4H candles is treated as finished.
+# many 1H candles is treated as finished.
 TIMEOUT_CANDLES = 60
 
 
