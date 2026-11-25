@@ -8,7 +8,7 @@ from ml_engine.live_trend_breakout import closed_candles, latest_signal, trade_s
 
 def _df(closes, start="2025-01-01 00:00:00", spread=1.0):
     n = len(closes)
-    t = pd.date_range(start, periods=n, freq="4h")
+    t = pd.date_range(start, periods=n, freq="1h")
     c = np.array(closes, dtype=float)
     return pd.DataFrame({"datetime": t.strftime("%Y-%m-%d %H:%M:%S"), "open": c,
                          "close": c, "high": c + spread, "low": c - spread})
@@ -16,10 +16,10 @@ def _df(closes, start="2025-01-01 00:00:00", spread=1.0):
 
 def test_forming_candle_is_dropped():
     df = _df([1, 2, 3, 4], start="2025-01-01 00:00:00")
-    # last candle opens 12:00, now is 12:00:05 -> still forming
-    now = datetime(2025, 1, 1, 12, 0, 5, tzinfo=timezone.utc)
+    # last candle opens 03:00 (1H), now is 03:00:05 -> still forming
+    now = datetime(2025, 1, 1, 3, 0, 5, tzinfo=timezone.utc)
     assert len(closed_candles(df, now)) == 3
-    now = datetime(2025, 1, 1, 16, 0, 5, tzinfo=timezone.utc)
+    now = datetime(2025, 1, 1, 4, 0, 5, tzinfo=timezone.utc)
     assert len(closed_candles(df, now)) == 4
 
 

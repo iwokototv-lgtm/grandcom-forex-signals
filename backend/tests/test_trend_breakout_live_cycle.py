@@ -20,16 +20,16 @@ class FakeDB:
     def __init__(self): self.gold_signals = FakeColl()
 
 
-def _frame(closed_minutes_ago=2, n=300):
+def _frame(closed_minutes_ago=2, n=1500):
     n = n
-    last_open = datetime.now(timezone.utc) - timedelta(hours=4, minutes=closed_minutes_ago)
-    t = [last_open - timedelta(hours=4 * (n - 1 - i)) for i in range(n)]
+    last_open = datetime.now(timezone.utc) - timedelta(hours=1, minutes=closed_minutes_ago)
+    t = [last_open - timedelta(hours=1 * (n - 1 - i)) for i in range(n)]
     c = np.concatenate([np.linspace(2000, 2300, n - 1), [2400.0]])
     df = pd.DataFrame({"datetime": [x.strftime("%Y-%m-%d %H:%M:%S") for x in t],
                        "open": c, "close": c, "high": c + 3, "low": c - 3})
     # forming candle on the end
     forming = df.iloc[-1:].copy()
-    forming["datetime"] = (last_open + timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
+    forming["datetime"] = (last_open + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     return pd.concat([df, forming], ignore_index=True)
 
 
@@ -82,18 +82,18 @@ def test_future_timestamps_not_signalled(monkeypatch):
 
 
 def test_slow_variant_signals_with_its_own_label(monkeypatch):
-    db, sent = _run(monkeypatch, _frame(n=450), strategies=("trend_breakout_slow",))
+    db, sent = _run(monkeypatch, _frame(n=1500), strategies=("trend_breakout_slow",))
     assert len(sent) == 1
     assert db.gold_signals.docs[0]["strategy"] == "trend_breakout_slow"
-    assert sent[0][1]["strategy_label"] == "Trend breakout 120 (4H)"
+    assert sent[0][1]["strategy_label"] == "Trend breakout 480 (1H)"
 
 
 def test_two_variants_never_open_two_trades_on_one_pair(monkeypatch):
-    db, sent = _run(monkeypatch, _frame(n=450), strategies=("trend_breakout", "trend_breakout_slow"))
+    db, sent = _run(monkeypatch, _frame(n=1500), strategies=("trend_breakout", "trend_breakout_slow"))
     assert len(sent) == 1 and len(db.gold_signals.docs) == 1
     assert db.gold_signals.docs[0]["strategy"] == "trend_breakout"
 
 
 def test_live_strategy_list_parsing():
-    assert gs.TB_VARIANTS["trend_breakout_slow"] == (120, 300)
+    assert gs.TB_VARIANTS["trend_breakout_slow"] == (480, 1200)
     assert gs.TB_ACTIVE == ["trend_breakout"] or gs.TB_ACTIVE == []
