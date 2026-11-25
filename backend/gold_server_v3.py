@@ -106,6 +106,8 @@ TB_VARIANTS = {
 # LIVE_STRATEGY is a comma list; trend breakout variants run in the order listed.
 TB_ACTIVE = [x.strip() for x in LIVE_STRATEGY.split(",") if x.strip() in TB_VARIANTS]
 TB_LIVE = bool(TB_ACTIVE)
+# Schedule text shown in the startup log and /api/health; must match the cron in the scheduler setup.
+SIGNAL_GEN_SCHEDULE = "cron(hourly :01 :06 :11 UTC)" if TB_LIVE else "cron(03,07,11,15,19,23:00:05 UTC)"
 TB_MAX_SIGNAL_AGE_MIN = int(os.environ.get("TB_MAX_SIGNAL_AGE_MIN", "30"))
 # Exits in ATR multiples (stop 2, targets 2/4/6), as backtested.
 TB_LEVELS = {"atr_sl": 2.0, "atr_tp1": 2.0, "atr_tp2": 4.0, "atr_tp3": 6.0}
@@ -2107,7 +2109,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info(
         f"✅ Scheduler started — pairs={list(PAIRS.keys())} | "
-        f"signal_generation=cron(03,07,11,15,19,23:00:05 UTC) | "
+        f"signal_generation={SIGNAL_GEN_SCHEDULE} | "
         f"position_monitoring=cron(03,07,11,15,19,23:30:00 UTC) | "
         f"validation=5min"
     )
@@ -2193,7 +2195,7 @@ async def health():
 
     # Build enriched job list with schedule labels
     _schedule_labels = {
-        "signal_generation_cron": "cron(03,07,11,15,19,23:00:05 UTC)",
+        "signal_generation_cron": SIGNAL_GEN_SCHEDULE,
         "position_monitoring_cron": "cron(03,07,11,15,19,23:30:00 UTC)",
         "validation_cycle_5min": "interval(5 minutes)",
     }
@@ -2216,7 +2218,7 @@ async def health():
         "telegram_channel":  TELEGRAM_CHANNEL_ID,
         "scheduler_running": scheduler.running,
         "scheduler_jobs":    jobs,
-        "signal_generation_schedule": "cron(03,07,11,15,19,23:00:05 UTC)",
+        "signal_generation_schedule": SIGNAL_GEN_SCHEDULE,
         "position_monitoring_schedule": "cron(03,07,11,15,19,23:30:00 UTC)",
         "mongo_connected":   mongo_ok,
         "system_components": system_status.get("total_components", 0),
