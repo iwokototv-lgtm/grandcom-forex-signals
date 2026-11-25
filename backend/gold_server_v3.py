@@ -92,7 +92,7 @@ def _signals_paused() -> bool:
 
 # Live strategy. "trend_breakout" (default) is the 55-candle breakout that passed
 # the walk-forward backtest; set LIVE_STRATEGY=legacy to run the old hybrid logic.
-LIVE_STRATEGY = os.environ.get("LIVE_STRATEGY", "trend_breakout").strip().lower()
+LIVE_STRATEGY = os.environ.get("LIVE_STRATEGY", "trend_breakout,trend_breakout_slow").strip().lower()
 TB_BREAKOUT_N = int(os.environ.get("TB_BREAKOUT_N", "220"))
 TB_EMA = int(os.environ.get("TB_EMA", "400"))
 # Second, slower breakout (walk-forward robust: 11/12 windows profitable). Enable it with

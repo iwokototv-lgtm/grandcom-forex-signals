@@ -96,4 +96,4 @@ def test_two_variants_never_open_two_trades_on_one_pair(monkeypatch):
 
 def test_live_strategy_list_parsing():
     assert gs.TB_VARIANTS["trend_breakout_slow"] == (480, 1200)
-    assert gs.TB_ACTIVE == ["trend_breakout"] or gs.TB_ACTIVE == []
+    assert gs.TB_ACTIVE == ["trend_breakout", "trend_breakout_slow"] or gs.TB_ACTIVE == []
