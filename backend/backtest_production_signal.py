@@ -988,6 +988,11 @@ async def _run_walkforward(
     """
     df_4h_full    = tfs.get(TF_4H)
     df_1h_full    = tfs.get(TF_1H)
+    # Backtest-only: BT_PRIMARY_TF=1h runs the whole walk-forward on H1 bars.
+    # Indicators, exits and the bar-close lookup all follow the primary frame.
+    primary_tf    = TF_1H if os.environ.get("BT_PRIMARY_TF", "").strip().lower() == "1h" else TF_4H
+    if primary_tf == TF_1H and df_1h_full is not None:
+        df_4h_full = df_1h_full
     df_daily_full = tfs.get(TF_DAILY)
     df_weekly_full= tfs.get(TF_WEEKLY)
 
@@ -1076,7 +1081,7 @@ async def _run_walkforward(
         # Close time of the current 4H bar — the anchor for all MTF slices.
         # Only bars whose close time <= current_4h_close are considered fully
         # closed and therefore safe to use (strict no-lookahead guarantee).
-        current_4h_close = _get_bar_close_time(current_dt, TF_4H)
+        current_4h_close = _get_bar_close_time(current_dt, primary_tf)
 
         # ── Build rolling windows ────────────────────────────────────────────
         df_4h_window    = df_4h_full.iloc[max(0, idx - ROLLING_WINDOW_4H + 1): idx + 1].copy()
