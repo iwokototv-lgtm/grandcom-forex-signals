@@ -1037,6 +1037,7 @@ async def _run_walkforward(
             df_4h_full,
             lookback=int(_env_float("BT_BREAKOUT_N") or 20),
             ema_period=int(_env_float("BT_EMA") or 100),
+            buffer_atr=float(_env_float("BT_BREAKOUT_BUFFER_ATR") or 0.0),
         )
     elif strategy_mode == "ma_adx":
         from ml_engine.research_strategies import ma_adx_series
