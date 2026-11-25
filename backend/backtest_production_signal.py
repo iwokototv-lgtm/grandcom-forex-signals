@@ -1029,6 +1029,12 @@ async def _run_walkforward(
             lookback=int(_env_float("BT_BREAKOUT_N") or 20),
             ema_period=int(_env_float("BT_EMA") or 100),
         )
+    # Optional trend filter: only trade in the direction of the EMA (BT_TREND_EMA = period)
+    _trend_ema_n = int(_env_float("BT_TREND_EMA") or 0)
+    trend_ema = (
+        df_4h_full["close"].astype(float).ewm(span=_trend_ema_n, adjust=False).mean()
+        if _trend_ema_n > 0 else None
+    )
     last_exit_idx = -1                      # BT_ONE_AT_A_TIME gating
     dt_index = pd.Index(df_4h_full["datetime"])
 
@@ -1200,6 +1206,13 @@ async def _run_walkforward(
                     f"  [REJECTED idx={idx}] {_rejection}  {_vote_str}",
                     flush=True,
                 )
+
+        # ── Trend filter (optional) ──────────────────────────────────────────
+        if trend_ema is not None and signal in ("BUY", "SELL"):
+            _c = float(df_4h_full["close"].iloc[idx])
+            _e = float(trend_ema.iloc[idx])
+            if (signal == "BUY" and _c <= _e) or (signal == "SELL" and _c >= _e):
+                signal = "NEUTRAL"
 
         # ── Confidence filter ────────────────────────────────────────────────
         if signal not in ("BUY", "SELL") or confidence < confidence_threshold:
