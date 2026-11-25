@@ -2140,8 +2140,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Startup validation error (non-fatal): {exc}")
 
-    # Run an immediate signal generation cycle on startup
-    asyncio.create_task(run_signal_generation())
+    # Startup scan is OFF by default: a restart must never post a signal.
+    # Scheduled cron scans still run. Set STARTUP_SIGNAL_SCAN=true to re-enable.
+    if os.environ.get("STARTUP_SIGNAL_SCAN", "false").strip().lower() in ("1", "true", "yes", "on"):
+        asyncio.create_task(run_signal_generation())
+    else:
+        logger.info("Startup signal scan disabled (STARTUP_SIGNAL_SCAN not set) — next scan is the scheduled cron")
 
     yield
 
