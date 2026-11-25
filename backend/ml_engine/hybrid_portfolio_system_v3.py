@@ -76,9 +76,10 @@ MIN_SMC_SCORE         = int(os.environ.get("MIN_SMC_SCORE", "0"))
 # HONEST_CONFIDENCE=true: confirmation filters no longer add points or force
 # confidence up to 95%+. The final confidence is the weighted consensus score
 # (0-100) and the filters only veto (a failed filter caps it at 85%, and fewer
-# than 2 passed filters still downgrade the signal to NEUTRAL). Default off, so
-# behaviour is unchanged until it is set.
-HONEST_CONFIDENCE = os.environ.get("HONEST_CONFIDENCE", "false").strip().lower() in ("1", "true", "yes", "on")
+# than 2 passed filters still downgrade the signal to NEUTRAL). Default on: the
+# shown confidence is no longer inflated to 95-99% by default filter values.
+# Signal trigger (filters_passed >= 2) is identical in both modes.
+HONEST_CONFIDENCE = os.environ.get("HONEST_CONFIDENCE", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # Minimum final confidence required to send a signal (after filters)
 MIN_CONFIDENCE_FOR_SIGNAL = float(os.environ.get("MIN_CONFIDENCE_FOR_SIGNAL", "90.0"))
