@@ -41,7 +41,7 @@ _ALLOWED_PARAMS = {
     "BT_ONE_AT_A_TIME", "BT_CONF_THRESHOLD", "HONEST_CONFIDENCE",
     "BT_BREAKOUT_N", "BT_EMA", "BT_BREAKOUT_BUFFER_ATR", "BT_TREND_EMA", "BT_TRAIL_ATR", "BT_VOL_MIN", "MIN_MTF_ALIGNMENT_PCT", "MIN_SMC_SCORE", "CONSENSUS_THRESHOLD",
 }
-_PARAM_VALUE = re.compile(r"^(true|false|\d{1,4}(\.\d{1,4})?)$")                 # about 4 years of 4H candles
+_PARAM_VALUE = re.compile(r"^(true|false|\d{1,4}(\.\d{1,4})?|1h|4h)$")                 # about 4 years of 4H candles
 _MAX_OUTPUT = 100_000
 _MAX_JOBS = 20
 
