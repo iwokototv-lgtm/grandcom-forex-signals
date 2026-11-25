@@ -195,6 +195,8 @@ _VALID_STRATEGY_MODES: frozenset = frozenset({
     "trend_breakout",
     "ma_adx",
     "pullback",
+    "tb_union",
+    "tb_confirmed",
     "all",
 })
 
@@ -224,6 +226,8 @@ _MODE_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
     "trend_breakout": 50.0,
     "ma_adx":         50.0,
     "pullback":       50.0,
+    "tb_union":       50.0,
+    "tb_confirmed":   70.0,   # the old logic keeps its own 70% gate
 }
 
 
@@ -1040,6 +1044,15 @@ async def _run_walkforward(
     elif strategy_mode == "pullback":
         from ml_engine.research_strategies import pullback_series
         tb_signals = pullback_series(df_4h_full)
+    elif strategy_mode in ("tb_union", "tb_confirmed"):
+        from ml_engine.trend_breakout import trend_breakout_series
+        _fast = trend_breakout_series(df_4h_full, 55, 100)
+        if strategy_mode == "tb_union":
+            # N55 first; the slow breakout (120 / EMA300) only when N55 is silent.
+            _slow = trend_breakout_series(df_4h_full, 120, 300)
+            tb_signals = _fast.where(_fast != "NEUTRAL", _slow)
+        else:
+            tb_signals = _fast
     # Optional trend filter: only trade in the direction of the EMA (BT_TREND_EMA = period)
     _trend_ema_n = int(_env_float("BT_TREND_EMA") or 0)
     trend_ema = (
@@ -1119,7 +1132,9 @@ async def _run_walkforward(
         _price_data_arg = price_data if len(price_data) >= 2 else None
 
         # ── Call production signal ───────────────────────────────────────────
-        if strategy_mode in ("trend_breakout", "ma_adx", "pullback"):
+        if strategy_mode == "tb_confirmed" and tb_signals.iloc[idx] == "NEUTRAL":
+            signal_result = {"signal": "NEUTRAL", "confidence": 0.0, "meets_threshold": False}
+        elif strategy_mode in ("trend_breakout", "ma_adx", "pullback", "tb_union"):
             # Research candidate: precomputed, no lookahead (see ml_engine/trend_breakout.py)
             _tb = tb_signals.iloc[idx]
             signal_result = {
@@ -1149,7 +1164,7 @@ async def _run_walkforward(
                         df_4h=df_4h_window,
                         df_daily=df_daily_window,
                         price_data=_price_data_arg,
-                        strategy_mode=strategy_mode,
+                        strategy_mode="original" if strategy_mode == "tb_confirmed" else strategy_mode,
                         corr_dfs=corr_dfs,
                     ),
                     timeout=15.0,
@@ -1168,6 +1183,8 @@ async def _run_walkforward(
 
         result.signals_raw += 1
         signal     = signal_result.get("signal", "NEUTRAL")
+        if strategy_mode == "tb_confirmed" and signal != tb_signals.iloc[idx]:
+            signal = "NEUTRAL"           # old logic must agree with the breakout's direction
         # "original" mode returns confidence as a 0-1 fraction and also provides
         # confidence_pct (0-100); the other modes return a percentage in
         # "confidence". Thresholds are percentages, so prefer confidence_pct
@@ -1856,7 +1873,7 @@ async def _main_async() -> None:
         run_modes = ["consensus"]
     elif STRATEGY_MODE == "original":
         run_modes = ["original"]
-    elif STRATEGY_MODE in ("trend_breakout", "ma_adx", "pullback"):
+    elif STRATEGY_MODE in ("trend_breakout", "ma_adx", "pullback", "tb_union", "tb_confirmed"):
         run_modes = [STRATEGY_MODE]
     else:
         # Should never reach here because the module-level guard already

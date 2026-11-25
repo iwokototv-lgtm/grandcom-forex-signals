@@ -31,7 +31,7 @@ _SCRIPTS = {
     "twelvedata": "backtest_twelvedata.py",
     "production": "backtest_production_signal.py",
 }
-_STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "trend_breakout", "ma_adx", "pullback", "all"}
+_STRATEGY_MODES = {"original", "mean_reversion", "price_action", "macro_filtered", "consensus", "trend_breakout", "ma_adx", "pullback", "tb_union", "tb_confirmed", "all"}
 _TIMEOUT_SECONDS = 20 * 60          # default; longer runs get more, see _timeout_for()
 _MAX_CANDLES = 6000
 # Experiment knobs a caller may set for the "production" backtest. Values must
