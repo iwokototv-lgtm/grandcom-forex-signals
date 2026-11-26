@@ -150,13 +150,13 @@ class StartupValidator:
                     ),
                 }
 
-            # Test 3: 3/3 must produce 90% confidence
+            # Test 3: 3/3 must yield the weighted score of A+B+C (0.40+0.25+0.20 = 85%)
             result_3of3 = hybrid._apply_consensus_logic("BUY", "BUY", "BUY")
-            if result_3of3["confidence"] != 90:
+            if result_3of3["confidence"] != 85:
                 return {
                     "passed": False,
                     "error": (
-                        f"3/3 consensus should yield 90% confidence, "
+                        f"3/3 consensus should yield 85% confidence (A+B+C weights), "
                         f"got {result_3of3['confidence']}%"
                     ),
                 }
