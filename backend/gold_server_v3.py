@@ -1009,6 +1009,7 @@ async def generate_trend_breakout_signal(pair: str, strategy: str = "trend_break
     signal_type = latest_signal(df, TB_BREAKOUT_N, TB_EMA)
     candle_time = str(df["datetime"].iloc[-1])
     logger.info(f"[{pair}] {strategy}: last closed candle {candle_time} -> {signal_type}")
+    _tb_scan_results[f"{pair}|{strategy}"] = signal_type
     if signal_type not in ("BUY", "SELL"):
         return
 
@@ -1728,6 +1729,30 @@ async def generate_signal(pair: str) -> None:
 # ---------------------------------------------------------------------------
 # Scheduler — Signal Generation (cron-based, aligned to 4H candle closes)
 # ---------------------------------------------------------------------------
+_tb_scan_results: dict[str, str] = {}
+
+
+async def _send_tb_heartbeat() -> None:
+    """Post one plain info line after each trend_breakout scan.
+
+    Wording avoids BUY/SELL and prices so the MT5 copier does not read it as a trade.
+    """
+    total = len(PAIRS) * len(TB_ACTIVE)
+    checked = len(_tb_scan_results)
+    breakouts = sum(1 for v in _tb_scan_results.values() if v in ("BUY", "SELL"))
+    now = datetime.now(timezone.utc).strftime("%H:%M")
+    text = (
+        f"Hourly scan {now} UTC: {total} checks, {breakouts} breakout(s) found, "
+        f"{total - checked} skipped (news, risk halt or no fresh data). "
+        "Info only, no trade is opened by this message."
+    )
+    try:
+        await get_bot().send_message(chat_id=TELEGRAM_CHANNEL_ID, text=text)
+        logger.info(f"[SIGNAL_GEN] heartbeat sent: {breakouts} breakout(s) of {total}")
+    except Exception as exc:
+        logger.error(f"[SIGNAL_GEN] heartbeat send failed: {exc}")
+
+
 async def run_signal_generation() -> None:
     """Generate signals only on NEW H4 candle confirmation.
 
@@ -1748,6 +1773,7 @@ async def run_signal_generation() -> None:
         # trend_breakout keeps its own per-candle de-duplication (candle_time in the
         # database), so it bypasses the legacy candle tracker.
         logger.info("[SIGNAL_GEN] Starting trend_breakout scan")
+        _tb_scan_results.clear()
         for pair in PAIRS:
             try:
                 for _name in TB_ACTIVE:
@@ -1756,6 +1782,7 @@ async def run_signal_generation() -> None:
                 logger.error(f"[SIGNAL_GEN] [{pair}] trend_breakout error: {exc}", exc_info=True)
             await asyncio.sleep(2)
         logger.info("[SIGNAL_GEN] trend_breakout scan complete")
+        await _send_tb_heartbeat()
         return
 
     logger.info("[SIGNAL_GEN] Starting cron-triggered market scan")
