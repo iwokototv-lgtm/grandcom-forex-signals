@@ -2216,7 +2216,7 @@ async def scan_status_page():
     jobs = {j.id: j.next_run_time for j in scheduler.get_jobs()}
     next_runs = [
         (name, str(jobs[name]))
-        for name in ("run_signal_generation", "run_position_monitoring")
+        for name in ("signal_generation_cron", "position_monitoring_cron")
         if name in jobs
     ]
     mode = "trend_breakout" if TB_LIVE else "legacy hybrid"
