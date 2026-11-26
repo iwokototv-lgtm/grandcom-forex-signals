@@ -1523,6 +1523,22 @@ def print_pair_report(result: PairResult) -> None:
     print(f"\n{_SEP2}\n")
 
 
+def print_trade_list(results: List[PairResult]) -> None:
+    """One line per simulated strategy trade (IS and OOS), printed early so the
+    API output cap does not cut it. Enabled with BT_TRADE_LIST=1.
+    Fields: TRADE split pair direction entry_time result net_pnl atr_at_entry sl_dist"""
+    print("TRADE_LIST_BEGIN split pair dir entry_time result net_pnl atr sl_dist", flush=True)
+    for r in results:
+        for split, stats in (("IS", r.in_sample), ("OOS", r.out_sample)):
+            for t in stats.trades:
+                print(
+                    f"TRADE {split} {r.pair} {t.direction} {t.entry_time.isoformat()} "
+                    f"{t.result} {t.net_pnl:.6f} {t.atr_at_entry:.5f} {abs(t.entry_price - t.sl_price):.5f}",
+                    flush=True,
+                )
+    print("TRADE_LIST_END", flush=True)
+
+
 def print_combined_summary(results: List[PairResult]) -> None:
     """Print a combined summary across all pairs."""
     if len(results) < 2:
@@ -1983,6 +1999,9 @@ async def _main_async() -> None:
             corr_dfs=corr_dfs,
         )
         mode_results[mode] = results
+
+        if os.environ.get("BT_TRADE_LIST", "").strip().lower() in ("1", "true", "yes", "on"):
+            print_trade_list(results)
 
         for result in results:
             print_pair_report(result)
