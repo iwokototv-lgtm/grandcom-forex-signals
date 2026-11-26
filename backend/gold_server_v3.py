@@ -19,6 +19,9 @@ import ta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+
+import scan_status
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Bot
 
@@ -1010,6 +1013,7 @@ async def generate_trend_breakout_signal(pair: str, strategy: str = "trend_break
     candle_time = str(df["datetime"].iloc[-1])
     logger.info(f"[{pair}] {strategy}: last closed candle {candle_time} -> {signal_type}")
     _tb_scan_results[f"{pair}|{strategy}"] = signal_type
+    scan_status.record(pair, strategy, signal_type, candle=candle_time)
     if signal_type not in ("BUY", "SELL"):
         return
 
@@ -1249,6 +1253,7 @@ async def generate_signal(pair: str) -> None:
     try:
         signal_type = str(hybrid_ctx.get("hybrid_signal", "NEUTRAL")).upper()
         confidence  = float(hybrid_ctx.get("hybrid_confidence", 0.0))
+        scan_status.record(pair, "legacy", signal_type, confidence=confidence)
         entry       = float(hybrid_ctx.get("entry", 0) or ind["price"])
         if entry <= 0:
             entry = ind["price"]
@@ -2205,6 +2210,31 @@ app.include_router(backtest_router)
 # ---------------------------------------------------------------------------
 # Endpoint 1: Health Check
 # ---------------------------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+async def scan_status_page():
+    """Read-only page: last scan result per pair and the next scheduled runs."""
+    jobs = {j.id: j.next_run_time for j in scheduler.get_jobs()}
+    next_runs = [
+        (name, str(jobs[name]))
+        for name in ("run_signal_generation", "run_position_monitoring")
+        if name in jobs
+    ]
+    mode = "trend_breakout" if TB_LIVE else "legacy hybrid"
+    return scan_status.render_html(
+        scan_status.snapshot(), next_runs, f"{mode}, {SIGNAL_GEN_SCHEDULE}"
+    )
+
+
+@app.get("/api/scan-status")
+async def scan_status_json():
+    """JSON form of the scan status page."""
+    return {
+        "mode": "trend_breakout" if TB_LIVE else "legacy",
+        "schedule": SIGNAL_GEN_SCHEDULE,
+        "results": scan_status.snapshot(),
+    }
+
+
 @app.get("/api/health")
 async def health():
     """Railway health check endpoint."""
