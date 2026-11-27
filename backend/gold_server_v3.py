@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
+import pineconnector_output
 import scan_status
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Bot
@@ -1648,6 +1649,9 @@ async def generate_signal(pair: str) -> None:
             risk_status=risk_status,
             engine_detail=_engine_detail_text(hybrid_ctx),
         )
+
+        # Optional PineConnector alert (off by default; never raises)
+        await pineconnector_output.send_signal(pair, signal_type)
 
         if tg_sent:
             telegram_sent = True
