@@ -1,10 +1,10 @@
 """Optional PineConnector output for legacy BUY/SELL signals.
 
 Off unless PINECONNECTOR_ENABLED=true AND PINECONNECTOR_WEBHOOK_URL and
-PINECONNECTOR_KEY are set. Only XAUUSD is sent. Failures are logged and
+PINECONNECTOR_KEY are set. Only XAUUSD and XAUEUR are sent. Failures are logged and
 never raised, so a PineConnector problem cannot block the Telegram post.
 
-Message format (PineConnector alert):  KEY,buy|sell,XAUUSD,vol_lots=X
+Message format (PineConnector alert):  KEY,buy|sell,PAIR,vol_lots=X
 The Telegram copier and PineConnector must not both trade the same
 signal; enable only one of them for XAUUSD.
 """
@@ -17,7 +17,7 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-PAIR = "XAUUSD"
+PAIRS = ("XAUUSD", "XAUEUR")
 
 
 def is_enabled() -> bool:
@@ -30,10 +30,10 @@ def is_enabled() -> bool:
 
 def build_alert(pair: str, signal: str, vol_lots: str) -> Optional[str]:
     """Return the alert text, or None when this signal is not sent."""
-    if pair != PAIR or signal not in ("BUY", "SELL"):
+    if pair not in PAIRS or signal not in ("BUY", "SELL"):
         return None
     key = os.environ.get("PINECONNECTOR_KEY", "").strip()
-    return f"{key},{signal.lower()},{PAIR},vol_lots={vol_lots}"
+    return f"{key},{signal.lower()},{pair},vol_lots={vol_lots}"
 
 
 async def send_signal(pair: str, signal: str) -> bool:

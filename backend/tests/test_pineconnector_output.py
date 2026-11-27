@@ -17,11 +17,12 @@ def test_disabled_by_default(monkeypatch):
     assert asyncio.run(p.send_signal("XAUUSD", "BUY")) is False
 
 
-def test_build_alert_xauusd_only(monkeypatch):
+def test_build_alert_gold_pairs_only(monkeypatch):
     _env(monkeypatch, PINECONNECTOR_KEY="60123456789")
     assert p.build_alert("XAUUSD", "BUY", "0.01") == "60123456789,buy,XAUUSD,vol_lots=0.01"
     assert p.build_alert("XAUUSD", "SELL", "0.01") == "60123456789,sell,XAUUSD,vol_lots=0.01"
-    assert p.build_alert("XAUEUR", "BUY", "0.01") is None
+    assert p.build_alert("XAUEUR", "BUY", "0.01") == "60123456789,buy,XAUEUR,vol_lots=0.01"
+    assert p.build_alert("EURUSD", "BUY", "0.01") is None
     assert p.build_alert("XAUUSD", "NEUTRAL", "0.01") is None
 
 
