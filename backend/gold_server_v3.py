@@ -668,6 +668,25 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _engine_detail_text(ctx: dict) -> Optional[str]:
+    """One line: each component's vote and the weighted consensus scores."""
+    from ml_engine.hybrid_portfolio_system_v3 import CONSENSUS_THRESHOLD
+
+    votes = ctx.get("component_votes") or {}
+    if not votes:
+        return None
+    names = {"A_trend": "A trend", "B_sr": "B S/R", "C_mtf": "C MTF", "D_vol": "D volume"}
+    vote_txt = ", ".join(f"{names.get(k, k)} {v}" for k, v in votes.items())
+    scores = ctx.get("weighted_scores") or {}
+    score_txt = ""
+    if "buy" in scores and "sell" in scores:
+        score_txt = (
+            f" | BUY {scores['buy']:.2f}, SELL {scores['sell']:.2f}, "
+            f"needs {CONSENSUS_THRESHOLD:.2f}"
+        )
+    return vote_txt + score_txt
+
+
 async def send_to_telegram(
     pair: str,
     signal: str,
@@ -685,6 +704,7 @@ async def send_to_telegram(
     risk_status: Optional[dict] = None,
     max_retries: int = 3,
     strategy_label: Optional[str] = None,
+    engine_detail: Optional[str] = None,
 ) -> bool:
     """Send signal to Telegram with v3.0 context + risk/position data.
 
@@ -724,6 +744,9 @@ async def send_to_telegram(
             f"| Grandcom Gold Engine</i>"
         )
     else:
+        detail_line = (
+            f"<b>🔍 Engine:</b> {_html_escape(engine_detail)}\n" if engine_detail else ""
+        )
         info_msg = (
             f"<b>📊 R:R:</b> 1:{rr}  "
             f"<b>⚡ Confidence:</b> {confidence}%\n"
@@ -735,6 +758,7 @@ async def send_to_telegram(
             f"<b>📉 Daily P&L:</b> ${daily_pnl:+.2f} ({daily_loss_pct:.1f}%)  "
             f"<b>📉 Drawdown:</b> {drawdown_pct:.1f}%\n"
             f"<b>🛡 Risk:</b> {risk_emoji} {risk_level}\n"
+            f"{detail_line}"
             f"<b>📝</b> {_html_escape(analysis)}\n"
             f"<i>⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
             f"| Grandcom Gold Engine v3.0</i>"
@@ -1233,6 +1257,7 @@ async def generate_signal(pair: str) -> None:
                 "regime_weights": hybrid_result.get("regime_weights", {}),
                 "confidence_score_v34": hybrid_result.get("confidence_score_v34", 0.0),
                 "component_votes": hybrid_result.get("component_votes", {}),
+                "weighted_scores": hybrid_result.get("weighted_scores", {}),
             }
             logger.info(
                 f"[{pair}] Hybrid v3.4: signal={hybrid_ctx['hybrid_signal']} "
@@ -1587,6 +1612,7 @@ async def generate_signal(pair: str) -> None:
             position_count=pos_summary.get("total_open", 0),
             exposure_pct=pos_summary.get("exposure_pct", 0.0),
             risk_status=risk_status,
+            engine_detail=_engine_detail_text(hybrid_ctx),
         )
 
         if tg_sent:
