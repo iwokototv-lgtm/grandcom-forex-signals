@@ -1,7 +1,9 @@
 """Optional PineConnector output for legacy BUY/SELL signals.
 
-Off unless PINECONNECTOR_ENABLED=true AND PINECONNECTOR_WEBHOOK_URL and
-PINECONNECTOR_KEY are set. Only XAUUSD and XAUEUR are sent. Failures are logged and
+Off unless PINECONNECTOR_ENABLED=true AND PINECONNECTOR_WEBHOOK_URL are set.
+Each pair uses its own PineConnector key: PINECONNECTOR_KEY_XAUUSD or
+PINECONNECTOR_KEY_XAUEUR (one license per pair). A pair with no key is not sent.
+Only XAUUSD and XAUEUR are sent. Failures are logged and
 never raised, so a PineConnector problem cannot block the Telegram post.
 
 Message format (PineConnector alert):  KEY,buy|sell,PAIR,vol_lots=X
@@ -20,11 +22,15 @@ logger = logging.getLogger(__name__)
 PAIRS = ("XAUUSD", "XAUEUR")
 
 
+def key_for(pair: str) -> str:
+    """PineConnector key for one pair, or '' when not set."""
+    return os.environ.get(f"PINECONNECTOR_KEY_{pair}", "").strip()
+
+
 def is_enabled() -> bool:
     return (
         os.environ.get("PINECONNECTOR_ENABLED", "false").strip().lower() == "true"
         and bool(os.environ.get("PINECONNECTOR_WEBHOOK_URL", "").strip())
-        and bool(os.environ.get("PINECONNECTOR_KEY", "").strip())
     )
 
 
@@ -32,7 +38,9 @@ def build_alert(pair: str, signal: str, vol_lots: str) -> Optional[str]:
     """Return the alert text, or None when this signal is not sent."""
     if pair not in PAIRS or signal not in ("BUY", "SELL"):
         return None
-    key = os.environ.get("PINECONNECTOR_KEY", "").strip()
+    key = key_for(pair)
+    if not key:
+        return None
     return f"{key},{signal.lower()},{pair},vol_lots={vol_lots}"
 
 
