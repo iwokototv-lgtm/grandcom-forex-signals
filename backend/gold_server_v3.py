@@ -687,6 +687,35 @@ def _engine_detail_text(ctx: dict) -> Optional[str]:
     return vote_txt + score_txt
 
 
+def _tradingview_summary_text(pair: str) -> Optional[str]:
+    """Info-only TradingView 4h summary for XAUUSD. Returns None on any failure."""
+    if pair != "XAUUSD":
+        return None
+    try:
+        from tradingview_ta import TA_Handler, Interval
+        handler = TA_Handler(
+            symbol="XAUUSD", exchange="OANDA", screener="cfd",
+            interval=Interval.INTERVAL_4_HOURS,
+        )
+        summ = handler.get_analysis().summary
+        return (
+            f"TradingView 4h: {summ['RECOMMENDATION']} "
+            f"({summ['BUY']} buy / {summ['SELL']} sell / {summ['NEUTRAL']} neutral)"
+        )
+    except Exception as exc:
+        logger.warning("TradingView summary unavailable: %s", exc)
+        return None
+
+
+async def _tradingview_summary_async(pair: str) -> Optional[str]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_tradingview_summary_text, pair), timeout=10
+        )
+    except Exception:
+        return None
+
+
 async def send_to_telegram(
     pair: str,
     signal: str,
@@ -747,6 +776,11 @@ async def send_to_telegram(
         detail_line = (
             f"<b>🔍 Engine:</b> {_html_escape(engine_detail)}\n" if engine_detail else ""
         )
+        tv_summary = await _tradingview_summary_async(pair)
+        tv_line = (
+            f"<b>📺 TradingView:</b> {_html_escape(tv_summary)}\n" if tv_summary else ""
+        )
+        detail_line = detail_line + tv_line
         info_msg = (
             f"<b>📊 R:R:</b> 1:{rr}  "
             f"<b>⚡ Confidence:</b> {confidence}%\n"
